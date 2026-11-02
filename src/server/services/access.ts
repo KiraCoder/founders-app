@@ -2,7 +2,7 @@ import "server-only";
 import { and, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { companies, metricDefinitions, people, personCompanies, salaryViewers, taskEvents, tasks } from "@/server/db/schema";
+import { companies, metricDefinitions, people, personCompanies, salaryViewers, taskEvents, tasks, users } from "@/server/db/schema";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 
@@ -90,10 +90,14 @@ export function assertValidId(id: unknown, what: string): asserts id is string {
  * (`visibleLinksWhere`).
  */
 export async function isSalaryViewer(ctx: ServiceContext): Promise<boolean> {
+  // Re-checked in the database on every call: the user must still be a founder (a staff
+  // account left in salary_viewers, or a stale session role, gets nothing).
+  if (ctx.user.role !== "founder") return false;
   const [row] = await ctx.db
     .select({ userId: salaryViewers.userId })
     .from(salaryViewers)
-    .where(eq(salaryViewers.userId, ctx.user.id))
+    .innerJoin(users, eq(users.id, salaryViewers.userId))
+    .where(and(eq(salaryViewers.userId, ctx.user.id), eq(users.role, "founder")))
     .limit(1);
   return !!row;
 }

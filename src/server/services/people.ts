@@ -10,8 +10,12 @@ import {
   type LinkUpdateInput,
   type PeopleFilters,
   type PersonCreateInput,
+  personPatchSchema,
+  type PersonPatchInput,
   type PersonUpdateInput,
 } from "@/lib/people-schemas";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import { zonedTimeToUtc } from "@/lib/dates";
 import type { Db } from "@/server/db/connect";
 import {
   companies,
@@ -82,6 +86,11 @@ export interface SalaryReadOptions {
 }
 
 const escapeLike = (s: string) => s.replace(/[\\%_]/g, (m) => `\\${m}`);
+
+/** Search treats ё and е as the same letter ("Алёна" = "Алена"). */
+const yoToE = (s: string) => s.replace(/ё/g, "е").replace(/Ё/g, "Е");
+const yoInsensitiveLike = (column: AnyPgColumn, pattern: string): SQL =>
+  sql`translate(coalesce(${column}, ''), 'ёЁ', 'еЕ') ilike ${pattern}`;
 
 async function loadLinks(ctx: ServiceContext, personIds: string[] | null, where?: SQL): Promise<(PersonLinkView & { personId: string })[]> {
   if (personIds && personIds.length === 0) return [];
@@ -186,10 +195,11 @@ export async function listPeople(
   let qWhere: SQL | undefined;
   if (f.q) {
     const pattern = `%${escapeLike(f.q)}%`;
+    const yoPattern = `%${escapeLike(yoToE(f.q))}%`;
     const digits = f.q.replace(/\D/g, "");
     qWhere = or(
-      ilike(people.fullName, pattern),
-      ilike(people.shortName, pattern),
+      yoInsensitiveLike(people.fullName, yoPattern),
+      yoInsensitiveLike(people.shortName, yoPattern),
       ilike(people.phone, pattern),
       ilike(people.telegramHandle, `%${escapeLike(f.q.replace(/^@/, ""))}%`),
       ilike(people.email, pattern),
@@ -199,7 +209,12 @@ export async function listPeople(
         ctx.db
           .select({ id: personCompanies.personId })
           .from(personCompanies)
-          .where(and(visibleLinksWhere(ctx), or(ilike(personCompanies.role, pattern), ilike(personCompanies.title, pattern)))),
+          .where(
+            and(
+              visibleLinksWhere(ctx),
+              or(yoInsensitiveLike(personCompanies.role, yoPattern), yoInsensitiveLike(personCompanies.title, yoPattern)),
+            ),
+          ),
       ),
     );
   }
@@ -340,6 +355,9 @@ export async function updatePerson(ctx: ServiceContext, id: string, input: Perso
   const data = personUpdateSchema.parse(input);
   await getPerson(ctx, id); // visibility + not_found
   const { status, leftOn, ...fields } = data;
+  if (leftOn && leftOn > today(ctx)) {
+    throw new ServiceError("validation", "The leaving date can't be in the future", { leftOn: ["Can't be in the future"] });
+  }
   await inTx(ctx, async (tx) => {
     if (Object.keys(fields).length > 0) {
       await tx.db
@@ -348,20 +366,42 @@ export async function updatePerson(ctx: ServiceContext, id: string, input: Perso
         .where(eq(people.id, id));
     }
     if (status === "left") await markLeft(tx, id, leftOn ?? null);
-    if (status === "active") {
-      await tx.db.update(people).set({ leftAt: null, updatedAt: ctx.now }).where(eq(people.id, id));
-    }
+    if (status === "active") await undoLeft(tx, id);
   });
   return getPerson(ctx, id);
 }
 
+/**
+ * Marks a person as left on `leftOn` (default today, Asia/Bishkek): `left_at` is that
+ * day (start of day, or now for today) and every active company link is ended on that
+ * date and flagged `ended_by_leave`. Already left: nothing changes.
+ */
 async function markLeft(ctx: ServiceContext, id: string, leftOn: string | null) {
-  const endedOn = leftOn ?? today(ctx);
-  await ctx.db.update(people).set({ leftAt: ctx.now, updatedAt: ctx.now }).where(and(eq(people.id, id), isNull(people.leftAt)));
+  const t = today(ctx);
+  const endedOn = leftOn ?? t;
+  const leftAt = endedOn === t ? ctx.now : zonedTimeToUtc(endedOn, "00:00", ctx.timeZone);
+  const changed = await ctx.db
+    .update(people)
+    .set({ leftAt, updatedAt: ctx.now })
+    .where(and(eq(people.id, id), isNull(people.leftAt)))
+    .returning({ id: people.id });
+  if (changed.length === 0) return;
   await ctx.db
     .update(personCompanies)
-    .set({ isActive: false, endedOn, updatedAt: ctx.now })
+    .set({ isActive: false, endedOn, endedByLeave: true, updatedAt: ctx.now })
     .where(and(eq(personCompanies.personId, id), eq(personCompanies.isActive, true), visibleLinksWhere(ctx)));
+}
+
+/**
+ * Undo "left": the person is active again and exactly the links that "mark as left"
+ * ended come back (active, no end date). Links ended by hand stay ended.
+ */
+async function undoLeft(ctx: ServiceContext, id: string) {
+  await ctx.db.update(people).set({ leftAt: null, updatedAt: ctx.now }).where(eq(people.id, id));
+  await ctx.db
+    .update(personCompanies)
+    .set({ isActive: true, endedOn: null, endedByLeave: false, updatedAt: ctx.now })
+    .where(and(eq(personCompanies.personId, id), eq(personCompanies.endedByLeave, true), visibleLinksWhere(ctx)));
 }
 
 /**
@@ -398,7 +438,8 @@ export async function updatePersonLink(ctx: ServiceContext, linkId: string, inpu
       );
     if (dupe) throw new ServiceError("conflict", "This person already has this role in this company");
   }
-  const set: Partial<typeof personCompanies.$inferInsert> = { updatedAt: ctx.now };
+  // A link edited by hand is no longer "ended by mark as left" (undo leaves it alone).
+  const set: Partial<typeof personCompanies.$inferInsert> = { updatedAt: ctx.now, endedByLeave: false };
   if (data.unitId !== undefined) set.unitId = data.unitId;
   if (data.role !== undefined) set.role = data.role;
   if (data.title !== undefined) set.title = data.title;
@@ -410,11 +451,13 @@ export async function updatePersonLink(ctx: ServiceContext, linkId: string, inpu
     if (!data.isActive && data.endedOn === undefined) set.endedOn = link.endedOn ?? today(ctx);
     if (data.isActive && data.endedOn === undefined) set.endedOn = null;
   }
-  await ctx.db.update(personCompanies).set(set).where(eq(personCompanies.id, linkId));
-  if (data.isActive) {
-    // Re-activating a link brings the person back to the active lists.
-    await ctx.db.update(people).set({ leftAt: null, updatedAt: ctx.now }).where(eq(people.id, link.personId));
-  }
+  await inTx(ctx, async (tx) => {
+    await tx.db.update(personCompanies).set(set).where(eq(personCompanies.id, linkId));
+    if (data.isActive) {
+      // Re-activating a link brings the person back to the active lists.
+      await tx.db.update(people).set({ leftAt: null, updatedAt: ctx.now }).where(eq(people.id, link.personId));
+    }
+  });
   return getPerson(ctx, link.personId);
 }
 
@@ -427,8 +470,40 @@ export async function addPersonSalary(
 ): Promise<PersonView> {
   await assertSalaryViewer(ctx);
   const link = await loadVisibleLink(ctx, linkId);
-  await addSalary(ctx, linkId, input, scope);
+  await addSalary(ctx, linkId, input, scope); // salary row + audit row in one transaction
   return getPerson(ctx, link.personId);
+}
+
+/**
+ * One PATCH of the REST API (`/api/v1/people/:id`): person fields, new links, link edits
+ * and salary rows, ALL in one transaction. Everything is checked before anything is
+ * written (salary permission, link ids belong to this person, no duplicate link + date
+ * salaries), and any later failure rolls the whole request back.
+ */
+export async function patchPerson(ctx: ServiceContext, id: string, rawInput: PersonPatchInput): Promise<PersonView> {
+  const input = personPatchSchema.parse(rawInput);
+  if (input.addSalaries?.length || input.addLinks?.some((l) => l.salary)) await assertSalaryViewer(ctx);
+  const before = await getPerson(ctx, id);
+  const linkIds = new Set(before.roles.map((r) => r.id));
+  for (const u of input.updateLinks ?? []) {
+    if (!linkIds.has(u.id)) throw new ServiceError("not_found", "Company link not found");
+  }
+  const seen = new Set<string>();
+  for (const s of input.addSalaries ?? []) {
+    if (!linkIds.has(s.linkId)) throw new ServiceError("not_found", "Company link not found");
+    const key = `${s.linkId}|${s.salary.effectiveFrom ?? today(ctx)}`;
+    if (seen.has(key)) {
+      throw new ServiceError("validation", "Two salaries for the same role and date in one request; send one");
+    }
+    seen.add(key);
+  }
+  await inTx(ctx, async (tx) => {
+    if (input.person) await updatePerson(tx, id, input.person);
+    for (const l of input.addLinks ?? []) await addPersonLink(tx, id, l, "api");
+    for (const u of input.updateLinks ?? []) await updatePersonLink(tx, u.id, u.changes);
+    for (const s of input.addSalaries ?? []) await addSalary(tx, s.linkId, s.salary, "api");
+  });
+  return getPerson(ctx, id, { salaryScope: "api" });
 }
 
 // ---------------------------------------------------------------------------
@@ -441,8 +516,9 @@ export interface Headcount {
 }
 
 /**
- * Active people per unit of a company. Founders (role "founder") are not counted: they
- * are linked to every company and would inflate every headcount.
+ * Active people per unit of a company. Founders (people with an app account,
+ * `people.user_id` set) are not counted: they are linked to every company and would
+ * inflate every headcount. Their role text does not matter.
  */
 export async function companyHeadcount(ctx: ServiceContext, companyId: string): Promise<Headcount> {
   await assertCompanyAccess(ctx, companyId);
@@ -453,7 +529,7 @@ export async function companyHeadcount(ctx: ServiceContext, companyId: string): 
       .where(and(eq(companyUnits.companyId, companyId), isNull(companyUnits.archivedAt)))
       .orderBy(asc(companyUnits.sort)),
     ctx.db
-      .select({ personId: personCompanies.personId, unitId: personCompanies.unitId, role: personCompanies.role })
+      .select({ personId: personCompanies.personId, unitId: personCompanies.unitId })
       .from(personCompanies)
       .innerJoin(people, eq(people.id, personCompanies.personId))
       .where(
@@ -461,17 +537,18 @@ export async function companyHeadcount(ctx: ServiceContext, companyId: string): 
           eq(personCompanies.companyId, companyId),
           eq(personCompanies.isActive, true),
           isNull(people.leftAt),
+          isNull(people.userId),
           visibleLinksWhere(ctx),
         ),
       ),
   ]);
-  const counted = rows.filter((r) => r.role !== "founder");
+
   const perUnit = new Map<string | null, Set<string>>();
-  for (const r of counted) (perUnit.get(r.unitId) ?? perUnit.set(r.unitId, new Set()).get(r.unitId)!).add(r.personId);
+  for (const r of rows) (perUnit.get(r.unitId) ?? perUnit.set(r.unitId, new Set()).get(r.unitId)!).add(r.personId);
   const byUnit: Headcount["byUnit"] = units.map((u) => ({ unitId: u.id, unitName: u.name, count: perUnit.get(u.id)?.size ?? 0 }));
   const noUnit = perUnit.get(null)?.size ?? 0;
   if (noUnit > 0 || units.length === 0) byUnit.push({ unitId: null, unitName: units.length ? "No unit" : "All", count: noUnit });
-  return { total: new Set(counted.map((r) => r.personId)).size, byUnit };
+  return { total: new Set(rows.map((r) => r.personId)).size, byUnit };
 }
 
 /** Companies + units for pickers (filters, link forms, importer). */

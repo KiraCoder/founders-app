@@ -170,3 +170,15 @@ export function normalizePhone(phone: string | null | undefined): string {
   if (digits.startsWith("0") && digits.length === 10) return digits.slice(1);
   return digits;
 }
+
+/** PATCH /api/v1/people/:id in the structured form (applied in one transaction). */
+export const personPatchSchema = z
+  .object({
+    person: personUpdateSchema.optional(),
+    addLinks: z.array(linkCreateSchema).max(20).optional(),
+    updateLinks: z.array(z.object({ id: z.uuid(), changes: linkUpdateSchema }).strict()).max(20).optional(),
+    /** Salary viewers only: new salary rows (history is kept). */
+    addSalaries: z.array(z.object({ linkId: z.uuid(), salary: salaryInputSchema }).strict()).max(20).optional(),
+  })
+  .strict();
+export type PersonPatchInput = z.input<typeof personPatchSchema>;

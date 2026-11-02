@@ -10,6 +10,7 @@ import {
   users,
   type SalaryPayType,
 } from "@/server/db/schema";
+import type { Db } from "@/server/db/connect";
 import { assertSalaryViewer, assertValidId, isSalaryViewer, visibleLinksWhere } from "./access";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
@@ -87,7 +88,7 @@ const salaryColumns = {
 
 /**
  * Current salary per link: the latest `effective_from` on or before today (ties: newest
- * row). Links without a current salary are absent from the map. Viewer only.
+ * row, by created_at and then insert order `seq`). Links without a current salary are absent from the map. Viewer only.
  */
 export async function currentSalaries(ctx: ServiceContext, linkIds: string[]): Promise<Map<string, SalaryView>> {
   await assertSalaryViewer(ctx);
@@ -101,7 +102,7 @@ export async function currentSalaries(ctx: ServiceContext, linkIds: string[]): P
     .where(
       and(inArray(salaries.personCompanyId, linkIds), lte(salaries.effectiveFrom, today(ctx)), visibleLinksWhere(ctx)),
     )
-    .orderBy(desc(salaries.effectiveFrom), desc(salaries.createdAt));
+    .orderBy(desc(salaries.effectiveFrom), desc(salaries.createdAt), desc(salaries.seq));
   for (const { personCompanyId, ...r } of rows) {
     if (!out.has(personCompanyId)) out.set(personCompanyId, toView(r));
   }
@@ -119,7 +120,7 @@ export async function salaryHistory(ctx: ServiceContext, linkIds: string[]): Pro
     .innerJoin(personCompanies, eq(personCompanies.id, salaries.personCompanyId))
     .leftJoin(users, eq(users.id, salaries.createdBy))
     .where(and(inArray(salaries.personCompanyId, linkIds), visibleLinksWhere(ctx)))
-    .orderBy(desc(salaries.effectiveFrom), desc(salaries.createdAt));
+    .orderBy(desc(salaries.effectiveFrom), desc(salaries.createdAt), desc(salaries.seq));
   for (const { personCompanyId, ...r } of rows) {
     (out.get(personCompanyId) ?? out.set(personCompanyId, []).get(personCompanyId)!).push(toView(r));
   }
@@ -146,7 +147,11 @@ export async function addSalary(
   if (!link) throw new ServiceError("not_found", "Company link not found");
 
   const effectiveFrom = data.effectiveFrom ?? today(ctx);
-  const [row] = await ctx.db
+  // The salary row and its audit row are written together or not at all (a savepoint
+  // when the caller is already in a transaction).
+  return ctx.db.transaction(async (rawTx) => {
+    const tx: ServiceContext = { ...ctx, db: rawTx as unknown as Db };
+    const [row] = await tx.db
     .insert(salaries)
     .values({
       personCompanyId,
@@ -159,14 +164,15 @@ export async function addSalary(
       createdAt: ctx.now,
     })
     .returning();
-  await logSalaryAccess(ctx, {
-    action: "change",
-    scope,
-    personId: link.personId,
-    personCompanyId,
-    details: { effectiveFrom, payType: row!.payType, currency: row!.currency },
+    await logSalaryAccess(tx, {
+      action: "change",
+      scope,
+      personId: link.personId,
+      personCompanyId,
+      details: { effectiveFrom, payType: row!.payType, currency: row!.currency },
+    });
+    return toView({ ...row!, createdByName: ctx.user.shortName });
   });
-  return toView({ ...row!, createdByName: ctx.user.shortName });
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +201,11 @@ export async function listSalaryViewers(ctx: ServiceContext): Promise<SalaryView
 /**
  * Grants or revokes salary access. Only an existing salary viewer may do this; the last
  * viewer cannot be removed (nobody could ever grant it again). Audited.
+ *
+ * Runs in one transaction that first locks every salary_viewers row (FOR UPDATE), so two
+ * founders revoking each other at the same moment are serialised: the second one sees
+ * the first revoke and is refused. The actor is re-checked under the lock, and the audit
+ * row is written in the same transaction.
  */
 export async function setSalaryViewer(ctx: ServiceContext, userId: string, enabled: boolean): Promise<void> {
   await assertSalaryViewer(ctx);
@@ -206,24 +217,28 @@ export async function setSalaryViewer(ctx: ServiceContext, userId: string, enabl
   if (!target) throw new ServiceError("not_found", "User not found");
   if (target.role !== "founder") throw new ServiceError("validation", "Only founders can be salary viewers for now");
 
-  if (enabled) {
-    const inserted = await ctx.db
-      .insert(salaryViewers)
-      .values({ userId, grantedBy: ctx.user.id, createdAt: ctx.now })
-      .onConflictDoNothing()
-      .returning({ userId: salaryViewers.userId });
-    if (inserted.length > 0) {
-      await logSalaryAccess(ctx, { action: "grant_viewer", scope: "settings", targetUserId: userId });
+  await ctx.db.transaction(async (rawTx) => {
+    const tx: ServiceContext = { ...ctx, db: rawTx as unknown as Db };
+    const all = await tx.db.select({ userId: salaryViewers.userId }).from(salaryViewers).for("update");
+    if (!all.some((v) => v.userId === ctx.user.id)) {
+      throw new ServiceError("forbidden", "Only salary viewers can see or change salaries");
     }
-    return;
-  }
-  const all = await ctx.db.select({ userId: salaryViewers.userId }).from(salaryViewers);
-  if (!all.some((v) => v.userId === userId)) return;
-  if (all.length <= 1) {
-    throw new ServiceError("conflict", "At least one salary viewer must remain");
-  }
-  await ctx.db.delete(salaryViewers).where(eq(salaryViewers.userId, userId));
-  await logSalaryAccess(ctx, { action: "revoke_viewer", scope: "settings", targetUserId: userId });
+    if (enabled) {
+      const inserted = await tx.db
+        .insert(salaryViewers)
+        .values({ userId, grantedBy: ctx.user.id, createdAt: ctx.now })
+        .onConflictDoNothing()
+        .returning({ userId: salaryViewers.userId });
+      if (inserted.length > 0) {
+        await logSalaryAccess(tx, { action: "grant_viewer", scope: "settings", targetUserId: userId });
+      }
+      return;
+    }
+    if (!all.some((v) => v.userId === userId)) return;
+    if (all.length <= 1) throw new ServiceError("conflict", "At least one salary viewer must remain");
+    await tx.db.delete(salaryViewers).where(eq(salaryViewers.userId, userId));
+    await logSalaryAccess(tx, { action: "revoke_viewer", scope: "settings", targetUserId: userId });
+  });
 }
 
 export interface SalaryLogRow {

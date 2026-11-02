@@ -14,6 +14,7 @@
  */
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   date,
@@ -212,6 +213,11 @@ export const personCompanies = pgTable(
     employmentType: employmentTypeEnum("employment_type").notNull().default("staff"),
     /** False once the person stopped working for this company (ended_on keeps the date). */
     isActive: boolean("is_active").notNull().default(true),
+    /**
+     * True when this link was ended by "mark as left" (not by hand). Undoing "left" brings
+     * back exactly these links; any manual edit of the link clears it.
+     */
+    endedByLeave: boolean("ended_by_leave").notNull().default(false),
     startedOn: date("started_on", { mode: "string" }),
     endedOn: date("ended_on", { mode: "string" }),
     createdAt: createdAt(),
@@ -246,6 +252,8 @@ export const salaries = pgTable(
     note: text("note"),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: createdAt(),
+    /** Insert order: tie-breaker when two rows share link, effective_from and created_at. */
+    seq: bigint("seq", { mode: "number" }).generatedByDefaultAsIdentity(),
   },
   (t) => [
     index("salaries_link_idx").on(t.personCompanyId, t.effectiveFrom),

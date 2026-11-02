@@ -125,4 +125,57 @@ describe("/api/v1/people", () => {
     const unknown = await patchRoute(req(`/api/v1/people/${personId}`, { method: "PATCH", body: { salary: 1 } }), params(personId));
     expect(unknown.status).toBe(400);
   });
+
+  it("PATCH is all or nothing: a failing part rolls back the parts before it", async () => {
+    as("nuraaly");
+    const created = await createRoute(
+      req("/api/v1/people", {
+        method: "POST",
+        body: { fullName: "Атомарный Тест", links: [{ companyId: t.companyIds["kiwi-go"], role: "Курьер" }] },
+      }),
+    );
+    const person = (await created.json()).data;
+    const link = person.roles[0].id;
+    const patch = (body: unknown) => patchRoute(req(`/api/v1/people/${person.id}`, { method: "PATCH", body }), params(person.id));
+
+    // Name change + a new link are written first, then a link edit fails → 400, nothing kept.
+    const conflict = await patch({
+      person: { fullName: "Совсем Другое Имя" },
+      addLinks: [{ companyId: t.companyIds["alura-style"], role: "Швея" }],
+      addSalaries: [{ linkId: link, salary: { amount: 7000 } }],
+      updateLinks: [{ id: link, changes: { unitId: "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f" } }],
+    });
+    expect(conflict.status).toBe(400); // unit not in company → validation, after the name and link writes
+    const after = (await (await getRoute(req(`/api/v1/people/${person.id}`), params(person.id))).json()).data;
+    expect(after.fullName).not.toBe("Совсем Другое Имя");
+    expect(after.roles.some((r: { companyName: string }) => r.companyName === "Alura Style")).toBe(false);
+    expect(after.roles.find((r: { id: string }) => r.id === link).salaryHistory.map((s: { amount: number }) => s.amount)).not.toContain(7000);
+
+    // A link id of another person is refused before anything is written.
+    const other = (await (await listRoute(req("/api/v1/people?q=Elmurat"))).json()).data[0];
+    const foreign = await patch({ person: { notes: "should not stick" }, updateLinks: [{ id: other.roles[0].id, changes: { title: "x" } }] });
+    expect(foreign.status).toBe(404);
+    expect((await (await getRoute(req(`/api/v1/people/${person.id}`), params(person.id))).json()).data.notes).not.toBe("should not stick");
+  });
+
+  it("PATCH refuses two salaries for the same role and date in one request", async () => {
+    as("nuraaly");
+    const list = (await (await listRoute(req("/api/v1/people?q=Атомарный"))).json()).data;
+    const person = list[0];
+    const link = person.roles[0].id;
+    const res = await patchRoute(
+      req(`/api/v1/people/${person.id}`, {
+        method: "PATCH",
+        body: {
+          addSalaries: [
+            { linkId: link, salary: { amount: 100, effectiveFrom: "2026-10-01" } },
+            { linkId: link, salary: { amount: 200, effectiveFrom: "2026-10-01" } },
+          ],
+        },
+      }),
+      params(person.id),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.message).toMatch(/same role and date/);
+  });
 });

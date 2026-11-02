@@ -167,6 +167,51 @@ describe("0007 metrics on existing data", () => {
   });
 });
 
+describe("0008 people fixes on existing data", () => {
+  it("ends links that already had an end date, flags links ended by leaving, numbers salary rows", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0008") });
+    const C = "33333333-3333-4333-8333-333333333333";
+    const P1 = "55555555-5555-4555-8555-555555555555";
+    const P2 = "66666666-6666-4666-8666-666666666666";
+    await client.exec(`
+      insert into users (id, email, name, short_name) values ('${NURAALY}', 'nuraaly@founders.local', 'Nuraaly', 'Nuraaly');
+      insert into companies (id, slug, name) values ('${C}', 'kiwi-go', 'Kiwi Go');
+      insert into people (id, full_name) values ('${P1}', 'Ended Earlier');
+      insert into people (id, full_name, left_at) values ('${P2}', 'Left Person', '2026-10-14T18:00:00Z');
+      insert into person_companies (id, person_id, company_id, role, ended_on, is_active) values
+        ('a1000000-0000-4000-8000-000000000001', '${P1}', '${C}', 'past', '2020-01-31', true),
+        ('a1000000-0000-4000-8000-000000000002', '${P1}', '${C}', 'future', '2999-01-01', true),
+        ('a1000000-0000-4000-8000-000000000003', '${P1}', '${C}', 'open', null, true),
+        ('a1000000-0000-4000-8000-000000000004', '${P2}', '${C}', 'left-with-person', '2026-10-15', false),
+        ('a1000000-0000-4000-8000-000000000005', '${P2}', '${C}', 'ended-by-hand', '2026-09-01', false);
+      insert into salaries (person_company_id, amount, effective_from, created_at) values
+        ('a1000000-0000-4000-8000-000000000003', 200, '2026-01-01', '2026-01-02T00:00:00Z'),
+        ('a1000000-0000-4000-8000-000000000003', 100, '2026-01-01', '2026-01-01T00:00:00Z');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const links = await client.query<{ role: string; is_active: boolean; ended_by_leave: boolean }>(
+      "select role, is_active, ended_by_leave from person_companies order by id",
+    );
+    expect(links.rows).toEqual([
+      { role: "past", is_active: false, ended_by_leave: false },
+      { role: "future", is_active: true, ended_by_leave: false },
+      { role: "open", is_active: true, ended_by_leave: false },
+      { role: "left-with-person", is_active: false, ended_by_leave: true },
+      { role: "ended-by-hand", is_active: false, ended_by_leave: false },
+    ]);
+    const sal = await client.query<{ amount: string; seq: number }>("select amount, seq::int as seq from salaries order by seq");
+    expect(sal.rows).toEqual([
+      { amount: "100.00", seq: 1 },
+      { amount: "200.00", seq: 2 },
+    ]);
+    // New rows continue after the backfilled numbers.
+    await client.exec(`insert into salaries (person_company_id, amount, effective_from) values ('a1000000-0000-4000-8000-000000000003', 300, '2026-02-01')`);
+    const last = await client.query<{ seq: number }>("select seq::int as seq from salaries where amount = 300");
+    expect(last.rows[0]!.seq).toBe(3);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();
