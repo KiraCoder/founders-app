@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { saveActAction, type HoldingActionState } from "@/app/(app)/holding/actions";
-import { ACT_STATUS_LABELS, ACT_STATUSES, CELL_STATE_LABELS, monthShort, type ActStatusValue, type CellState, type CellTone } from "@/lib/holding";
+import { ACT_STATUS_LABELS, ACT_STATUSES, CELL_STATE_LABELS, monthList, monthLong, monthShort, type ActStatusValue, type CellState, type CellTone } from "@/lib/holding";
 import { formatMoney } from "@/lib/money";
 import type { ActCell, ActsGrid as Grid } from "@/server/services/holding";
 import { ACCEPT, fileUrl, uploadHoldingFile } from "./upload";
@@ -69,6 +69,11 @@ export function ActsGrid({ grid }: { grid: Grid }) {
                       {row.flow.service}
                       {!row.flow.since && " · set the start date"}
                     </span>
+                    <OlderMonths
+                      older={row.older}
+                      year={year}
+                      onOpen={(cell) => setOpen({ flowLabel: label, cell })}
+                    />
                   </th>
                   {row.cells.map((c) => {
                     const clickable = c.state !== "before_start" && c.state !== "after_end" && c.state !== "inactive";
@@ -107,6 +112,31 @@ export function ActsGrid({ grid }: { grid: Grid }) {
       <Legend grace={grid.graceDays} />
       {open && <CellPanel key={`${open.cell.flowId}|${open.cell.period}`} flowLabel={open.flowLabel} cell={open.cell} today={grid.today} onClose={() => setOpen(null)} />}
     </>
+  );
+}
+
+/**
+ * Months before the grid's first column that still need an акт (missing) or are still
+ * awaited (asked). They are included in the ask; here they get a short note so they are
+ * never invisible. Clicking opens the oldest one (then the next, once that is saved).
+ */
+function OlderMonths({ older, year, onOpen }: { older: ActCell[]; year: string; onOpen: (cell: ActCell) => void }) {
+  if (!older.length) return null;
+  const missing = older.filter((c) => c.state === "missing");
+  const asked = older.filter((c) => c.state === "requested");
+  const first = missing[0] ?? asked[0]!;
+  const parts = [missing.length ? `${missing.length} older missing` : null, asked.length ? `${asked.length} older asked` : null].filter(Boolean);
+  const months = monthList(older.map((c) => c.period), `${year}-01-01`);
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(first)}
+      className={`mt-0.5 block text-left text-[11px] font-medium underline-offset-2 hover:underline ${missing.length ? "text-risk" : "text-warn"}`}
+      title={`Before the grid: ${months}. Click to open ${monthLong(first.period)}.`}
+      data-testid="older-missing"
+    >
+      {parts.join(" · ")}
+    </button>
   );
 }
 

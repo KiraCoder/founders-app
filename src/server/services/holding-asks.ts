@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, ne } from "drizzle-orm";
 import { isoWeekday, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import {
   askLine,
@@ -17,7 +17,7 @@ import type { MessageAction, MessageLine } from "@/server/notifications/types";
 import { assertHoldingAccess, assertValidId } from "./access";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
-import { groupCells, loadActsGrid, markCellsAsked, staleRequested, type ActCell, type ActsGrid } from "./holding";
+import { allGridCells, groupCells, loadActsGrid, markCellsAsked, staleRequested, type ActCell, type ActsGrid } from "./holding";
 
 /**
  * Pushing the founders to ask Elmurat (the accountant) for missing акты. Elmurat himself
@@ -90,14 +90,35 @@ export async function planHoldingAsks(
         .onConflictDoNothing({ target: [holdingAskItems.userId, holdingAskItems.kind, holdingAskItems.roundKey] })
         .returning({ id: holdingAskItems.id });
       created += rows.length;
+      // Anti-spam: the new round already covers every month still open (it is built from
+      // the whole grid), so this founder's older undelivered items of the same kind (summary
+      // not sent: not linked, failed send, quiet hours) are superseded, never stacked up.
+      if (rows[0]) await supersedeOlder(db, f.id, r.kind, rows[0].id, now);
     }
   }
   return { created };
 }
 
+/** Cancels a founder's other pending items of `kind` (reason "superseded"); `keepId` stays. */
+async function supersedeOlder(db: Db, userId: string, kind: "ask" | "reminder", keepId: string, now: Date): Promise<number> {
+  const rows = await db
+    .update(holdingAskItems)
+    .set({ status: "cancelled", reason: "superseded", resolvedAt: now })
+    .where(
+      and(
+        eq(holdingAskItems.userId, userId),
+        eq(holdingAskItems.kind, kind),
+        eq(holdingAskItems.status, "pending"),
+        ne(holdingAskItems.id, keepId),
+      ),
+    )
+    .returning({ id: holdingAskItems.id });
+  return rows.length;
+}
+
 /** The item's cells that still need it: missing (ask) or asked ≥ 7 days ago and not received (reminder). */
 function relevantCells(item: Pick<HoldingAskItem, "kind" | "cells">, grid: ActsGrid): ActCell[] {
-  const byKey = new Map(grid.rows.flatMap((r) => r.cells).map((c) => [key(c), c]));
+  const byKey = new Map(allGridCells(grid).map((c) => [key(c), c]));
   const stale = staleRequested(grid, REMINDER_AFTER_DAYS);
   return item.cells
     .map((c) => byKey.get(key(c)))
@@ -145,35 +166,60 @@ export const ASK_BUTTON_LABEL = "I asked Elmurat";
 export const ASK_AGAIN_BUTTON_LABEL = "I asked again";
 
 /**
- * The "Holding · акты" section of a founder's morning summary: their pending items, each
- * one line with its button. Null when there is nothing to ask.
+ * The "Holding · акты" section of a founder's morning summary: at most ONE line (and one
+ * button) per kind — the ask and the "still waiting" reminder. The planner already
+ * supersedes older rounds; as a backstop, if several items of one kind are still pending
+ * their open months are merged (de-duplicated) into the newest item and the older ones are
+ * cancelled as "superseded", so the button covers every month on the line. A month that is
+ * both missing and on a reminder can't happen (a cell is either missing or requested).
+ * Null when there is nothing to ask.
  */
 export async function holdingSummarySection(ctx: ServiceContext): Promise<HoldingSection | null> {
-  const items = await ctx.db
+  const pending = await ctx.db
     .select()
     .from(holdingAskItems)
     .where(and(eq(holdingAskItems.userId, ctx.user.id), eq(holdingAskItems.status, "pending")))
     .orderBy(asc(holdingAskItems.kind), asc(holdingAskItems.createdAt));
-  if (!items.length) return null;
+  if (!pending.length) return null;
   const todayIso = today(ctx);
   const grid = await loadActsGrid(ctx.db, todayIso);
   await reconcileAskItems(ctx.db, grid, { userId: ctx.user.id, now: ctx.now });
   const lines: MessageLine[] = [];
   const actions: MessageAction[] = [];
   const itemIds: string[] = [];
-  for (const item of items) {
-    const cells = relevantCells(item, grid);
+  for (const kind of ["ask", "reminder"] as const) {
+    const ofKind = pending.filter((i) => i.kind === kind);
+    if (!ofKind.length) continue;
+    const newest = ofKind[ofKind.length - 1]!;
+    const seen = new Set<string>();
+    const cells: ActCell[] = [];
+    for (const item of ofKind) {
+      for (const c of relevantCells(item, grid)) {
+        if (seen.has(key(c))) continue;
+        seen.add(key(c));
+        cells.push(c);
+      }
+    }
+    if (ofKind.length > 1) {
+      if (cells.length) {
+        await ctx.db
+          .update(holdingAskItems)
+          .set({ cells: cells.map((c) => ({ flowId: c.flowId, period: c.period })) })
+          .where(and(eq(holdingAskItems.id, newest.id), eq(holdingAskItems.status, "pending")));
+      }
+      await supersedeOlder(ctx.db, ctx.user.id, kind, newest.id, ctx.now);
+    }
     if (!cells.length) continue;
     const groups = groupsFor(cells, grid);
-    if (item.kind === "ask") {
+    if (kind === "ask") {
       lines.push({ text: askLine(groups, todayIso), style: "item" });
-      actions.push({ label: ASK_BUTTON_LABEL, action: "holding_asked", askId: item.id });
+      actions.push({ label: ASK_BUTTON_LABEL, action: "holding_asked", askId: newest.id });
     } else {
       const askedOn = cells.map((c) => c.requestedOn!).sort()[0] ?? null;
       lines.push({ text: reminderLine(groups, todayIso, askedOn), style: "item" });
-      actions.push({ label: ASK_AGAIN_BUTTON_LABEL, action: "holding_asked", askId: item.id });
+      actions.push({ label: ASK_AGAIN_BUTTON_LABEL, action: "holding_asked", askId: newest.id });
     }
-    itemIds.push(item.id);
+    itemIds.push(newest.id);
   }
   if (!lines.length) return null;
   return {
@@ -231,7 +277,7 @@ export async function applyHoldingAskAction(ctx: ServiceContext, askId: string):
     .where(and(eq(holdingAskItems.id, askId), eq(holdingAskItems.userId, ctx.user.id)));
   if (!item) throw new ServiceError("not_found", "Item not found");
   const grid = await loadActsGrid(ctx.db, today(ctx));
-  const byKey = new Map(grid.rows.flatMap((r) => r.cells).map((c) => [key(c), c]));
+  const byKey = new Map(allGridCells(grid).map((c) => [key(c), c]));
   const cells = item.cells.map((c) => byKey.get(key(c))).filter((c): c is ActCell => !!c);
   const open = cells.filter((c) => (item.kind === "ask" ? c.state === "missing" : c.state === "requested"));
   if (!open.length) {
@@ -267,8 +313,7 @@ export function askCardFromGrid(grid: ActsGrid): AskCard {
   const stale = staleRequested(grid, REMINDER_AFTER_DAYS);
   const waiting = groupCells(grid, stale);
   const askedOn =
-    grid.rows
-      .flatMap((r) => r.cells)
+    allGridCells(grid)
       .filter(stale)
       .map((c) => c.requestedOn!)
       .sort()[0] ?? null;

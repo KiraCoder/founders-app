@@ -45,13 +45,16 @@ async function tick(now: Date) {
   await dispatch(t.handle.db, now, { registry, clock: () => now });
 }
 
-/** plan + dispatch every 30 minutes from 07:00 to 22:00 on each day. */
+/**
+ * plan + dispatch at the moments that matter each day: before both summaries (07:00), each
+ * founder's summary (08:30, 09:30) and once after (12:00). Ticking every 30 minutes adds
+ * nothing (idempotent planning is tested above) but made this file take ~25 s.
+ */
+const TICKS = ["07:00", "08:30", "09:30", "12:00"];
 async function days(from: string, to: string) {
   for (let d = new Date(`${from}T00:00:00Z`); d <= new Date(`${to}T00:00:00Z`); d = new Date(d.getTime() + 86_400_000)) {
     const day = d.toISOString().slice(0, 10);
-    for (let m = 7 * 60; m <= 22 * 60; m += 30) {
-      await tick(bishkek(day, `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`));
-    }
+    for (const hm of TICKS) await tick(bishkek(day, hm));
   }
 }
 

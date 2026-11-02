@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte } from "drizzle-orm";
 import { addDays, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import {
   actCountsAsInvoiced,
@@ -37,7 +37,7 @@ import {
   type FlowUpdateInput,
   type LedgerEntryInput,
 } from "@/lib/holding-schemas";
-import { decimalPlaces, parseMetricInput, periodEnd, prevPeriod } from "@/lib/metrics";
+import { decimalPlaces, nextPeriod, parseMetricInput, periodEnd, prevPeriod } from "@/lib/metrics";
 import type { Db } from "@/server/db/connect";
 import {
   companies,
@@ -47,6 +47,7 @@ import {
   intercompanyFlows,
   intercompanyLedgerEntries,
   metricDefinitions,
+  metricValues,
   users,
   type ContractStatus,
   type IntercompanyAct,
@@ -425,9 +426,30 @@ export interface ActsGrid {
   today: IsoDate;
   graceDays: number;
   months: { period: IsoDate; label: string; current: boolean }[];
-  rows: { flow: FlowView; cells: ActCell[] }[];
+  rows: ActsGridRow[];
+  /** Missing cells, the older months before the grid included. */
   missing: number;
   requested: number;
+}
+
+export interface ActsGridRow {
+  flow: FlowView;
+  cells: ActCell[];
+  /**
+   * Months before the grid's first month (back to the flow's start) that still need
+   * something: missing or requested. Not drawn as columns; the row shows "N older missing"
+   * and the ask / reminder include them, so they are never silently forgotten.
+   */
+  older: ActCell[];
+}
+
+/** Every cell of a row that can be asked about: older months first, then the grid's. */
+export function rowCells(row: Pick<ActsGridRow, "cells" | "older">): ActCell[] {
+  return [...row.older, ...row.cells];
+}
+
+export function allGridCells(grid: Pick<ActsGrid, "rows">): ActCell[] {
+  return grid.rows.flatMap(rowCells);
 }
 
 interface GridOpts {
@@ -435,11 +457,21 @@ interface GridOpts {
   grace?: number;
 }
 
+/** No flow starts before this (checkFlowDates), so older months are bounded. */
+const OLDEST_MONTH = "2015-01-01";
+
 /** The grid for any reader (service context or planner). Rows = active flows. */
 export async function loadActsGrid(db: Db, todayIso: IsoDate, opts: GridOpts = {}): Promise<ActsGrid> {
   const grace = opts.grace ?? graceDays();
   const months = opts.months ?? gridMonths(todayIso);
   const flows = (await loadFlows(db)).filter((f) => f.status === "active");
+  // The default grid also looks at the months before it (see ActsGridRow.older); a grid
+  // for given months (one cell after a change) does not.
+  const withOlder = !opts.months;
+  const earliest = withOlder
+    ? flows.reduce<IsoDate>((min, f) => (f.since && monthStart(f.since) < min ? monthStart(f.since) : min), months[0]!)
+    : months[0]!;
+  const from = earliest < OLDEST_MONTH ? OLDEST_MONTH : earliest;
   const acts = flows.length
     ? await db
         .select()
@@ -447,7 +479,7 @@ export async function loadActsGrid(db: Db, todayIso: IsoDate, opts: GridOpts = {
         .where(
           and(
             inArray(intercompanyActs.flowId, flows.map((f) => f.id)),
-            gte(intercompanyActs.period, months[0]!),
+            gte(intercompanyActs.period, from),
             lte(intercompanyActs.period, months[months.length - 1]!),
           ),
         )
@@ -460,31 +492,40 @@ export async function loadActsGrid(db: Db, todayIso: IsoDate, opts: GridOpts = {
   const current = monthStart(todayIso);
   let missing = 0;
   let requested = 0;
-  const rows = flows.map((flow) => ({
-    flow,
-    cells: months.map((period): ActCell => {
-      const a = byKey.get(`${flow.id}|${period}`);
-      const exp = expectation(flow, period, todayIso, grace);
-      const state = cellState(a?.status ?? null, exp);
-      if (state === "missing") missing++;
-      if (state === "requested") requested++;
-      return {
-        flowId: flow.id,
-        period,
-        state,
-        tone: cellTone(state),
-        status: a?.status ?? null,
-        amount: a?.amount != null ? Number(a.amount) : null,
-        actNumber: a?.actNumber ?? null,
-        actDate: a?.actDate ?? null,
-        requestedOn: a?.requestedOn ?? null,
-        requestedBy: a?.requestedBy ? (userNames.get(a.requestedBy) ?? null) : null,
-        note: a?.note ?? null,
-        attachment: a?.attachmentFileId ? (files.get(a.attachmentFileId) ?? null) : null,
-        dueFrom: actDueFrom(period, grace),
-      };
-    }),
-  }));
+  const cellFor = (flow: FlowView, period: IsoDate): ActCell => {
+    const a = byKey.get(`${flow.id}|${period}`);
+    const exp = expectation(flow, period, todayIso, grace);
+    const state = cellState(a?.status ?? null, exp);
+    if (state === "missing") missing++;
+    if (state === "requested") requested++;
+    return {
+      flowId: flow.id,
+      period,
+      state,
+      tone: cellTone(state),
+      status: a?.status ?? null,
+      amount: a?.amount != null ? Number(a.amount) : null,
+      actNumber: a?.actNumber ?? null,
+      actDate: a?.actDate ?? null,
+      requestedOn: a?.requestedOn ?? null,
+      requestedBy: a?.requestedBy ? (userNames.get(a.requestedBy) ?? null) : null,
+      note: a?.note ?? null,
+      attachment: a?.attachmentFileId ? (files.get(a.attachmentFileId) ?? null) : null,
+      dueFrom: actDueFrom(period, grace),
+    };
+  };
+  const rows = flows.map((flow): ActsGridRow => {
+    const older: ActCell[] = [];
+    if (withOlder && flow.since) {
+      for (let p = monthStart(flow.since) < from ? from : monthStart(flow.since); p < months[0]!; p = nextPeriod(p, "month")) {
+        const exp = expectation(flow, p, todayIso, grace);
+        const recorded = byKey.get(`${flow.id}|${p}`)?.status ?? null;
+        const state = cellState(recorded, exp);
+        if (state === "missing" || state === "requested") older.push(cellFor(flow, p));
+      }
+    }
+    return { flow, older, cells: months.map((period) => cellFor(flow, period)) };
+  });
   return {
     today: todayIso,
     graceDays: grace,
@@ -505,7 +546,7 @@ export function groupCells(grid: ActsGrid, pick: (c: ActCell) => boolean): { gro
   const groups: AskGroup[] = [];
   const cells: { flowId: string; period: IsoDate }[] = [];
   for (const row of grid.rows) {
-    const months = row.cells.filter(pick).map((c) => c.period);
+    const months = rowCells(row).filter(pick).map((c) => c.period);
     if (!months.length) continue;
     groups.push({ label: row.flow.label, service: row.flow.service, months });
     for (const period of months) cells.push({ flowId: row.flow.id, period });
@@ -525,6 +566,50 @@ function assertMonthAllowed(flow: IntercompanyFlow, period: IsoDate, todayIso: I
   }
 }
 
+/**
+ * An archived flow's акты still count in the debts (an акт is a real invoice), so a wrong
+ * amount must stay correctable: on an archived flow a founder may change an акт that is
+ * already recorded — its status (not "requested": nobody asks Elmurat about an archived
+ * flow), amount and act date (the date decides which month the debt counts from). Anything
+ * else needs the flow restored first.
+ */
+const ARCHIVED_EDITABLE = new Set(["flowId", "period", "status", "amount", "actDate"]);
+function assertArchivedCorrection(data: ReturnType<typeof actPatchSchema.parse>): void {
+  const other = Object.entries(data).filter(([k, v]) => v !== undefined && !ARCHIVED_EDITABLE.has(k));
+  if (other.length) {
+    throw new ServiceError("validation", "This flow is archived: only the status, amount and act date of its акты can be corrected", Object.fromEntries(other.map(([k]) => [k, ["Restore the flow to change this"]])));
+  }
+  if (data.status === "requested") {
+    throw new ServiceError("validation", "This flow is archived: there is nothing to ask Elmurat for", { status: ["Not for an archived flow"] });
+  }
+}
+
+/** Recorded акты of archived flows (they still count in the debts), for corrections. */
+export interface ArchivedFlowAct {
+  flowId: string;
+  period: IsoDate;
+  status: ActStatusValue;
+  amount: number | null;
+  actDate: IsoDate | null;
+}
+
+export async function listArchivedFlowActs(ctx: ServiceContext): Promise<ArchivedFlowAct[]> {
+  assertHoldingAccess(ctx);
+  const rows = await ctx.db
+    .select({
+      flowId: intercompanyActs.flowId,
+      period: intercompanyActs.period,
+      status: intercompanyActs.status,
+      amount: intercompanyActs.amount,
+      actDate: intercompanyActs.actDate,
+    })
+    .from(intercompanyActs)
+    .innerJoin(intercompanyFlows, eq(intercompanyFlows.id, intercompanyActs.flowId))
+    .where(isNotNull(intercompanyFlows.archivedAt))
+    .orderBy(asc(intercompanyActs.flowId), desc(intercompanyActs.period));
+  return rows.map((r) => ({ ...r, amount: r.amount != null ? Number(r.amount) : null }));
+}
+
 export interface ActChange {
   cell: ActCell;
   /** True when something that affects the debts (amount, status) changed. */
@@ -538,7 +623,8 @@ export interface ActChange {
 export async function patchAct(ctx: ServiceContext, input: ActPatchInput): Promise<ActChange> {
   assertHoldingAccess(ctx);
   const data = actPatchSchema.parse(input);
-  const flow = await loadFlow(ctx.db, data.flowId);
+  const flow = await loadFlow(ctx.db, data.flowId, { allowArchived: true });
+  if (flow.archivedAt) assertArchivedCorrection(data);
   const todayIso = today(ctx);
   assertMonthAllowed(flow, data.period, todayIso);
   const amount = data.amount === undefined ? undefined : data.amount === null ? null : parseKgs(data.amount);
@@ -551,6 +637,7 @@ export async function patchAct(ctx: ServiceContext, input: ActPatchInput): Promi
   await assertFile(ctx.db, data.attachmentFileId);
 
   let debtChanged = false;
+  let affectedFrom: IsoDate | null = null;
   await ctx.db.transaction(async (txRaw) => {
     const tx = txRaw as unknown as Db;
     const [cur] = await tx
@@ -558,6 +645,9 @@ export async function patchAct(ctx: ServiceContext, input: ActPatchInput): Promi
       .from(intercompanyActs)
       .where(and(eq(intercompanyActs.flowId, flow.id), eq(intercompanyActs.period, data.period)))
       .for("update");
+    if (flow.archivedAt && !cur) {
+      throw new ServiceError("validation", "This flow is archived: only акты already recorded can be corrected (restore the flow to add more)");
+    }
     const prevStatus: ActStatusValue = cur?.status ?? "missing";
     const status: ActStatusValue = data.status ?? prevStatus;
     let requestedOn = cur?.requestedOn ?? null;
@@ -587,6 +677,11 @@ export async function patchAct(ctx: ServiceContext, input: ActPatchInput): Promi
     const counted = (a: Pick<IntercompanyAct, "status" | "amount" | "actDate"> | undefined) =>
       a && actCountsAsInvoiced(a.status) && a.amount != null ? `${Number(a.amount)}|${a.actDate ?? ""}` : "";
     debtChanged = counted(cur) !== counted({ status: next.status, amount: next.amount, actDate: next.actDate });
+    // The earliest month whose debt total this change can touch (old or new ledger date).
+    affectedFrom = [data.period, cur?.actDate, next.actDate]
+      .filter((d): d is IsoDate => !!d)
+      .map(monthStart)
+      .sort()[0]!;
     if (cur) {
       await tx.update(intercompanyActs).set(next).where(eq(intercompanyActs.id, cur.id));
     } else {
@@ -619,7 +714,7 @@ export async function patchAct(ctx: ServiceContext, input: ActPatchInput): Promi
       attachment: null,
       dueFrom: actDueFrom(data.period, graceDays()),
     } satisfies ActCell);
-  if (debtChanged) await syncDebtMetric(ctx.db, ctx.now, ctx.timeZone).catch((err: unknown) => console.error("[holding] debt metric", err));
+  if (debtChanged && affectedFrom) await syncDebtMetricSafe(ctx, affectedFrom);
   return { cell, debtChanged };
 }
 
@@ -795,7 +890,7 @@ export async function addLedgerEntry(ctx: ServiceContext, input: LedgerEntryInpu
       createdAt: ctx.now,
     })
     .returning({ id: intercompanyLedgerEntries.id });
-  await syncDebtMetric(ctx.db, ctx.now, ctx.timeZone).catch((err: unknown) => console.error("[holding] debt metric", err));
+  await syncDebtMetricSafe(ctx, data.entryDate);
   return (await listLedgerEntries(ctx, 1000)).find((e) => e.id === row!.id)!;
 }
 
@@ -807,25 +902,45 @@ export async function archiveLedgerEntry(ctx: ServiceContext, id: string): Promi
     .update(intercompanyLedgerEntries)
     .set({ archivedAt: ctx.now, archivedBy: ctx.user.id })
     .where(and(eq(intercompanyLedgerEntries.id, id), isNull(intercompanyLedgerEntries.archivedAt)))
-    .returning({ id: intercompanyLedgerEntries.id });
+    .returning({ id: intercompanyLedgerEntries.id, entryDate: intercompanyLedgerEntries.entryDate });
   if (!rows.length) throw new ServiceError("not_found", "Entry not found");
-  await syncDebtMetric(ctx.db, ctx.now, ctx.timeZone).catch((err: unknown) => console.error("[holding] debt metric", err));
+  await syncDebtMetricSafe(ctx, rows[0]!.entryDate);
 }
 
-export interface DebtMetricSync {
+export interface DebtMonthSync {
+  period: IsoDate;
   action: "created" | "updated" | "unchanged" | "conflict" | "skipped";
-  period?: IsoDate;
   value?: number;
   reason?: string;
 }
 
+export interface DebtMetricSync {
+  /** The result for the latest finished month (the one the KPI card shows). */
+  action: DebtMonthSync["action"];
+  period?: IsoDate;
+  value?: number;
+  reason?: string;
+  /** Every month looked at, oldest first. */
+  months?: DebtMonthSync[];
+}
+
 /**
- * Feeds the Holding metric "Intercompany debt total" for the latest finished month with
- * the total as of that month's last day (source "derived"). Writes nothing while no debt
- * data exists, and never replaces a number a founder entered or uploaded for that month
- * (same rule as connectors: the founder's number wins).
+ * Feeds the Holding metric "Intercompany debt total" (source "derived"): each month's value
+ * is the total as of that month's last day. By default only the latest finished month is
+ * written (the scheduler tick). After a debt change (an акт's amount / status / date, a
+ * payment or opening balance, an archived entry) the caller passes `fromMonth` — the
+ * earliest month the change touches — and every month from there up to the latest
+ * finished month is recomputed, so a late акт for September also corrects October.
+ *
+ * Rules: only rows whose current value is "derived" (or months without a value) are
+ * written; a number a founder entered or uploaded (or a connector's) is never replaced
+ * (reported as "conflict" when it differs). A month with no debt data at all is left
+ * empty — unless it already had a derived value (e.g. every entry was archived since):
+ * then 0 is written, a new version with history, so the card never keeps showing a stale
+ * total. (0 rather than deleting the row: metric values are never deleted, and "no
+ * recorded debt" is exactly what 0 says.)
  */
-export async function syncDebtMetric(db: Db, now: Date, timeZone: string): Promise<DebtMetricSync> {
+export async function syncDebtMetric(db: Db, now: Date, timeZone: string, opts: { fromMonth?: IsoDate } = {}): Promise<DebtMetricSync> {
   const todayIso = todayInTimeZone(now, timeZone);
   const [metric] = await db
     .select({ id: metricDefinitions.id })
@@ -840,13 +955,50 @@ export async function syncDebtMetric(db: Db, now: Date, timeZone: string): Promi
       ),
     );
   if (!metric) return { action: "skipped", reason: "no_metric" };
-  const period = prevPeriod(monthStart(todayIso), "month");
-  const debts = await computeDebts(db, periodEnd(period, "month"));
-  if (!debts.hasData) return { action: "skipped", reason: "no_data", period };
-  const res = await db.transaction((tx) =>
-    writeMetricValueTx(tx as unknown as Db, metric.id, period, debts.total, { source: "derived", enteredBy: null, now }),
-  );
-  return { action: res.action, period, value: debts.total };
+  const last = prevPeriod(monthStart(todayIso), "month");
+  let first = opts.fromMonth ? monthStart(opts.fromMonth) : last;
+  if (first > last) first = last;
+  if (first < OLDEST_MONTH) first = OLDEST_MONTH;
+  const periods: IsoDate[] = [];
+  for (let p = first; p <= last; p = nextPeriod(p, "month")) periods.push(p);
+
+  const movements = await loadMovements(db);
+  const months = await db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Db;
+    const currents = new Map(
+      (
+        await tx
+          .select({ period: metricValues.periodStart, value: metricValues.value, source: metricValues.source })
+          .from(metricValues)
+          .where(and(eq(metricValues.metricId, metric.id), eq(metricValues.isCurrent, true), gte(metricValues.periodStart, first), lte(metricValues.periodStart, last)))
+      ).map((r) => [r.period, r]),
+    );
+    const out: DebtMonthSync[] = [];
+    for (const period of periods) {
+      const end = periodEnd(period, "month");
+      const hasData = movements.some((m) => m.date <= end);
+      const cur = currents.get(period);
+      if (!hasData && cur?.source !== "derived") {
+        out.push({ period, action: "skipped", reason: "no_data" });
+        continue;
+      }
+      const value = hasData ? totalDebt(netDebts(movements, end)) : 0;
+      if (cur && cur.source !== "derived") {
+        out.push({ period, action: Number(cur.value) === value ? "unchanged" : "conflict", value, reason: `kept_${cur.source}` });
+        continue;
+      }
+      const res = await writeMetricValueTx(tx, metric.id, period, value, { source: "derived", enteredBy: null, now });
+      out.push({ period, action: res.action, value, ...(hasData ? {} : { reason: "no_data_cleared" }) });
+    }
+    return out;
+  });
+  const latest = months[months.length - 1]!;
+  return { ...latest, months };
+}
+
+/** Logs instead of failing the founder's save: the metric is a convenience copy. */
+function syncDebtMetricSafe(ctx: ServiceContext, fromMonth: IsoDate): Promise<unknown> {
+  return syncDebtMetric(ctx.db, ctx.now, ctx.timeZone, { fromMonth }).catch((err: unknown) => console.error("[holding] debt metric", err));
 }
 
 // ---------------------------------------------------------------------------

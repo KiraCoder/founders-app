@@ -2,16 +2,18 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { archiveFlowAction, createFlowAction, updateFlowAction, type HoldingActionState } from "@/app/(app)/holding/actions";
-import { monthLong } from "@/lib/holding";
-import type { FlowView } from "@/server/services/holding";
+import { archiveFlowAction, createFlowAction, saveActAction, updateFlowAction, type HoldingActionState } from "@/app/(app)/holding/actions";
+import { ACT_STATUS_LABELS, monthLong, type ActStatusValue } from "@/lib/holding";
+import { formatMoney } from "@/lib/money";
+import type { ArchivedFlowAct, FlowView } from "@/server/services/holding";
 import { CompanyDot, Tag } from "@/components/ui";
 
 type Company = { id: string; name: string };
 
 /** Who does what for whom since when: add / edit / archive (never deleted). */
-export function FlowsSection({ flows, companies }: { flows: FlowView[]; companies: Company[] }) {
+export function FlowsSection({ flows, companies, archivedActs = [] }: { flows: FlowView[]; companies: Company[]; archivedActs?: ArchivedFlowAct[] }) {
   const [editing, setEditing] = useState<string | "new" | null>(null);
+  const [actsOpen, setActsOpen] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -41,6 +43,16 @@ export function FlowsSection({ flows, companies }: { flows: FlowView[]; companie
               </span>
               {f.status === "active" && !f.since && !f.archived && <Tag tone="warn">Set the start date</Tag>}
               {f.archived ? <Tag>Archived</Tag> : <Tag tone={f.status === "active" ? "ok" : "info"}>{f.status === "active" ? "Active" : "Planned"}</Tag>}
+              {f.archived && archivedActs.some((a) => a.flowId === f.id) && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => setActsOpen((v) => (v === f.id ? null : f.id))}
+                  aria-expanded={actsOpen === f.id}
+                >
+                  {actsOpen === f.id ? "Hide акты" : `Correct акты (${archivedActs.filter((a) => a.flowId === f.id).length})`}
+                </button>
+              )}
               {f.archived ? (
                 <button
                   type="button"
@@ -60,6 +72,7 @@ export function FlowsSection({ flows, companies }: { flows: FlowView[]; companie
                   Edit
                 </button>
               )}
+              {actsOpen === f.id && <ArchivedActs acts={archivedActs.filter((a) => a.flowId === f.id)} />}
             </li>
           ),
         )}
@@ -217,5 +230,73 @@ function FlowForm({ flow, companies, onDone }: { flow: FlowView | null; companie
         )}
       </div>
     </form>
+  );
+}
+
+const CORRECTABLE: ActStatusValue[] = ["received", "signed", "not_needed", "missing"];
+
+/**
+ * An archived flow's recorded акты: they still count in the debts, so their status, amount
+ * and act date stay correctable (everything else needs the flow restored).
+ */
+function ArchivedActs({ acts }: { acts: ArchivedFlowAct[] }) {
+  return (
+    <div className="mt-2 w-full basis-full rounded-[8px] bg-sunk p-2" data-testid="archived-acts">
+      <p className="mb-1.5 text-[12px] text-muted">This flow is archived, but its акты still count in the debts. Correct a wrong status or amount here.</p>
+      <ul className="flex flex-col gap-1.5">
+        {acts.map((a) => (
+          <ArchivedActRow key={a.period} act={a} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ArchivedActRow({ act }: { act: ArchivedFlowAct }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [status, setStatus] = useState<ActStatusValue>(act.status);
+  const [amount, setAmount] = useState(act.amount != null ? String(act.amount) : "");
+  const [state, setState] = useState<HoldingActionState>({});
+  const id = `aa-${act.flowId}-${act.period}`;
+  return (
+    <li className="flex flex-wrap items-center gap-2 text-[12.5px]">
+      <span className="w-[86px] font-medium">{monthLong(act.period)}</span>
+      <label className="sr-only" htmlFor={`${id}-status`}>
+        Status for {monthLong(act.period)}
+      </label>
+      <select id={`${id}-status`} className="input h-8 w-auto py-0" value={status} onChange={(e) => setStatus(e.target.value as ActStatusValue)}>
+        {[...new Set([act.status, ...CORRECTABLE])].map((s) => (
+          <option key={s} value={s}>
+            {ACT_STATUS_LABELS[s]}
+          </option>
+        ))}
+      </select>
+      <label className="sr-only" htmlFor={`${id}-amount`}>
+        Amount for {monthLong(act.period)}
+      </label>
+      <input id={`${id}-amount`} className="input h-8 w-[140px] py-0" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Amount, KGS" />
+      <button
+        type="button"
+        className="btn btn-sm"
+        disabled={pending}
+        onClick={() =>
+          start(async () => {
+            const res = await saveActAction({ flowId: act.flowId, period: act.period.slice(0, 7), status, amount: amount.trim() === "" ? null : amount });
+            setState(res);
+            if (res.ok) router.refresh();
+          })
+        }
+      >
+        {pending ? "Saving…" : "Save"}
+      </button>
+      {act.amount != null && <span className="text-muted">was {formatMoney(act.amount)}</span>}
+      {state.error && (
+        <span className="text-risk" role="alert">
+          {state.error}
+        </span>
+      )}
+      {state.ok && <span className="text-accent">Saved.</span>}
+    </li>
   );
 }

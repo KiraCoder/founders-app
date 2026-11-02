@@ -8,7 +8,7 @@ import { formatMoney } from "@/lib/money";
 import { getPageContext } from "@/server/context";
 import { listCompanies } from "@/server/services/companies";
 import { today } from "@/server/services/context";
-import { getActsGrid, getDebts, listContracts, listFlows, listLedgerEntries } from "@/server/services/holding";
+import { getActsGrid, getDebts, listArchivedFlowActs, listContracts, listFlows, listLedgerEntries } from "@/server/services/holding";
 import { askCardFromGrid } from "@/server/services/holding-asks";
 
 export const metadata = { title: "Holding" };
@@ -28,13 +28,14 @@ function Stat({ label, value, tone, hint, testId }: { label: string; value: stri
 export default async function HoldingPage() {
   const ctx = await getPageContext();
   const todayIso = today(ctx);
-  const [grid, contracts, debts, entries, flows, companies] = await Promise.all([
+  const [grid, contracts, debts, entries, flows, companies, archivedActs] = await Promise.all([
     getActsGrid(ctx),
     listContracts(ctx),
     getDebts(ctx),
     listLedgerEntries(ctx),
     listFlows(ctx, { includeArchived: true }),
     listCompanies(ctx),
+    listArchivedFlowActs(ctx),
   ]);
   const ask = askCardFromGrid(grid);
   const expiring = contracts.filter((c) => c.warning).length;
@@ -53,7 +54,7 @@ export default async function HoldingPage() {
           label="Missing акты"
           value={String(grid.missing)}
           tone={grid.missing > 0 ? "risk" : "ok"}
-          hint={grid.requested ? `${grid.requested} asked, waiting for Elmurat` : "Last 12 months"}
+          hint={grid.requested ? `${grid.requested} asked, waiting for Elmurat` : "All months since each flow started"}
         />
         <Stat
           testId="stat-contracts"
@@ -88,7 +89,7 @@ export default async function HoldingPage() {
       </Section>
 
       <Section title="Flows">
-        <FlowsSection flows={flows} companies={companyOptions} />
+        <FlowsSection flows={flows} companies={companyOptions} archivedActs={archivedActs} />
       </Section>
     </>
   );

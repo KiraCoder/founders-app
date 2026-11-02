@@ -230,8 +230,13 @@ describe("debts", () => {
       .where(and(eq(metricDefinitions.key, "intercompany_debt"), eq(metricDefinitions.companyId, t.companyIds["asqa-zou-holding"]!)));
     const current = async () =>
       db.select().from(metricValues).where(and(eq(metricValues.metricId, metric!.id), eq(metricValues.isCurrent, true)));
-    // Written already by the act/ledger changes above (October = total as of 31 Oct).
-    expect(await current()).toEqual([expect.objectContaining({ periodStart: "2026-10-01", source: "derived", value: "1284999.5000" })]);
+    // Written already by the act/ledger changes above: every month from the earliest entry
+    // (opening balance 1 Jan) to October, each the total as of its last day.
+    const rows = await current();
+    expect(rows.every((r) => r.source === "derived")).toBe(true);
+    expect(rows.map((r) => r.periodStart).sort()).toEqual(["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"].map((m) => `2026-${m}-01`));
+    expect(rows.find((r) => r.periodStart === "2026-10-01")).toMatchObject({ value: "1284999.5000" });
+    expect(rows.find((r) => r.periodStart === "2026-09-01")).toMatchObject({ value: "1344999.5000" });
     expect(await syncDebtMetric(db, NOV20, "Asia/Bishkek")).toMatchObject({ action: "unchanged", period: "2026-10-01" });
 
     // A founder's own number for October wins; the derived value does not replace it.
