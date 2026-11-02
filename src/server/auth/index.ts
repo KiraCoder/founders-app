@@ -2,6 +2,7 @@ import "server-only";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { getDb } from "@/server/db/client";
+import { attemptSignIn } from "./login";
 import { localAuthProvider } from "./local";
 import { SESSION_COOKIE } from "./session-token";
 import { supabaseAuthProvider } from "./supabase";
@@ -35,13 +36,15 @@ export async function requireUser(): Promise<SessionUser> {
   return user;
 }
 
+/** Signs in (rate limited, see login-limiter.ts) and sets the session cookie. */
 export async function signInWithPassword(
   email: string,
   password: string,
-  userAgent: string | null,
-): Promise<SessionUser | null> {
-  const result = await getAuthProvider().signIn(await getDb(), email, password, { userAgent });
-  if (!result) return null;
+  meta: { userAgent: string | null; ip: string | null },
+): Promise<{ ok: true; user: SessionUser } | { ok: false; reason: "invalid" | "rate_limited" }> {
+  const outcome = await attemptSignIn(await getDb(), getAuthProvider(), email, password, meta);
+  if (!outcome.ok) return outcome;
+  const { result } = outcome;
   (await cookies()).set(SESSION_COOKIE, result.token, {
     httpOnly: true,
     sameSite: "lax",
@@ -49,7 +52,7 @@ export async function signInWithPassword(
     path: "/",
     expires: result.expiresAt,
   });
-  return result.user;
+  return { ok: true, user: result.user };
 }
 
 export async function signOut(): Promise<void> {

@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { safeNext } from "@/lib/safe-next";
 import { signInWithPassword } from "@/server/auth";
+import { clientIpFromHeaders } from "@/server/auth/login-limiter";
 
 export interface LoginState {
   error?: string;
@@ -22,8 +23,19 @@ export async function loginAction(_prev: LoginState, formData: FormData): Promis
   const email = String(formData.get("email") ?? "");
   if (!parsed.success) return { error: "Enter your email and password.", email };
 
-  const ua = (await headers()).get("user-agent");
-  const user = await signInWithPassword(parsed.data.email, parsed.data.password, ua);
-  if (!user) return { error: "Wrong email or password.", email };
+  const h = await headers();
+  const outcome = await signInWithPassword(parsed.data.email, parsed.data.password, {
+    userAgent: h.get("user-agent"),
+    ip: clientIpFromHeaders(h),
+  });
+  if (!outcome.ok) {
+    return {
+      error:
+        outcome.reason === "rate_limited"
+          ? "Too many sign-in attempts. Wait 15 minutes and try again."
+          : "Wrong email or password.",
+      email,
+    };
+  }
   redirect(safeNext(parsed.data.next));
 }

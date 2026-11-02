@@ -98,6 +98,25 @@ export const sessions = pgTable(
   (t) => [index("sessions_user_idx").on(t.userId)],
 );
 
+/**
+ * Failed sign-in attempts for the login rate limit (src/server/auth/login-limiter.ts).
+ * Stored in the database so the limit holds across serverless instances. Only SHA-256
+ * hashes of the normalized email and the client IP are kept; rows expire after a day.
+ */
+export const loginAttempts = pgTable(
+  "login_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    emailHash: text("email_hash").notNull(),
+    ipHash: text("ip_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("login_attempts_email_idx").on(t.emailHash, t.createdAt),
+    index("login_attempts_ip_idx").on(t.ipHash, t.createdAt),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // Companies
 // ---------------------------------------------------------------------------
