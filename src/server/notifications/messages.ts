@@ -7,6 +7,7 @@ import type { TaskView, TodaySummary } from "@/server/services/tasks";
 import {
   TASK_ACTION_LABELS,
   TASK_ACTIONS,
+  type MessageAction,
   type MessageLine,
   type NeutralMessage,
   type NotificationKind,
@@ -111,6 +112,7 @@ export function buildMorningSummary(
   parked: string[],
   firstName: string,
   numbersWaiting: readonly WaitingNumber[] = [],
+  holding: { lines: MessageLine[]; actions: MessageAction[] } | null = null,
 ): NeutralMessage {
   const listed = new Set([...s.overdue, ...s.dueToday, ...s.thisWeek].map((t) => t.id));
   const personalRest = s.personal.filter((t) => !listed.has(t.id));
@@ -127,7 +129,12 @@ export function buildMorningSummary(
   ];
   if (lines.length === 1) lines.push({ text: "Nothing on your plate today.", style: "muted" });
   lines.push(...numbersWaitingSection(numbersWaiting, s.today));
-  return { title: `Good morning, ${firstName}`, lines };
+  if (holding?.lines.length) lines.push(...holding.lines);
+  return {
+    title: `Good morning, ${firstName}`,
+    lines,
+    ...(holding?.actions.length ? { actions: holding.actions } : {}),
+  };
 }
 
 /** Evening check: what is still open today. Null when there is nothing to say. */

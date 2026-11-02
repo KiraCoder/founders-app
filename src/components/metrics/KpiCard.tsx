@@ -89,7 +89,13 @@ export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: Is
       <p className="text-[11px] text-muted" data-testid="kpi-freshness" title={`Expected source: ${sourceLabel(m, connectorNames)}`}>
         {m.latest
           ? `Updated ${agoText(m.latest.enteredDay, today)}${m.latest.enteredByName ? ` by ${m.latest.enteredByName}` : ""} · ${
-              m.latest.source === "connector" ? `via ${sourceLabel(m, connectorNames)}` : m.latest.source === "upload" ? "via upload" : "entered by hand"
+              m.latest.source === "connector"
+                ? `via ${sourceLabel(m, connectorNames)}`
+                : m.latest.source === "derived"
+                  ? "computed from the Holding page"
+                  : m.latest.source === "upload"
+                    ? "via upload"
+                    : "entered by hand"
             }`
           : `Never updated · expected from ${sourceLabel(m, connectorNames)}`}
       </p>

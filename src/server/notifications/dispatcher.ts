@@ -4,6 +4,7 @@ import { todayInTimeZone, addDays, isWithinWindow, windowEndAfter, zonedTimeToUt
 import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, reminderSnoozes, type OutboxItem } from "@/server/db/schema";
 import { makeContext, type ServiceContext } from "@/server/services/context";
+import { holdingSummarySection, markAskItemsShown } from "@/server/services/holding-asks";
 import { staleMetricsFor } from "@/server/services/metrics";
 import { getTask, getTodaySummary, type TaskView } from "@/server/services/tasks";
 import { mintActionTokens } from "./action-tokens";
@@ -153,7 +154,9 @@ async function collectParked(ctx: ServiceContext): Promise<{ keep: string[]; dro
   return { keep, drop, lines };
 }
 
-type Built = { message: NeutralMessage; bundle?: string[]; dropParked?: string[] } | { skip: string };
+type Built =
+  | { message: NeutralMessage; bundle?: string[]; dropParked?: string[]; holdingItemIds?: string[] }
+  | { skip: string };
 
 async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
   const kind = item.kind as NotificationKind;
@@ -165,11 +168,21 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
             console.error("[dispatcher] numbers waiting failed", err);
             return [];
           }) : [];
+    // Holding: the grouped "ask Elmurat" item(s), inside the morning summary only.
+    const holding =
+      kind === "morning_summary"
+        ? await holdingSummarySection(ctx).catch((err: unknown) => {
+            console.error("[dispatcher] holding section failed", err);
+            return null;
+          })
+        : null;
     const message =
       kind === "morning_summary"
-        ? buildMorningSummary(summary, parked.lines, ctx.user.shortName, waiting)
+        ? buildMorningSummary(summary, parked.lines, ctx.user.shortName, waiting, holding)
         : buildEveningCheck(summary, parked.lines);
-    return message ? { message, bundle: parked.keep, dropParked: parked.drop } : { skip: "nothing_to_send" };
+    return message
+      ? { message, bundle: parked.keep, dropParked: parked.drop, holdingItemIds: holding?.itemIds }
+      : { skip: "nothing_to_send" };
   }
   if (!item.taskId) return { skip: "no_task" };
   // getTask enforces visibility as the recipient: another founder's private task is "not found".
@@ -396,6 +409,7 @@ async function processItem(
       lastError: null,
       nextAttemptAt: null,
     });
+    if (built.holdingItemIds?.length) await markAskItemsShown(db, built.holdingItemIds, item.id, now);
     if (built.bundle?.length) {
       await db
         .update(notificationsOutbox)

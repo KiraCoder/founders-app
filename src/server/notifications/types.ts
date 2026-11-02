@@ -52,11 +52,14 @@ export interface MessageLine {
   style?: LineStyle;
 }
 
-export interface MessageAction {
-  label: string;
-  action: TaskAction;
-  taskId: string;
-}
+/** Actions on holding items: "I asked Elmurat" marks the item's months as requested. */
+export const HOLDING_ACTIONS = ["holding_asked"] as const;
+export type HoldingAction = (typeof HOLDING_ACTIONS)[number];
+
+/** A button: on a task (taskId) or on a holding ask item (askId). */
+export type MessageAction =
+  | { label: string; action: TaskAction; taskId: string; askId?: undefined }
+  | { label: string; action: HoldingAction; askId: string; taskId?: undefined };
 
 /** What every channel receives. Plain text only: renderers do the escaping. */
 export interface NeutralMessage {
@@ -88,8 +91,8 @@ export interface NotificationChannel {
 }
 
 /** Key used in ActionCallbacks for one button. */
-export function actionKey(a: Pick<MessageAction, "action" | "taskId">): string {
-  return `${a.action}:${a.taskId}`;
+export function actionKey(a: { action: string; taskId?: string; askId?: string }): string {
+  return `${a.action}:${a.taskId ?? a.askId}`;
 }
 
 /**

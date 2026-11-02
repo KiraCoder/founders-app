@@ -143,3 +143,20 @@ export async function assertMetricAccess(ctx: ServiceContext, metricId: unknown)
   if (!row) throw new ServiceError("not_found", "Metric not found");
   return row.companyId;
 }
+
+// ---------------------------------------------------------------------------
+// Holding (intercompany flows, contracts, акты, debts, documents)
+// ---------------------------------------------------------------------------
+
+/**
+ * Holding rule: intercompany matters are shared between the founders and span several
+ * companies, so they are founders-only (staff, later, get nothing here). Documents are
+ * served only after this check (see /api/v1/holding/files/:id).
+ */
+export function canSeeHolding(ctx: ServiceContext): boolean {
+  return ctx.user.role === "founder";
+}
+
+export function assertHoldingAccess(ctx: ServiceContext): void {
+  if (!canSeeHolding(ctx)) throw new ServiceError("forbidden", "Only the founders can see the holding");
+}

@@ -71,6 +71,13 @@
       "when": 1793659343314,
       "tag": "0009_metrics_fixes",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793660672347,
+      "tag": "0010_holding",
+      "breakpoints": true
     }
   ]
 }

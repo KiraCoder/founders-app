@@ -29,6 +29,7 @@ import {
   unique,
   uniqueIndex,
   uuid,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
@@ -495,17 +496,21 @@ export const notificationActionTokens = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    taskId: uuid("task_id")
-      .notNull()
-      .references(() => tasks.id, { onDelete: "cascade" }),
-    /** "done" | "snooze_1d" | "move_1d" | "move_3d" */
+    /** The task a task button acts on (null for a holding button). */
+    taskId: uuid("task_id").references(() => tasks.id, { onDelete: "cascade" }),
+    /** The holding ask item an "I asked Elmurat" button acts on (null for a task button). */
+    holdingAskId: uuid("holding_ask_id").references((): AnyPgColumn => holdingAskItems.id, { onDelete: "cascade" }),
+    /** "done" | "snooze_1d" | "move_1d" | "move_3d" | "holding_asked" */
     action: text("action").notNull(),
     outboxId: uuid("outbox_id").references(() => notificationsOutbox.id, { onDelete: "set null" }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     usedAt: timestamp("used_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
-  (t) => [index("notification_action_tokens_user_idx").on(t.userId)],
+  (t) => [
+    index("notification_action_tokens_user_idx").on(t.userId),
+    check("notification_action_tokens_subject", sql`${t.taskId} is not null or ${t.holdingAskId} is not null`),
+  ],
 );
 
 /** "Snooze 1 day": no reminders/chases for this task to this user until `snoozedUntil`. */
@@ -532,7 +537,8 @@ export const reminderSnoozes = pgTable(
 // ---------------------------------------------------------------------------
 export const metricGranularityEnum = pgEnum("metric_granularity", ["day", "week", "month"]);
 export const metricDirectionEnum = pgEnum("metric_direction", ["higher_is_better", "lower_is_better", "neutral"]);
-export const metricSourceEnum = pgEnum("metric_source", ["manual", "upload", "connector"]);
+/** derived = computed by the app from other data (e.g. the intercompany debt from the Holding ledger). */
+export const metricSourceEnum = pgEnum("metric_source", ["manual", "upload", "connector", "derived"]);
 export const connectorRunStatusEnum = pgEnum("connector_run_status", ["ok", "not_configured", "error", "running"]);
 /**
  * How finer-grained connector points (e.g. days) become one value of a coarser metric
@@ -653,6 +659,183 @@ export interface ConnectorRunDetails {
   /** Points not written, with the reason (capped). */
   skippedReasons?: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Holding: intercompany flows, contracts, monthly акты, the debt ledger and the
+// "ask Elmurat" items. Founders only (assertHoldingAccess in access.ts); read and written
+// only through services/holding.ts. Nothing is hard-deleted: rows are archived.
+// Elmurat (the accountant) is a people record and never receives anything from the app.
+// ---------------------------------------------------------------------------
+export const flowStatusEnum = pgEnum("intercompany_flow_status", ["active", "planned"]);
+export const contractStatusEnum = pgEnum("intercompany_contract_status", ["draft", "signed", "expired", "terminated"]);
+export const actStatusEnum = pgEnum("intercompany_act_status", ["missing", "requested", "received", "signed", "not_needed"]);
+export const ledgerKindEnum = pgEnum("intercompany_ledger_kind", ["opening", "payment"]);
+export const holdingAskKindEnum = pgEnum("holding_ask_kind", ["ask", "reminder"]);
+export const holdingAskStatusEnum = pgEnum("holding_ask_status", ["pending", "shown", "done", "cancelled"]);
+
+/** Uploaded documents (PDF/JPG/PNG, max 10 MB). The bytes live in the file storage (see server/storage). */
+export const holdingFiles = pgTable("holding_files", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** "local" (.data/uploads) or "supabase" (later). */
+  storage: text("storage").notNull(),
+  storageKey: text("storage_key").notNull().unique(),
+  originalName: text("original_name").notNull(),
+  contentType: text("content_type").notNull(),
+  sizeBytes: integer("size_bytes").notNull(),
+  sha256: text("sha256").notNull(),
+  uploadedBy: uuid("uploaded_by").references(() => users.id, { onDelete: "set null" }),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  createdAt: createdAt(),
+}, (t) => [
+  check("holding_files_type", sql`${t.contentType} in ('application/pdf', 'image/jpeg', 'image/png')`),
+  check("holding_files_size", sql`${t.sizeBytes} between 1 and 10485760`),
+]);
+
+/** Who does what for whom: "Alura Style → Alura Brand · пошив". */
+export const intercompanyFlows = pgTable(
+  "intercompany_flows",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** The company that provides the service (issues the акт, is owed the money). */
+    fromCompanyId: uuid("from_company_id").notNull().references(() => companies.id, { onDelete: "restrict" }),
+    /** The company that receives the service (signs the акт, owes the money). */
+    toCompanyId: uuid("to_company_id").notNull().references(() => companies.id, { onDelete: "restrict" }),
+    /** Short service name, shown in the grid ("пошив", "ERP"). */
+    service: text("service").notNull(),
+    description: text("description"),
+    /** First month акты are expected for. Null = start date not set yet (nothing expected). */
+    since: date("since", { mode: "string" }),
+    /** Last day of the flow (optional): months after it are not expected. */
+    until: date("until", { mode: "string" }),
+    status: flowStatusEnum("status").notNull().default("active"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    check("intercompany_flows_two_companies", sql`${t.fromCompanyId} <> ${t.toCompanyId}`),
+    check("intercompany_flows_dates", sql`${t.until} is null or ${t.since} is null or ${t.until} >= ${t.since}`),
+    uniqueIndex("intercompany_flows_live_uq")
+      .on(t.fromCompanyId, t.toCompanyId, sql`lower(${t.service})`)
+      .where(sql`${t.archivedAt} is null`),
+  ],
+);
+
+export const intercompanyContracts = pgTable(
+  "intercompany_contracts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    flowId: uuid("flow_id").notNull().references(() => intercompanyFlows.id, { onDelete: "restrict" }),
+    number: text("number").notNull(),
+    signedOn: date("signed_on", { mode: "string" }),
+    validUntil: date("valid_until", { mode: "string" }),
+    status: contractStatusEnum("status").notNull().default("draft"),
+    /** Free text: "120 000 KGS per month", "per piece by price list". */
+    amountTerms: text("amount_terms"),
+    attachmentFileId: uuid("attachment_file_id").references(() => holdingFiles.id, { onDelete: "restrict" }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("intercompany_contracts_flow_idx").on(t.flowId)],
+);
+
+/**
+ * One акт приёма-передачи per flow per month. A month without a row is "missing" when it
+ * is expected (see src/lib/holding.ts); a row is written the first time a founder changes it.
+ */
+export const intercompanyActs = pgTable(
+  "intercompany_acts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    flowId: uuid("flow_id").notNull().references(() => intercompanyFlows.id, { onDelete: "restrict" }),
+    /** First day of the month. */
+    period: date("period", { mode: "string" }).notNull(),
+    status: actStatusEnum("status").notNull().default("missing"),
+    /** When a founder asked Elmurat (status requested; kept after received). */
+    requestedOn: date("requested_on", { mode: "string" }),
+    requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
+    /** Amount of the акт in KGS (counts as invoiced once received or signed). */
+    amount: numeric("amount", { precision: 14, scale: 2 }),
+    actNumber: text("act_number"),
+    actDate: date("act_date", { mode: "string" }),
+    note: text("note"),
+    attachmentFileId: uuid("attachment_file_id").references(() => holdingFiles.id, { onDelete: "restrict" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("intercompany_acts_flow_period_uq").on(t.flowId, t.period),
+    check("intercompany_acts_period_first", sql`extract(day from ${t.period}) = 1`),
+    check("intercompany_acts_amount_nonneg", sql`${t.amount} is null or ${t.amount} >= 0`),
+  ],
+);
+
+/**
+ * Debt ledger entries besides акты: an opening balance ("debtor owes creditor X as of
+ * date") or a payment ("debtor paid creditor X"). Cancelled entries are archived.
+ */
+export const intercompanyLedgerEntries = pgTable(
+  "intercompany_ledger_entries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: ledgerKindEnum("kind").notNull(),
+    debtorCompanyId: uuid("debtor_company_id").notNull().references(() => companies.id, { onDelete: "restrict" }),
+    creditorCompanyId: uuid("creditor_company_id").notNull().references(() => companies.id, { onDelete: "restrict" }),
+    entryDate: date("entry_date", { mode: "string" }).notNull(),
+    amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
+    note: text("note"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    archivedBy: uuid("archived_by").references(() => users.id, { onDelete: "set null" }),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    check("intercompany_ledger_two_companies", sql`${t.debtorCompanyId} <> ${t.creditorCompanyId}`),
+    check("intercompany_ledger_amount_pos", sql`${t.amount} > 0`),
+    index("intercompany_ledger_pair_idx").on(t.debtorCompanyId, t.creditorCompanyId),
+  ],
+);
+
+/**
+ * "Ask Elmurat" items: ONE grouped line per founder per month (kind ask, round = YYYY-MM)
+ * or per week (kind reminder, round = that Monday), shown in that founder's next morning
+ * summary with an "I asked Elmurat" button. The unique index makes planning idempotent.
+ * When one founder marks the months as asked, the other's pending item is cancelled.
+ */
+export const holdingAskItems = pgTable(
+  "holding_ask_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    kind: holdingAskKindEnum("kind").notNull(),
+    roundKey: text("round_key").notNull(),
+    /** [{ flowId, period }] the item is about. */
+    cells: jsonb("cells").$type<{ flowId: string; period: string }[]>().notNull(),
+    status: holdingAskStatusEnum("status").notNull().default("pending"),
+    /** The morning summary that showed it. */
+    outboxId: uuid("outbox_id").references(() => notificationsOutbox.id, { onDelete: "set null" }),
+    shownAt: timestamp("shown_at", { withTimezone: true }),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolvedBy: uuid("resolved_by").references(() => users.id, { onDelete: "set null" }),
+    reason: text("reason"),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("holding_ask_items_round_uq").on(t.userId, t.kind, t.roundKey)],
+);
+
+export type IntercompanyFlow = typeof intercompanyFlows.$inferSelect;
+export type IntercompanyContract = typeof intercompanyContracts.$inferSelect;
+export type IntercompanyAct = typeof intercompanyActs.$inferSelect;
+export type IntercompanyLedgerEntry = typeof intercompanyLedgerEntries.$inferSelect;
+export type HoldingAskItem = typeof holdingAskItems.$inferSelect;
+export type HoldingFile = typeof holdingFiles.$inferSelect;
+export type ActStatus = (typeof actStatusEnum.enumValues)[number];
+export type ContractStatus = (typeof contractStatusEnum.enumValues)[number];
+export type FlowStatus = (typeof flowStatusEnum.enumValues)[number];
 
 export type MetricDefinition = typeof metricDefinitions.$inferSelect;
 export type MetricValue = typeof metricValues.$inferSelect;

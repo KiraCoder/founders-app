@@ -7,13 +7,14 @@
  * Used by `npm run db:seed` and by tests (no "server-only" on purpose).
  */
 import bcrypt from "bcryptjs";
-import { eq, like } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { addDays, todayInTimeZone } from "@/lib/dates";
 import { metricSeedFor, seedAggregation } from "@/lib/kpis";
 import type { Db } from "./connect";
 import {
   companies,
   companyUnits,
+  intercompanyFlows,
   metricDefinitions,
   people,
   personCompanies,
@@ -237,6 +238,9 @@ export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResul
     ],
   );
 
+  // --- Holding: the known intercompany flows (only missing ones are added) ------
+  await seedIntercompanyFlows(db, companyIds, { sampleSince: options.withSamples === true ? SAMPLE_FLOW_SINCE : null });
+
   // --- Samples ---------------------------------------------------------------
   if (options.withSamples === true) {
     const already = await db.select({ id: tasks.id }).from(tasks).where(like(tasks.title, "[sample]%")).limit(1);
@@ -246,6 +250,63 @@ export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResul
   }
 
   return { userIds, companyIds, personIds };
+}
+
+/**
+ * The intercompany flows the founders described (brief, "Holding page"). Start dates are
+ * not known yet, so real databases get them WITHOUT a start date ("set the start date"):
+ * nothing is expected and nobody is asked about акты until a founder sets it. Local sample
+ * data (`sampleSince`) sets a start date so the grid has something to show.
+ * Marketing is planned: one planned flow per company it will serve, no акты expected.
+ */
+export const INTERCOMPANY_FLOW_SEED: { from: string; to: string; service: string; description: string; status: "active" | "planned" }[] = [
+  { from: "alura-style", to: "alura-brand", service: "пошив", description: "Alura Style sews for Alura Brand.", status: "active" },
+  { from: "jobutify", to: "alura-style", service: "ERP", description: "Jobutify builds the ERP for Alura Style.", status: "active" },
+  { from: "jobutify", to: "kiwi-go", service: "приложение и платформа", description: "Jobutify builds the app/platform for Kiwi Go.", status: "active" },
+  { from: "kiwi-go", to: "alura-brand", service: "доставка", description: "Kiwi Go delivers for Alura Brand.", status: "active" },
+  ...["kiwi-go", "jobutify", "alura-brand", "alura-style", "upsell-group"].map((to) => ({
+    from: "marketing",
+    to,
+    service: "маркетинг",
+    description: "Planned: the Marketing company will serve all group companies. No акты expected yet.",
+    status: "planned" as const,
+  })),
+];
+
+/** Local sample start date for the active seeded flows. */
+export const SAMPLE_FLOW_SINCE = "2026-01-01";
+
+export async function seedIntercompanyFlows(
+  db: Db,
+  companyIds: Record<string, string>,
+  opts: { sampleSince: string | null },
+): Promise<void> {
+  for (const f of INTERCOMPANY_FLOW_SEED) {
+    const fromCompanyId = companyIds[f.from];
+    const toCompanyId = companyIds[f.to];
+    if (!fromCompanyId || !toCompanyId) continue;
+    const existing = await db
+      .select({ id: intercompanyFlows.id, since: intercompanyFlows.since })
+      .from(intercompanyFlows)
+      .where(and(eq(intercompanyFlows.fromCompanyId, fromCompanyId), eq(intercompanyFlows.toCompanyId, toCompanyId)));
+    if (existing.length > 0) {
+      // Samples only fill an empty start date; a date a founder set is never changed.
+      if (opts.sampleSince && f.status === "active") {
+        for (const e of existing.filter((x) => !x.since)) {
+          await db.update(intercompanyFlows).set({ since: opts.sampleSince }).where(eq(intercompanyFlows.id, e.id));
+        }
+      }
+      continue;
+    }
+    await db.insert(intercompanyFlows).values({
+      fromCompanyId,
+      toCompanyId,
+      service: f.service,
+      description: f.description,
+      status: f.status,
+      since: f.status === "active" ? opts.sampleSince : null,
+    });
+  }
 }
 
 /** Adds the default metric definitions that do not exist yet. Existing rows are never changed. */

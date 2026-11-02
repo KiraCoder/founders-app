@@ -397,7 +397,9 @@ export async function writeMetricValueTx(
   if (current && previous !== null && sameNumber(previous, value) && (keepNote || note === current.note)) {
     return { action: "unchanged", id: current.id, previous, previousSource };
   }
-  if (current && meta.source === "connector" && current.source !== "connector") {
+  // Automatic sources (a connector, a value derived by the app) never replace a founder's number.
+  const automatic = (src: MetricSource) => src === "connector" || src === "derived";
+  if (current && automatic(meta.source) && !automatic(current.source)) {
     return { action: sameNumber(previous!, value) ? "unchanged" : "conflict", id: current.id, previous, previousSource };
   }
   // A changed value starts without the old note (it was about the old number) unless one is given.

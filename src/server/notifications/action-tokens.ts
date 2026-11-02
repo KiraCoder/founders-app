@@ -3,7 +3,15 @@ import { and, eq, gt, isNull } from "drizzle-orm";
 import type { Db } from "@/server/db/connect";
 import { notificationActionTokens } from "@/server/db/schema";
 import { randomToken, sha256 } from "./secrets";
-import { actionKey, TASK_ACTIONS, type ActionCallbacks, type MessageAction, type TaskAction } from "./types";
+import {
+  actionKey,
+  HOLDING_ACTIONS,
+  TASK_ACTIONS,
+  type ActionCallbacks,
+  type HoldingAction,
+  type MessageAction,
+  type TaskAction,
+} from "./types";
 
 export const ACTION_TOKEN_TTL_DAYS = 7;
 const PREFIX = "a:";
@@ -22,11 +30,23 @@ export async function mintActionTokens(
   const rows = opts.actions.map((a) => {
     const token = randomToken();
     callbacks[actionKey(a)] = `${PREFIX}${token}`;
-    return { tokenHash: sha256(token), userId: opts.userId, taskId: a.taskId, action: a.action, outboxId: opts.outboxId, expiresAt };
+    return {
+      tokenHash: sha256(token),
+      userId: opts.userId,
+      taskId: a.taskId ?? null,
+      holdingAskId: a.askId ?? null,
+      action: a.action,
+      outboxId: opts.outboxId,
+      expiresAt,
+    };
   });
   await db.insert(notificationActionTokens).values(rows);
   return callbacks;
 }
+
+export type ConsumedAction =
+  | { kind: "task"; taskId: string; action: TaskAction }
+  | { kind: "holding"; askId: string; action: HoldingAction };
 
 /**
  * Single-use redemption for one user. Returns null for unknown, expired, used or
@@ -37,7 +57,7 @@ export async function consumeActionToken(
   callbackData: string,
   userId: string,
   now: Date,
-): Promise<{ taskId: string; action: TaskAction } | null> {
+): Promise<ConsumedAction | null> {
   if (!callbackData.startsWith(PREFIX)) return null;
   const token = callbackData.slice(PREFIX.length);
   if (!/^[A-Za-z0-9_-]{16,64}$/.test(token)) return null;
@@ -52,7 +72,17 @@ export async function consumeActionToken(
         gt(notificationActionTokens.expiresAt, now),
       ),
     )
-    .returning({ taskId: notificationActionTokens.taskId, action: notificationActionTokens.action });
-  if (!row || !(TASK_ACTIONS as readonly string[]).includes(row.action)) return null;
-  return { taskId: row.taskId, action: row.action as TaskAction };
+    .returning({
+      taskId: notificationActionTokens.taskId,
+      holdingAskId: notificationActionTokens.holdingAskId,
+      action: notificationActionTokens.action,
+    });
+  if (!row) return null;
+  if (row.taskId && (TASK_ACTIONS as readonly string[]).includes(row.action)) {
+    return { kind: "task", taskId: row.taskId, action: row.action as TaskAction };
+  }
+  if (row.holdingAskId && (HOLDING_ACTIONS as readonly string[]).includes(row.action)) {
+    return { kind: "holding", askId: row.holdingAskId, action: row.action as HoldingAction };
+  }
+  return null;
 }

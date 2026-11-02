@@ -9,6 +9,7 @@ import { addDays, daysBetween, todayInTimeZone, zonedTimeToUtc, type IsoDate } f
 import type { Db } from "@/server/db/connect";
 import { reminderSnoozes, type NotificationPriority, type TaskPriority } from "@/server/db/schema";
 import { makeContext } from "@/server/services/context";
+import { planHoldingAsks } from "@/server/services/holding-asks";
 import { getTodaySummary } from "@/server/services/tasks";
 import { listFounders } from "./founders";
 import { taskTouchKey } from "./types";
@@ -114,6 +115,8 @@ export function planForUser(input: PlanInput): EnqueueInput[] {
 export interface PlanReport {
   planned: number;
   created: number;
+  /** "Ask Elmurat" items created (one per founder per round). */
+  holdingCreated?: number;
 }
 
 export interface PlanOptions {
@@ -150,6 +153,13 @@ export async function planTick(db: Db, now: Date, opts: PlanOptions = {}): Promi
       report.planned++;
       if ((await enqueue(db, item)).created) report.created++;
     }
+  }
+  // Holding: the monthly "ask Elmurat" item and the weekly reminder (shown inside the
+  // morning summary, never as a separate push). A failure here must not stop the reminders.
+  try {
+    report.holdingCreated = (await planHoldingAsks(db, now, timeZone, { userIds: opts.userIds })).created;
+  } catch (err) {
+    console.error("[planner] holding asks failed", err);
   }
   return report;
 }

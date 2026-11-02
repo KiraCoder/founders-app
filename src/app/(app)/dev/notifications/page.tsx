@@ -42,7 +42,7 @@ function Message({ m }: { m: NeutralMessage }) {
       {!!m.actions?.length && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {m.actions.map((a) => (
-            <span key={a.action} className="btn btn-sm pointer-events-none">
+            <span key={`${a.action}:${a.taskId ?? a.askId}`} className="btn btn-sm pointer-events-none">
               {a.label}
             </span>
           ))}

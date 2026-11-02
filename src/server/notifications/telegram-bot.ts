@@ -2,6 +2,7 @@ import "server-only";
 import type { Db } from "@/server/db/connect";
 import { makeContext } from "@/server/services/context";
 import { toServiceError } from "@/server/services/errors";
+import { applyHoldingAskAction } from "@/server/services/holding-asks";
 import { applyTaskAction } from "@/server/services/notifications";
 import { getTodaySummary } from "@/server/services/tasks";
 import { consumeActionToken } from "./action-tokens";
@@ -100,11 +101,15 @@ async function handleCallback(
 
   let result: string;
   try {
-    result = await applyTaskAction(makeContext(db, link.user, now), token.action, token.taskId);
+    const ctx = makeContext(db, link.user, now);
+    result =
+      token.kind === "task"
+        ? await applyTaskAction(ctx, token.action, token.taskId)
+        : await applyHoldingAskAction(ctx, token.askId);
   } catch (err) {
     const se = toServiceError(err);
     if (!se) throw err;
-    return [answer(se.code === "not_found" ? "Task not found." : se.message)];
+    return [answer(se.code === "not_found" ? (token.kind === "task" ? "Task not found." : "Not found.") : se.message)];
   }
 
   const actions: BotAction[] = [answer(result)];

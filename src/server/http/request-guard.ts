@@ -12,6 +12,16 @@
  */
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const WITH_BODY = new Set(["POST", "PUT", "PATCH"]);
+/** The only endpoints that take multipart/form-data (file uploads), POST only. */
+export const MULTIPART_PATHS = new Set(["/api/v1/holding/files"]);
+
+function pathOf(req: Request): string {
+  try {
+    return new URL(req.url).pathname.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
 
 export type GuardResult = { ok: true } | { ok: false; status: 403 | 415; code: string; message: string };
 
@@ -66,6 +76,14 @@ export function checkMutatingApiRequest(
 
   if (WITH_BODY.has(method)) {
     const type = req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (type === "multipart/form-data" && method === "POST" && MULTIPART_PATHS.has(pathOf(req))) {
+      // File uploads cannot be JSON. A cross-site HTML form CAN post multipart without a
+      // preflight, so here the request must prove it is same-site: an allowed Origin
+      // (checked above) or Sec-Fetch-Site: same-origin. "Neither header" is refused.
+      const site = req.headers.get("sec-fetch-site");
+      if (origin === null && site !== "same-origin") return forbidden;
+      return { ok: true };
+    }
     if (type !== "application/json") {
       return {
         ok: false,
