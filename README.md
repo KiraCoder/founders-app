@@ -108,14 +108,31 @@ How it works (all in `src/server/notifications/`):
    morning summary (default 08:30), evening check (default 19:00, can be turned off),
    due-today nudge at 12:00, and overdue chases at 10:00 on day 1, 3, 7, then every week.
    Each item has a dedupe key, so running the tick again never queues it twice.
-3. The dispatcher sends what is due, following each founder's **Settings**:
+3. **At most one push per task per day.** The due-today nudge, the overdue chase and the
+   "Snooze 1 day" reminder share one key per task and local day; the dispatcher double-checks
+   before sending. A snoozed task gets only its snooze reminder on the day it fires.
+4. The dispatcher sends what is due, following each founder's **Settings**:
    - **Quiet hours** (default 21:00–08:00): everything waits, urgent items too, unless
-     "Urgent at night" is on.
+     "Urgent at night" is on. An evening check inside quiet hours is refused on the Settings
+     page (it would expire unseen).
    - **Daily budget**: the two summaries plus at most 3 other pushes (default). Extra items
-     are **parked** and listed in the next summary instead of being sent (no spam).
-   - Channel errors are retried after 1, 5, 15, 60 minutes, then marked failed.
-4. **Channel:** Telegram when a bot token is set and the founder linked their chat;
-   otherwise the message is kept in the **dev inbox** (`/dev/notifications`).
+     are **parked** and listed in the next summary instead of being sent (no spam). Parked
+     lines are rebuilt from the task's current state when the summary is sent; tasks that were
+     closed or whose deadline moved out of today are dropped.
+   - **Urgent tasks**: pushes about tasks with priority *urgent* do not use that budget but
+     have their own cap of **2 per day**; beyond that they are parked too. Only a notification
+     of kind `urgent` (none is created automatically today) skips the budget entirely.
+   - Channel errors are retried after 1, 5, 15, 60 minutes, then marked failed. A Telegram
+     call that does not answer within 10 seconds counts as an error.
+   - Each item is **claimed** before sending (`status = sending`, wall-clock `claimed_at`,
+     `FOR UPDATE SKIP LOCKED`), so overlapping ticks never send the same item twice. A claim
+     older than 10 minutes (a crashed run) is taken again and counts as one attempt.
+     One broken item is recorded on that item and never stops the run for the others.
+5. **Channel:** Telegram when a bot token is set and the founder linked their chat.
+   With a token but no linked chat, nothing is sent: items wait as `not_linked` (no budget
+   used, parked items stay for later) and go out once the founder links, if still valid
+   (e.g. a morning summary only until 6 hours after its time). Without a token everything
+   goes to the **dev inbox** (`/dev/notifications`).
    The iOS app can add a `push` channel later in `channels.ts` without touching the rest.
 
 Buttons under task reminders: **Done**, **Snooze 1 day** (moves only the reminder),
@@ -130,6 +147,8 @@ linked gets one polite "not linked" reply and nothing else.
 
 Sign in, open **Settings → Developer tools** (or `/dev/notifications`) and press
 **Simulate morning**: the page shows the morning summary you would have received.
+These buttons run the scheduler for the signed-in founder only and always deliver into the
+dev inbox, never to Telegram (also on a preview with a bot token).
 The dev inbox is on in development only; a production build shows it only with `DEV_TOOLS=1`
 (fine for preview deployments, never for the real site).
 
