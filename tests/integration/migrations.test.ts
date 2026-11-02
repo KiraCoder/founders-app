@@ -321,6 +321,34 @@ describe("0010 holding on existing data", () => {
   });
 });
 
+describe("0011 holding fixes on existing data", () => {
+  it("adds attached_at and marks files already attached to an акт or a contract (they are never cleaned up)", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0011") });
+    const C1 = "33333333-3333-4333-8333-333333333331";
+    const C2 = "33333333-3333-4333-8333-333333333332";
+    const F = "55555555-5555-4555-8555-555555555555";
+    const file = (n: number) => `7777777${n}-7777-4777-8777-777777777777`;
+    await client.exec(`
+      insert into companies (id, slug, name) values ('${C1}', 'a', 'A'), ('${C2}', 'b', 'B');
+      insert into intercompany_flows (id, from_company_id, to_company_id, service) values ('${F}', '${C1}', '${C2}', 's');
+      insert into holding_files (id, storage, storage_key, original_name, content_type, size_bytes, sha256) values
+        ('${file(1)}', 'local', 'holding/1.pdf', 'a.pdf', 'application/pdf', 5, 'x'),
+        ('${file(2)}', 'local', 'holding/2.pdf', 'b.pdf', 'application/pdf', 5, 'x'),
+        ('${file(3)}', 'local', 'holding/3.pdf', 'c.pdf', 'application/pdf', 5, 'x');
+      insert into intercompany_acts (flow_id, period, attachment_file_id) values ('${F}', '2026-10-01', '${file(1)}');
+      insert into intercompany_contracts (flow_id, number, attachment_file_id) values ('${F}', '1', '${file(2)}');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rows = await client.query<{ id: string; attached: boolean }>("select id, attached_at is not null as attached from holding_files order by id");
+    expect(rows.rows).toEqual([
+      { id: file(1), attached: true },
+      { id: file(2), attached: true },
+      { id: file(3), attached: false },
+    ]);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();

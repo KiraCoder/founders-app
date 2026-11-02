@@ -1,7 +1,8 @@
 import "server-only";
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
-import { holdingFiles } from "@/server/db/schema";
+import { and, asc, eq, isNull, lt, sql } from "drizzle-orm";
+import type { Db } from "@/server/db/connect";
+import { holdingFiles, intercompanyActs, intercompanyContracts } from "@/server/db/schema";
 import { fileStorage, fileStorageByName } from "@/server/storage/file-storage";
 import { assertHoldingAccess, assertValidId } from "./access";
 import type { ServiceContext } from "./context";
@@ -54,8 +55,10 @@ export async function saveHoldingFile(ctx: ServiceContext, input: { name: string
   const storage = fileStorage();
   const id = randomUUID();
   const storageKey = `holding/${id}.${EXT[type]}`;
-  await storage.put(storageKey, input.bytes, type);
   const name = cleanFileName(input.name, type);
+  // Metadata first, bytes second: a failed insert leaves no file behind, and a failed
+  // write removes the row again — no orphan either way. (A row whose bytes are still being
+  // written reads as "not found" for that moment; nothing links to it yet.)
   await ctx.db.insert(holdingFiles).values({
     id,
     storage: storage.name,
@@ -67,6 +70,13 @@ export async function saveHoldingFile(ctx: ServiceContext, input: { name: string
     uploadedBy: ctx.user.id,
     createdAt: ctx.now,
   });
+  try {
+    await storage.put(storageKey, input.bytes, type);
+  } catch (err) {
+    await ctx.db.delete(holdingFiles).where(eq(holdingFiles.id, id)).catch(() => undefined);
+    await storage.delete(storageKey).catch(() => undefined);
+    throw err;
+  }
   return { id, name, contentType: type, sizeBytes: input.bytes.byteLength };
 }
 
@@ -78,4 +88,48 @@ export async function readHoldingFile(ctx: ServiceContext, id: string): Promise<
   const bytes = await fileStorageByName(row.storage).get(row.storageKey);
   if (!bytes) throw new ServiceError("not_found", "File not found");
   return { file: { id: row.id, name: row.originalName, contentType: row.contentType, sizeBytes: row.sizeBytes }, bytes };
+}
+
+/** Uploads not attached to anything after this long are removed. */
+export const UNATTACHED_FILE_TTL_MS = 24 * 60 * 60 * 1000;
+/** At most this many per tick (the tick runs every few minutes; a backlog drains over time). */
+export const CLEANUP_BATCH = 20;
+
+/**
+ * Removes uploads that were never attached to an акт or a contract (the founder uploaded
+ * and then closed the panel) once they are 24 h old. Called from the scheduler tick,
+ * bounded to CLEANUP_BATCH files. Only files never attached (attached_at null) and still
+ * referenced by nothing are removed; a document that was attached once is never deleted,
+ * even if it was replaced later. The row is deleted first (atomically re-checking that
+ * nothing points at it), then the bytes.
+ */
+export async function cleanupUnattachedFiles(db: Db, now: Date): Promise<{ removed: number }> {
+  const cutoff = new Date(now.getTime() - UNATTACHED_FILE_TTL_MS);
+  const candidates = await db
+    .select({ id: holdingFiles.id })
+    .from(holdingFiles)
+    .where(and(isNull(holdingFiles.attachedAt), lt(holdingFiles.createdAt, cutoff)))
+    .orderBy(asc(holdingFiles.createdAt))
+    .limit(CLEANUP_BATCH);
+  let removed = 0;
+  for (const c of candidates) {
+    const rows = await db
+      .delete(holdingFiles)
+      .where(
+        and(
+          eq(holdingFiles.id, c.id),
+          isNull(holdingFiles.attachedAt),
+          sql`not exists (select 1 from ${intercompanyActs} where ${intercompanyActs.attachmentFileId} = ${holdingFiles.id})`,
+          sql`not exists (select 1 from ${intercompanyContracts} where ${intercompanyContracts.attachmentFileId} = ${holdingFiles.id})`,
+        ),
+      )
+      .returning({ storage: holdingFiles.storage, storageKey: holdingFiles.storageKey });
+    const row = rows[0];
+    if (!row) continue;
+    removed++;
+    await fileStorageByName(row.storage)
+      .delete(row.storageKey)
+      .catch((err: unknown) => console.error("[holding] could not delete unattached file bytes", err));
+  }
+  return { removed };
 }

@@ -78,6 +78,13 @@
       "when": 1793660672347,
       "tag": "0010_holding",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793662993079,
+      "tag": "0011_holding_fixes",
+      "breakpoints": true
     }
   ]
 }

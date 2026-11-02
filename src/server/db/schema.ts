@@ -685,8 +685,15 @@ export const holdingFiles = pgTable("holding_files", {
   sha256: text("sha256").notNull(),
   uploadedBy: uuid("uploaded_by").references(() => users.id, { onDelete: "set null" }),
   archivedAt: timestamp("archived_at", { withTimezone: true }),
+  /**
+   * First time the file was attached to an акт or a contract. Uploads never attached
+   * within 24 h are removed by the tick (cleanupUnattachedFiles); a file once attached is
+   * kept even if it is later replaced (documents are never deleted).
+   */
+  attachedAt: timestamp("attached_at", { withTimezone: true }),
   createdAt: createdAt(),
 }, (t) => [
+  index("holding_files_unattached_idx").on(t.createdAt).where(sql`${t.attachedAt} is null`),
   check("holding_files_type", sql`${t.contentType} in ('application/pdf', 'image/jpeg', 'image/png')`),
   check("holding_files_size", sql`${t.sizeBytes} between 1 and 10485760`),
 ]);

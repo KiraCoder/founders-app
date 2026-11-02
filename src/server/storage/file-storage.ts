@@ -1,5 +1,5 @@
 import "server-only";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -12,6 +12,8 @@ export interface FileStorage {
   readonly name: "local" | "supabase";
   put(key: string, bytes: Uint8Array, contentType: string): Promise<void>;
   get(key: string): Promise<Uint8Array | null>;
+  /** Removes the bytes (only used for uploads that never became a document). Missing = fine. */
+  delete(key: string): Promise<void>;
 }
 
 const KEY_RE = /^[a-z0-9-]+\/[a-f0-9-]{36}\.(pdf|jpg|png)$/;
@@ -47,6 +49,14 @@ export class LocalFileStorage implements FileStorage {
       throw err;
     }
   }
+
+  async delete(key: string): Promise<void> {
+    try {
+      await unlink(this.pathFor(key));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
 }
 
 /**
@@ -60,6 +70,9 @@ export class SupabaseFileStorage implements FileStorage {
     throw new Error("Supabase Storage is not set up yet (FILE_STORAGE=supabase needs a developer)");
   }
   async get(): Promise<Uint8Array | null> {
+    throw new Error("Supabase Storage is not set up yet (FILE_STORAGE=supabase needs a developer)");
+  }
+  async delete(): Promise<void> {
     throw new Error("Supabase Storage is not set up yet (FILE_STORAGE=supabase needs a developer)");
   }
 }

@@ -5,6 +5,8 @@ import path from "node:path";
 import { NextRequest } from "next/server";
 import type { ServiceContext } from "@/server/services/context";
 import { LocalFileStorage, setFileStorageForTests } from "@/server/storage/file-storage";
+import { holdingFiles } from "@/server/db/schema";
+import { cleanupUnattachedFiles, saveHoldingFile } from "@/server/services/holding-files";
 import { createTestDb, type TestDb } from "../helpers/db";
 
 const state = vi.hoisted(() => ({ ctx: null as ServiceContext | null }));
@@ -146,5 +148,66 @@ describe("holding documents: upload and download", () => {
     expect((await asked.json()).data).toEqual({ changed: 1 });
     as(null);
     expect((await actsRoute()).status).toBe(401);
+  });
+});
+
+describe("serving: PDFs render inline, images keep the sandbox", () => {
+  it("PDF: inline, nosniff, no-store, no sandbox CSP; PNG: sandbox CSP", async () => {
+    as("nuraaly");
+    const pdf = (await (await upload(uploadReq(PDF, "a.pdf"))).json()).data.id as string;
+    const png = (await (await upload(uploadReq(PNG, "a.png", "image/png"))).json()).data.id as string;
+    const p = await download(new NextRequest("http://localhost/x"), params(pdf));
+    expect(p.headers.get("content-disposition")).toMatch(/^inline;/);
+    expect(p.headers.get("content-security-policy")).toBeNull();
+    expect(p.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(p.headers.get("cache-control")).toContain("no-store");
+    const i = await download(new NextRequest("http://localhost/x"), params(png));
+    expect(i.headers.get("content-security-policy")).toMatch(/^sandbox;/);
+    as("staff");
+    expect((await download(new NextRequest("http://localhost/x"), params(pdf))).status).toBe(403);
+  });
+});
+
+describe("no orphan files", () => {
+  it("a failed storage write leaves no row; a failed insert leaves no file", async () => {
+    const ctx = t.ctx("nuraaly");
+    const before = (await t.handle.db.select().from(holdingFiles)).length;
+    setFileStorageForTests({
+      name: "local",
+      put: async () => {
+        throw new Error("disk full");
+      },
+      get: async () => null,
+      delete: async () => undefined,
+    });
+    try {
+      await expect(saveHoldingFile(ctx, { name: "x.pdf", bytes: PDF })).rejects.toThrow(/disk full/);
+    } finally {
+      setFileStorageForTests(new LocalFileStorage(dir));
+    }
+    expect((await t.handle.db.select().from(holdingFiles)).length).toBe(before);
+    // Insert fails (user id that does not exist → FK error): nothing written to disk.
+    const files = readdirSync(path.join(dir, "holding")).length;
+    await expect(
+      saveHoldingFile({ ...ctx, user: { ...ctx.user, id: "00000000-0000-4000-8000-000000000000" } }, { name: "y.pdf", bytes: PDF }),
+    ).rejects.toThrow();
+    expect(readdirSync(path.join(dir, "holding")).length).toBe(files);
+  });
+
+  it("uploads never attached are removed after 24 h (bounded per run); attached documents never", async () => {
+    const db = t.handle.db;
+    const all = await db.select().from(holdingFiles);
+    const attached = all.filter((f) => f.attachedAt);
+    const unattached = all.filter((f) => !f.attachedAt);
+    expect(attached.length).toBeGreaterThan(0);
+    expect(unattached.length).toBeGreaterThan(0);
+    const created = Math.max(...all.map((f) => f.createdAt.getTime()));
+    // Not yet 24 h old: nothing removed.
+    expect(await cleanupUnattachedFiles(db, new Date(created + 23 * 3600_000))).toEqual({ removed: 0 });
+    const res = await cleanupUnattachedFiles(db, new Date(created + 25 * 3600_000));
+    expect(res.removed).toBe(unattached.length);
+    const left = await db.select().from(holdingFiles);
+    expect(left.map((f) => f.id).sort()).toEqual(attached.map((f) => f.id).sort());
+    expect(readdirSync(path.join(dir, "holding")).sort()).toEqual(attached.map((f) => f.storageKey.slice("holding/".length)).sort());
   });
 });

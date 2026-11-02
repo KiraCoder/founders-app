@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import { addDays, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import {
   actCountsAsInvoiced,
@@ -257,9 +257,18 @@ export interface FileRef {
   sizeBytes: number;
 }
 
-async function assertFile(db: Db, id: string | null | undefined): Promise<void> {
+/**
+ * Checks an attachment exists and marks it attached (so the 24 h cleanup of unattached
+ * uploads never touches it). Marking just before the акт / contract is saved is harmless
+ * if that save then fails: the file is merely kept.
+ */
+async function assertFile(db: Db, id: string | null | undefined, now: Date): Promise<void> {
   if (!id) return;
-  const [row] = await db.select({ id: holdingFiles.id }).from(holdingFiles).where(and(eq(holdingFiles.id, id), isNull(holdingFiles.archivedAt)));
+  const [row] = await db
+    .update(holdingFiles)
+    .set({ attachedAt: sql`coalesce(${holdingFiles.attachedAt}, ${now.toISOString()}::timestamptz)` })
+    .where(and(eq(holdingFiles.id, id), isNull(holdingFiles.archivedAt)))
+    .returning({ id: holdingFiles.id });
   if (!row) throw new ServiceError("validation", "Attachment not found (upload it again)", { attachmentFileId: ["Not found"] });
 }
 
@@ -344,7 +353,7 @@ export async function createContract(ctx: ServiceContext, input: ContractCreateI
   const data = contractCreateSchema.parse(input);
   await loadFlow(ctx.db, data.flowId);
   checkContractDates(data.signedOn ?? null, data.validUntil ?? null);
-  await assertFile(ctx.db, data.attachmentFileId);
+  await assertFile(ctx.db, data.attachmentFileId, ctx.now);
   const [row] = await ctx.db
     .insert(intercompanyContracts)
     .values({
@@ -378,7 +387,7 @@ export async function updateContract(ctx: ServiceContext, id: string, input: Con
   const signedOn = pick("signedOn", c.signedOn) as IsoDate | null;
   const validUntil = pick("validUntil", c.validUntil) as IsoDate | null;
   checkContractDates(signedOn, validUntil);
-  await assertFile(ctx.db, data.attachmentFileId);
+  await assertFile(ctx.db, data.attachmentFileId, ctx.now);
   await ctx.db
     .update(intercompanyContracts)
     .set({
@@ -634,7 +643,7 @@ export async function patchAct(ctx: ServiceContext, input: ActPatchInput): Promi
   if (data.actDate && data.actDate > todayIso) {
     throw new ServiceError("validation", "The act date can't be in the future", { actDate: ["In the future"] });
   }
-  await assertFile(ctx.db, data.attachmentFileId);
+  await assertFile(ctx.db, data.attachmentFileId, ctx.now);
 
   let debtChanged = false;
   let affectedFrom: IsoDate | null = null;
