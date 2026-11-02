@@ -2,6 +2,7 @@
 
 import { useActionState, useEffect, useRef } from "react";
 import { createTaskAction, type ActionState } from "@/app/(app)/actions";
+import { DateInput } from "@/components/DateInput";
 
 /** One-line personal todo capture for the Today page. */
 export function QuickAdd() {
@@ -21,7 +22,9 @@ export function QuickAdd() {
         aria-label="New personal todo"
         className="input w-full min-w-0 border-transparent sm:w-auto sm:flex-1"
       />
-      <input type="date" name="dueDate" aria-label="Due date" className="input min-w-0 flex-1 sm:w-[150px] sm:flex-none" />
+      <div className="min-w-0 flex-1 sm:w-[150px] sm:flex-none">
+        <DateInput name="dueDate" aria-label="Due date" className="input w-full" />
+      </div>
       <button type="submit" className="btn btn-primary" disabled={pending}>
         Add
       </button>

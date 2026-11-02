@@ -7,6 +7,7 @@ import { ACT_STATUS_LABELS, monthLong, type ActStatusValue } from "@/lib/holding
 import { formatMoney } from "@/lib/money";
 import type { ArchivedFlowAct, FlowView } from "@/server/services/holding";
 import { CompanyDot, Tag } from "@/components/ui";
+import { DateInput } from "@/components/DateInput";
 
 type Company = { id: string; name: string };
 
@@ -180,14 +181,14 @@ function FlowForm({ flow, companies, onDone }: { flow: FlowView | null; companie
         <label className="label" htmlFor="fl-since">
           Since (first month with an акт)
         </label>
-        <input id="fl-since" name="since" type="date" className="input" defaultValue={flow?.since ?? ""} />
+        <DateInput id="fl-since" name="since" defaultValue={flow?.since ?? ""} />
         {err("since") && <p className="mt-1 text-[12px] text-risk">{err("since")}</p>}
       </div>
       <div>
         <label className="label" htmlFor="fl-until">
           Until (optional)
         </label>
-        <input id="fl-until" name="until" type="date" className="input" defaultValue={flow?.until ?? ""} />
+        <DateInput id="fl-until" name="until" defaultValue={flow?.until ?? ""} />
         {err("until") && <p className="mt-1 text-[12px] text-risk">{err("until")}</p>}
       </div>
       <div className="sm:col-span-2">

@@ -7,6 +7,7 @@ import { ACT_STATUS_LABELS, ACT_STATUSES, CELL_STATE_LABELS, monthList, monthLon
 import { formatMoney } from "@/lib/money";
 import type { ActCell, ActsGrid as Grid } from "@/server/services/holding";
 import { ACCEPT, fileUrl, uploadHoldingFile } from "./upload";
+import { DateInput } from "@/components/DateInput";
 
 const TONE_CLASS: Record<CellTone, string> = {
   ok: "bg-accent-soft text-accent border-transparent",
@@ -244,7 +245,7 @@ function CellPanel({ flowLabel, cell, today, onClose }: { flowLabel: string; cel
             <label className="label" htmlFor="act-requested-on">
               Asked Elmurat on
             </label>
-            <input id="act-requested-on" type="date" className="input" value={requestedOn} max={today} onChange={(e) => setRequestedOn(e.target.value)} />
+            <DateInput id="act-requested-on" value={requestedOn} max={today} onChange={setRequestedOn} />
             {err("requestedOn") && <p className="mt-1 text-[12px] text-risk">{err("requestedOn")}</p>}
           </div>
         )}
@@ -267,7 +268,7 @@ function CellPanel({ flowLabel, cell, today, onClose }: { flowLabel: string; cel
             <label className="label" htmlFor="act-date">
               Act date
             </label>
-            <input id="act-date" type="date" className="input" max={today} value={actDate} onChange={(e) => setActDate(e.target.value)} />
+            <DateInput id="act-date" max={today} value={actDate} onChange={setActDate} />
             {err("actDate") && <p className="mt-1 text-[12px] text-risk">{err("actDate")}</p>}
           </div>
         </div>

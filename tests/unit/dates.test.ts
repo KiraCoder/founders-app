@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   addDays,
+  formatDisplayDate,
+  parseDisplayDate,
   daysBetween,
   endOfIsoWeek,
   formatDueDate,
@@ -52,5 +54,25 @@ describe("date arithmetic", () => {
     expect(formatDueDate("2026-11-01", "2026-11-02")).toBe("Yesterday");
     expect(formatDueDate("2026-11-20", "2026-11-02")).toBe("20 Nov");
     expect(formatDueDate("2027-01-05", "2026-11-02")).toBe("5 Jan 2027");
+  });
+});
+
+describe("date fields: dd.mm.yyyy", () => {
+  it("formats ISO dates as dd.mm.yyyy", () => {
+    expect(formatDisplayDate("2026-11-02")).toBe("02.11.2026");
+    expect(formatDisplayDate("")).toBe("");
+    expect(formatDisplayDate(null)).toBe("");
+  });
+  it("reads dd.mm.yyyy, d.m.yyyy, / or - separators and pasted ISO; refuses the rest", () => {
+    expect(parseDisplayDate("02.11.2026")).toBe("2026-11-02");
+    expect(parseDisplayDate(" 2.1.2026 ")).toBe("2026-01-02");
+    expect(parseDisplayDate("02/11/2026")).toBe("2026-11-02");
+    expect(parseDisplayDate("2026-11-02")).toBe("2026-11-02");
+    expect(parseDisplayDate("")).toBeNull();
+    expect(parseDisplayDate("31.02.2026")).toBe("invalid");
+    expect(parseDisplayDate("02.11.26")).toBe("invalid");
+    expect(parseDisplayDate("11/31/2026")).toBe("invalid");
+    expect(parseDisplayDate("tomorrow")).toBe("invalid");
+    expect(parseDisplayDate("2026-02-30")).toBe("invalid");
   });
 });

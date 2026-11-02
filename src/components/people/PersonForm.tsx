@@ -3,6 +3,7 @@
 import { useActionState, useEffect, useState } from "react";
 import { createPersonAction, updatePersonAction, type PeopleActionState } from "@/app/(app)/people/actions";
 import { EMPLOYMENT_TYPE_LABELS, EMPLOYMENT_TYPE_VALUES, PAY_TYPE_LABELS, SALARY_PAY_TYPE_VALUES } from "@/lib/people-schemas";
+import { DateInput } from "@/components/DateInput";
 
 export interface CompanyOption {
   id: string;
@@ -83,7 +84,7 @@ export function LinkFields({
           </div>
           <div>
             <label className="label" htmlFor="lf-start">Start date</label>
-            <input id="lf-start" type="date" name="startedOn" className="input" />
+            <DateInput id="lf-start" name="startedOn" />
           </div>
         </div>
       </div>
@@ -112,7 +113,7 @@ export function LinkFields({
             </div>
             <div>
               <label className="label" htmlFor="lf-from">Effective from</label>
-              <input id="lf-from" type="date" name="salaryFrom" className="input" />
+              <DateInput id="lf-from" name="salaryFrom" />
             </div>
           </div>
         </fieldset>

@@ -5,6 +5,7 @@ import { useState, useTransition } from "react";
 import { addLedgerEntryAction, archiveLedgerEntryAction, type HoldingActionState } from "@/app/(app)/holding/actions";
 import { formatMoney } from "@/lib/money";
 import type { DebtsView, LedgerEntryView } from "@/server/services/holding";
+import { DateInput } from "@/components/DateInput";
 
 type Company = { id: string; name: string };
 
@@ -126,7 +127,7 @@ export function DebtsSection({ debts, entries, companies, today }: { debts: Debt
             <label className="label" htmlFor="le-date">
               Date
             </label>
-            <input id="le-date" name="entryDate" type="date" className="input" required max={today} defaultValue={today} />
+            <DateInput id="le-date" name="entryDate" required max={today} defaultValue={today} />
             {err("entryDate") && <p className="mt-1 text-[12px] text-risk">{err("entryDate")}</p>}
           </div>
           <div>

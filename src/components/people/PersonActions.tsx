@@ -11,6 +11,7 @@ import {
 import { Icon } from "@/components/Icon";
 import { PAY_TYPE_LABELS, SALARY_PAY_TYPE_VALUES } from "@/lib/people-schemas";
 import { LinkFields, type CompanyOption } from "./PersonForm";
+import { DateInput } from "@/components/DateInput";
 
 export function PersonStatusButton({ personId, left }: { personId: string; left: boolean }) {
   const [confirm, setConfirm] = useState(false);
@@ -127,7 +128,7 @@ export function SalaryForm({ linkId }: { linkId: string }) {
           </option>
         ))}
       </select>
-      <input type="date" name="effectiveFrom" className="input" aria-label="Effective from" />
+      <DateInput name="effectiveFrom" aria-label="Effective from" />
       <input name="note" className="input" placeholder="Note (optional)" maxLength={500} aria-label="Note" />
       <div className="flex gap-2">
         <button type="submit" className="btn btn-primary" disabled={pending}>

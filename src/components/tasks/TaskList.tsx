@@ -10,6 +10,7 @@ import type { TaskFormOptions } from "@/server/services/options";
 import { PRIORITY_TONE, STATUS_OPTIONS, STATUS_TONE, priorityLabel, statusLabel } from "./labels";
 import { TaskForm } from "./TaskForm";
 import type { TaskItem } from "./types";
+import { DateInput } from "@/components/DateInput";
 
 export function TaskList({
   tasks,
@@ -153,13 +154,7 @@ function TaskRow({
               <label className="label" htmlFor={`deadline-${task.id}`}>
                 Move deadline
               </label>
-              <input
-                id={`deadline-${task.id}`}
-                type="date"
-                className="input w-[170px]"
-                value={deadline}
-                onChange={(e) => setDeadline(e.target.value)}
-              />
+              <DateInput id={`deadline-${task.id}`} className="input w-[170px]" value={deadline} onChange={setDeadline} />
             </div>
             <button
               type="button"

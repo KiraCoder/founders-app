@@ -5,6 +5,7 @@ import { createTaskAction, updateTaskAction, type ActionState } from "@/app/(app
 import type { TaskFormOptions } from "@/server/services/options";
 import { PRIORITY_OPTIONS, STATUS_OPTIONS } from "./labels";
 import type { TaskItem } from "./types";
+import { DateInput } from "@/components/DateInput";
 
 export interface TaskFormDefaults {
   visibility?: "private" | "shared";
@@ -115,7 +116,7 @@ export function TaskForm({
         </div>
         <div>
           <label className="label">Due date</label>
-          <input type="date" name="dueDate" className="input" defaultValue={task?.dueDate ?? ""} />
+          <DateInput name="dueDate" aria-label="Due date" defaultValue={task?.dueDate ?? ""} />
         </div>
         <div>
           <label className="label">Priority</label>

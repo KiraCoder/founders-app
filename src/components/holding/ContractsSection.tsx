@@ -7,6 +7,7 @@ import { CONTRACT_STATUS_LABELS, CONTRACT_STATUSES, contractWarningText } from "
 import type { ContractView, FlowView } from "@/server/services/holding";
 import { Tag } from "@/components/ui";
 import { ACCEPT, fileUrl, uploadHoldingFile } from "./upload";
+import { DateInput } from "@/components/DateInput";
 
 /** Intercompany договоры: list with expiry warnings, add / edit / archive, optional scan. */
 export function ContractsSection({ contracts, flows }: { contracts: ContractView[]; flows: FlowView[] }) {
@@ -130,13 +131,13 @@ function ContractForm({ contract, flows, onDone }: { contract: ContractView | nu
         <label className="label" htmlFor="ct-signed">
           Signed on
         </label>
-        <input id="ct-signed" name="signedOn" type="date" className="input" defaultValue={contract?.signedOn ?? ""} />
+        <DateInput id="ct-signed" name="signedOn" defaultValue={contract?.signedOn ?? ""} />
       </div>
       <div>
         <label className="label" htmlFor="ct-until">
           Valid until
         </label>
-        <input id="ct-until" name="validUntil" type="date" className="input" defaultValue={contract?.validUntil ?? ""} />
+        <DateInput id="ct-until" name="validUntil" defaultValue={contract?.validUntil ?? ""} />
         {err("validUntil") && <p className="mt-1 text-[12px] text-risk">{err("validUntil")}</p>}
       </div>
       <div className="sm:col-span-2">

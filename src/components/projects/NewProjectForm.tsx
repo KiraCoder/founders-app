@@ -3,6 +3,7 @@
 import { useActionState, useEffect, useRef, useState } from "react";
 import { createProjectAction, type ActionState } from "@/app/(app)/actions";
 import { Icon } from "@/components/Icon";
+import { DateInput } from "@/components/DateInput";
 
 export function NewProjectForm({ companyId }: { companyId: string }) {
   const [open, setOpen] = useState(false);
@@ -32,7 +33,7 @@ export function NewProjectForm({ companyId }: { companyId: string }) {
         </div>
         <div>
           <label className="label">Due date</label>
-          <input type="date" name="dueDate" className="input" />
+          <DateInput name="dueDate" aria-label="Due date" />
         </div>
       </div>
       <div>

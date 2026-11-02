@@ -40,9 +40,15 @@ type TabKey = (typeof TABS)[number]["key"];
 
 type Props = { params: Promise<{ slug: string }>; searchParams: Promise<{ tab?: string; g?: string }> };
 
+/** The tab title is the company's name as written ("Kiwi Go"), not its URL slug. */
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
-  return { title: slug.replace(/-/g, " ") };
+  try {
+    const ctx = await getPageContext();
+    return { title: (await getCompanyBySlug(ctx, slug)).name };
+  } catch {
+    return { title: "Company" };
+  }
 }
 
 async function loadCompany(slug: string) {

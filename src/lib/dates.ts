@@ -155,3 +155,24 @@ export function windowEndAfter(now: Date, start: HmTime, end: HmTime, timeZone: 
   if (!isWithinWindow(now, start, end, timeZone)) return now;
   return endToday.getTime() > now.getTime() ? endToday : zonedTimeToUtc(addDays(todayIso, 1), end, timeZone);
 }
+
+/** "2026-11-02" → "02.11.2026" (how dates are typed and shown in date fields). */
+export function formatDisplayDate(iso: string | null | undefined): string {
+  if (!iso || !isIsoDate(iso)) return "";
+  return `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}`;
+}
+
+/**
+ * What a founder typed in a date field → ISO date. Accepts dd.mm.yyyy (also d.m.yyyy and
+ * "/" or "-" as separator) and a pasted ISO yyyy-mm-dd. Two-digit years and impossible
+ * dates (31.02.2026) are refused. Empty → null; anything else → "invalid".
+ */
+export function parseDisplayDate(text: string): IsoDate | null | "invalid" {
+  const t = text.trim();
+  if (!t) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return isIsoDate(t) ? t : "invalid";
+  const m = /^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/.exec(t);
+  if (!m) return "invalid";
+  const iso = `${m[3]}-${m[2]!.padStart(2, "0")}-${m[1]!.padStart(2, "0")}`;
+  return isIsoDate(iso) ? iso : "invalid";
+}
