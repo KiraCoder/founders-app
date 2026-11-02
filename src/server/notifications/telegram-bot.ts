@@ -5,7 +5,7 @@ import { toServiceError } from "@/server/services/errors";
 import { applyHoldingAskAction } from "@/server/services/holding-asks";
 import { applyTaskAction } from "@/server/services/notifications";
 import { getTodaySummary } from "@/server/services/tasks";
-import { consumeActionToken } from "./action-tokens";
+import { consumeActionToken, liveCallbacks } from "./action-tokens";
 import { consumeLinkCode, findLinkByChat } from "./linking";
 import { buildHelp, buildMorningSummary, buildNotLinked, buildTasksList } from "./messages";
 import { escapeHtml, renderTelegram } from "./render-telegram";
@@ -115,6 +115,10 @@ async function handleCallback(
   const actions: BotAction[] = [answer(result)];
   if (cq.message) {
     const original = cq.message.text ? escapeHtml(cq.message.text) : "";
+    // editMessageText without reply_markup removes every button, so the summary's other
+    // buttons (other tasks, the other holding line) are sent again — only those that still
+    // work: not the one just pressed, none for the same task / item, none used or expired.
+    const keyboard = await remainingKeyboard(db, cq.message, cq.data, token, link.user.id, now);
     actions.push({
       method: "editMessageText",
       params: {
@@ -122,10 +126,37 @@ async function handleCallback(
         message_id: cq.message.message_id,
         text: `${original}\n\n<i>${escapeHtml(result)}</i>`.trim(),
         parse_mode: "HTML",
+        ...(keyboard.length ? { reply_markup: { inline_keyboard: keyboard } } : {}),
       },
     });
   }
   return actions;
+}
+
+type Button = { text: string; callback_data: string };
+
+async function remainingKeyboard(
+  db: Db,
+  message: NonNullable<NonNullable<TelegramUpdate["callback_query"]>["message"]>,
+  pressed: string,
+  token: Awaited<ReturnType<typeof consumeActionToken>>,
+  userId: string,
+  now: Date,
+): Promise<Button[][]> {
+  const buttons = (message.reply_markup?.inline_keyboard ?? [])
+    .flat()
+    .filter((b): b is Button => typeof b.callback_data === "string" && b.callback_data !== pressed);
+  if (!buttons.length) return [];
+  const live = await liveCallbacks(db, buttons.map((b) => b.callback_data), userId, now);
+  const sameSubject = (s: { taskId: string | null; holdingAskId: string | null }) =>
+    token?.kind === "task" ? s.taskId === token.taskId : token?.kind === "holding" ? s.holdingAskId === token.askId : false;
+  const keep = buttons.filter((b) => {
+    const s = live.get(b.callback_data);
+    return !!s && !sameSubject(s);
+  });
+  const rows: Button[][] = [];
+  for (let i = 0; i < keep.length; i += 2) rows.push(keep.slice(i, i + 2));
+  return rows;
 }
 
 /** Performs the calls through the Bot API. Errors are logged, never thrown (Telegram would retry). */

@@ -112,6 +112,24 @@ describe("ask / reminder items never pile up", () => {
     expect(pending).toHaveLength(0);
   });
 
+  it("Telegram: pressing one button keeps the summary's other still-valid buttons", async () => {
+    const m = morningOf("talant", "2026-12-14")!;
+    const [askData, reminderData] = Object.values(m.callbacks!);
+    const keyboard = { inline_keyboard: [[{ text: "I asked Elmurat", callback_data: askData! }, { text: "I asked again", callback_data: reminderData! }]] };
+    const press = (data: string) =>
+      handleTelegramUpdate(
+        t.handle.db,
+        { update_id: 2, callback_query: { id: "cb", from: { id: 222 }, data, message: { message_id: 7, chat: { id: 222, type: "private" }, text: "Good morning", reply_markup: keyboard } } },
+        bishkek("2026-12-14", "09:40"),
+      );
+    const first = await press(askData!);
+    const edit = first.find((a) => a.method === "editMessageText")!;
+    expect(edit.params.reply_markup).toEqual({ inline_keyboard: [[{ text: "I asked again", callback_data: reminderData }]] });
+    const second = await press(reminderData!);
+    // Both used now: the edited message has no buttons left.
+    expect(second.find((a) => a.method === "editMessageText")!.params.reply_markup).toBeUndefined();
+  });
+
   it("failed sends: retries do not stack items either", async () => {
     failSends = true;
     // Mondays 21 and 28 Dec: a new reminder each week while every send fails.

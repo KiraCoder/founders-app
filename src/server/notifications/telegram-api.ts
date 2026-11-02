@@ -74,6 +74,8 @@ export interface TelegramMessage {
   from?: TelegramUser;
   chat: TelegramChat;
   text?: string;
+  /** The inline keyboard the message carries (Telegram sends it back with a button press). */
+  reply_markup?: { inline_keyboard?: { text: string; callback_data?: string }[][] };
 }
 export interface TelegramCallbackQuery {
   id: string;
