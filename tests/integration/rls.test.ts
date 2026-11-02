@@ -44,6 +44,9 @@ describe("row level security after migrate", () => {
         "telegram_link_codes",
         "notification_action_tokens",
         "reminder_snoozes",
+        "salaries",
+        "salary_viewers",
+        "salary_access_log",
       ]),
     );
     expect(tables.filter((t) => !t.rls).map((t) => t.name)).toEqual([]);
