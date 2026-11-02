@@ -1,20 +1,29 @@
 import "./env";
 import { connectDb } from "@/server/db/connect";
-import { DEV_PASSWORD_DEFAULT, seed } from "@/server/db/seed";
+import { seed } from "@/server/db/seed";
+import { planSeed } from "@/server/db/seed-config";
 
 async function main() {
   const handle = await connectDb();
-  const password = process.env.DEV_FOUNDER_PASSWORD || DEV_PASSWORD_DEFAULT;
-  if (handle.driver === "postgres" && !process.env.DEV_FOUNDER_PASSWORD) {
-    console.error(
-      "[db:seed] Refusing to seed a real Postgres database with the default dev password. " +
-        "Set DEV_FOUNDER_PASSWORD to a strong password first.",
-    );
+  const decision = planSeed(handle.driver, process.env);
+  if (!decision.ok) {
+    console.error(`[db:seed] ${decision.error}`);
+    await handle.close();
     process.exit(1);
   }
-  await seed(handle.db, { password, timeZone: process.env.APP_TIMEZONE });
+  const { plan } = decision;
+  await seed(handle.db, {
+    password: plan.password,
+    withSamples: plan.withSamples,
+    resetPasswords: plan.resetPasswords,
+    timeZone: process.env.APP_TIMEZONE,
+  });
   await handle.close();
-  console.log(`[db:seed] done (driver=${handle.driver}). Founders: nuraaly@founders.local, talant@founders.local`);
+  console.log(
+    `[db:seed] done (driver=${handle.driver}, samples=${plan.withSamples ? "yes" : "no"}, ` +
+      `passwords=${plan.resetPasswords ? "reset, sessions revoked" : "kept for existing founders"}). ` +
+      "Founders: nuraaly@founders.local, talant@founders.local",
+  );
 }
 
 main().catch((err) => {

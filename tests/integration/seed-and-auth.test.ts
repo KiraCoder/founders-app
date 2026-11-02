@@ -51,6 +51,36 @@ describe("seed", () => {
   });
 });
 
+describe("re-running the seed", () => {
+  it("keeps existing founders' passwords and sessions unless resetPasswords is set", async () => {
+    const { seed } = await import("@/server/db/seed");
+    const before = await localAuthProvider.signIn(t.handle.db, "talant@founders.local", "test-password");
+    expect(before).not.toBeNull();
+
+    await seed(t.handle.db, { password: "another-password", bcryptRounds: 4 });
+    expect(await localAuthProvider.signIn(t.handle.db, "talant@founders.local", "another-password")).toBeNull();
+    expect(await localAuthProvider.getUser(t.handle.db, before!.token)).not.toBeNull();
+
+    await seed(t.handle.db, { password: "another-password", bcryptRounds: 4, resetPasswords: true });
+    // Old sessions are revoked, the new password works, the old one does not.
+    expect(await localAuthProvider.getUser(t.handle.db, before!.token)).toBeNull();
+    expect(await localAuthProvider.signIn(t.handle.db, "talant@founders.local", "another-password")).not.toBeNull();
+    expect(await localAuthProvider.signIn(t.handle.db, "talant@founders.local", "test-password")).toBeNull();
+
+    // Restore for the other tests in this file.
+    await seed(t.handle.db, { password: "test-password", bcryptRounds: 4, resetPasswords: true });
+  });
+
+  it("adds no sample tasks unless asked", async () => {
+    const fresh = await createTestDb({ withSamples: false });
+    try {
+      expect(await listTasks(fresh.ctx("nuraaly"), { status: "any" })).toHaveLength(0);
+    } finally {
+      await fresh.handle.close();
+    }
+  });
+});
+
 describe("local auth", () => {
   it("signs in with the right password and resolves the session", async () => {
     const res = await localAuthProvider.signIn(t.handle.db, "Nuraaly@Founders.local ", "test-password");

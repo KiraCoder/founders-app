@@ -29,7 +29,7 @@ Stop `npm run dev` before running `db:*` scripts: the embedded database allows o
 | `npm run test:e2e` | Playwright smoke test (builds and starts the app on port 3100) |
 | `npm run db:generate` | Create a new SQL migration after editing `src/server/db/schema.ts` |
 | `npm run db:migrate` | Apply migrations (PGlite or `DATABASE_URL`) |
-| `npm run db:seed` | Load founders, companies, people and `[sample]` tasks (safe to re-run) |
+| `npm run db:seed` | Load founders, companies, people and (local DB only, by default) `[sample]` tasks. Safe to re-run: existing founders keep their password |
 | `npm run db:reset` | **Local only.** Wipe + migrate + seed. Refuses to run against a non-localhost database |
 | `npm run cron:tick` | Run the notification scheduler once against the running app (needs `CRON_SECRET`) |
 | `npm run telegram:poll` | Local Telegram bot without a public URL (needs `TELEGRAM_BOT_TOKEN` + `TELEGRAM_WEBHOOK_SECRET`) |
@@ -50,7 +50,9 @@ the Vercel / Supabase dashboards.
 3. **Create the tables once** from your computer:
    create a file `.env.local` with `DATABASE_URL=<that string>` and `DEV_FOUNDER_PASSWORD=<a strong password>`,
    then run `npm run db:migrate` and `npm run db:seed`. Delete `.env.local` afterwards if you like.
-   (The seed refuses to use the default dev password on a real database.)
+   (The seed refuses the dev password or anything shorter than 12 characters on a real database,
+   adds no `[sample]` tasks there unless `SEED_SAMPLES=1`, and never changes an existing founder's
+   password unless `SEED_RESET_PASSWORDS=1`, which also signs them out everywhere.)
 4. **Create the website.** Sign in at vercel.com with GitHub → *Add New → Project* → pick this repository.
 5. **Add environment variables** in Vercel → *Settings → Environment Variables*:
    - `DATABASE_URL` = the Supabase connection string from step 2

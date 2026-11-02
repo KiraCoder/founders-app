@@ -1,7 +1,8 @@
 /**
- * Seed data: the two founders, the group's companies, a few people and clearly-marked
- * "[sample]" projects/tasks. Safe to run more than once (upserts by email/slug; sample
- * tasks are only inserted when none exist yet).
+ * Seed data: the two founders, the group's companies, a few people and (opt-in)
+ * clearly-marked "[sample]" projects/tasks. Safe to run more than once (upserts by
+ * email/slug; existing founders keep their password unless `resetPasswords`; sample
+ * tasks are only inserted when none exist yet). See seed-config.ts for the CLI rules.
  *
  * Used by `npm run db:seed` and by tests (no "server-only" on purpose).
  */
@@ -15,6 +16,7 @@ import {
   people,
   personCompanies,
   projects,
+  sessions,
   tasks,
   users,
 } from "./schema";
@@ -112,8 +114,13 @@ export interface SeedOptions {
   /** Override "now" (tests). */
   now?: Date;
   timeZone?: string;
-  /** Skip "[sample]" projects and tasks. */
+  /** Add "[sample]" projects and tasks (default: no). */
   withSamples?: boolean;
+  /**
+   * Re-hash the password of founders that already exist and revoke their sessions.
+   * Default: existing founders keep their password (re-running the seed is harmless).
+   */
+  resetPasswords?: boolean;
   /** bcrypt cost; tests use a low value for speed. */
   bcryptRounds?: number;
 }
@@ -136,10 +143,13 @@ export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResul
       .values({ email: f.email, name: f.name, shortName: f.shortName, passwordHash: hash, role: "founder" })
       .onConflictDoUpdate({
         target: users.email,
-        set: { name: f.name, shortName: f.shortName, passwordHash: hash },
+        set: options.resetPasswords
+          ? { name: f.name, shortName: f.shortName, passwordHash: hash, updatedAt: new Date() }
+          : { name: f.name, shortName: f.shortName },
       })
       .returning({ id: users.id });
     userIds[f.key] = row!.id;
+    if (options.resetPasswords) await db.delete(sessions).where(eq(sessions.userId, row!.id));
   }
 
   // --- Companies & units -----------------------------------------------------
@@ -215,7 +225,7 @@ export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResul
   );
 
   // --- Samples ---------------------------------------------------------------
-  if (options.withSamples !== false) {
+  if (options.withSamples === true) {
     const already = await db.select({ id: tasks.id }).from(tasks).where(like(tasks.title, "[sample]%")).limit(1);
     if (already.length === 0) {
       await seedSamples(db, { userIds, companyIds, personIds }, options);

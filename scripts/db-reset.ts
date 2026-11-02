@@ -30,7 +30,10 @@ async function main() {
     console.log("[db:reset] dropped local Postgres schemas");
   }
   await runMigrations(handle);
-  await seed(handle.db, { password: process.env.DEV_FOUNDER_PASSWORD || DEV_PASSWORD_DEFAULT });
+  await seed(handle.db, {
+    password: process.env.DEV_FOUNDER_PASSWORD || DEV_PASSWORD_DEFAULT,
+    withSamples: process.env.SEED_SAMPLES !== "0",
+  });
   await handle.close();
   console.log("[db:reset] done");
 }
