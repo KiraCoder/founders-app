@@ -94,3 +94,19 @@ test("holding: a scan just under 10 MB uploads intact through the middleware; ov
   expect(res.status()).toBe(413);
   expect(((await res.json()) as { error: { message: string } }).error.message).toMatch(/larger than 10 MB/);
 });
+
+test("company tab title uses the name; date fields show dd.mm.yyyy and refuse impossible dates", async ({ page }) => {
+  await login(page, "nuraaly");
+  await page.goto("/companies/kiwi-go");
+  await expect(page).toHaveTitle("Kiwi Go · Founder Cockpit");
+  await page.goto("/holding");
+  await page.locator('[data-testid="act-cell"][data-cell-state="missing"]').first().click();
+  const panel = page.getByTestId("act-panel");
+  const actDate = panel.locator("#act-date");
+  await actDate.fill("31.02.2026");
+  await expect(panel.getByText("Use dd.mm.yyyy")).toBeVisible();
+  await actDate.fill("2.10.2026");
+  await expect(panel.getByText("Use dd.mm.yyyy")).toBeHidden();
+  await actDate.blur();
+  await expect(actDate).toHaveValue("02.10.2026");
+});
