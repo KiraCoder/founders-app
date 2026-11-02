@@ -12,7 +12,7 @@ import { ComingSoon, CompanyDot, PageHeader, Section, TabNav, Tag } from "@/comp
 import { DataSources } from "@/components/metrics/DataSources";
 import { KpiCard } from "@/components/metrics/KpiCard";
 import { NumbersGrid } from "@/components/metrics/NumbersGrid";
-import { formatPeriodShort, GRANULARITY_LABELS, lastPeriods, type Granularity } from "@/lib/metrics";
+import { formatMetricInput, formatPeriodShort, GRANULARITY_LABELS, lastEnterablePeriod, lastPeriods, type Granularity } from "@/lib/metrics";
 import { STUB_SPECS } from "@/server/connectors/stubs";
 import { listConnectorStatuses } from "@/server/services/connectors";
 import { currentValues, listCompanyMetricCards, listMetricDefinitions } from "@/server/services/metrics";
@@ -174,9 +174,10 @@ async function NumbersTab({ ctx, company, granularity }: { ctx: Ctx; company: Co
   const available = (["month", "week", "day"] as const).filter((x) => defs.some((d) => d.granularity === x));
   const g: Granularity = available.includes(granularity as Granularity) ? (granularity as Granularity) : available[0]!;
   const metrics = defs.filter((d) => d.granularity === g);
-  const periods = lastPeriods(today(ctx), g, GRID_ROWS[g]).reverse();
+  // Rows end at the last period that may be entered: today (daily), the last finished week / month.
+  const periods = lastPeriods(lastEnterablePeriod(today(ctx), g), g, GRID_ROWS[g]).reverse();
   const current = await currentValues(ctx.db, metrics.map((m) => m.id), { from: periods.at(-1)!, to: periods[0]! });
-  const values = Object.fromEntries([...current.entries()].map(([k, v]) => [k, String(v)]));
+  const values = Object.fromEntries([...current.entries()].map(([k, v]) => [k, formatMetricInput(v)]));
   return (
     <>
       <div className="mb-3 flex flex-wrap items-center gap-2">

@@ -28,7 +28,8 @@ export async function enterMetricValueAction(_prev: MetricActionState, fd: FormD
     const res = await recordMetricValue(ctx, str(fd, "metricId") ?? "", {
       period: str(fd, "period") ?? "",
       value: str(fd, "value") ?? "",
-      note: str(fd, "note") || null,
+      // Empty = keep the existing note (the REST API clears one with `note: null`).
+      note: str(fd, "note")?.trim() || undefined,
     });
     revalidatePath("/", "layout");
     return {

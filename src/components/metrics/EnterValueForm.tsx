@@ -9,7 +9,7 @@ export function EnterValueForm({
   unit,
   granularity,
   defaultPeriod,
-  maxPeriod,
+  maxDate,
 }: {
   metricId: string;
   label: string;
@@ -17,8 +17,8 @@ export function EnterValueForm({
   granularity: "day" | "week" | "month";
   /** "YYYY-MM-DD" (period start). */
   defaultPeriod: string;
-  /** Latest allowed period start (current period). */
-  maxPeriod: string;
+  /** Last day that may be chosen: today (daily), else the last day of the last COMPLETE week / month. */
+  maxDate: string;
 }) {
   const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState<MetricActionState, FormData>(enterMetricValueAction, {});
@@ -48,7 +48,7 @@ export function EnterValueForm({
       <div className="grid grid-cols-2 gap-2">
         <div>
           <label className="label" htmlFor={`${id}-period`}>
-            {month ? "Month" : granularity === "week" ? "Any day in the week" : "Day"}
+            {month ? "Month (finished)" : granularity === "week" ? "Any day in the week (finished)" : "Day"}
           </label>
           <input
             id={`${id}-period`}
@@ -57,7 +57,7 @@ export function EnterValueForm({
             className="input"
             required
             defaultValue={month ? defaultPeriod.slice(0, 7) : defaultPeriod}
-            max={month ? maxPeriod.slice(0, 7) : granularity === "week" ? undefined : maxPeriod}
+            max={month ? maxDate.slice(0, 7) : maxDate}
           />
         </div>
         <div>
@@ -69,7 +69,7 @@ export function EnterValueForm({
       </div>
       <div>
         <label className="label" htmlFor={`${id}-note`}>
-          Note (optional)
+          Note (optional; empty keeps the existing note)
         </label>
         <input id={`${id}-note`} name="note" className="input" maxLength={500} autoComplete="off" />
       </div>

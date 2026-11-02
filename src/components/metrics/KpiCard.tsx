@@ -2,12 +2,13 @@ import { Tag, type Tone } from "@/components/ui";
 import type { IsoDate } from "@/lib/dates";
 import {
   agoText,
+  defaultEntryPeriod,
   formatDelta,
   formatMetricValue,
   formatPeriod,
   freshnessTone,
-  nextPeriod,
-  periodStart,
+  lastEnterablePeriod,
+  periodEnd,
 } from "@/lib/metrics";
 import type { MetricCard } from "@/server/services/metrics";
 import { EnterValueForm } from "./EnterValueForm";
@@ -29,19 +30,11 @@ function freshnessTag(m: MetricCard, today: IsoDate): { tone: Tone; text: string
   if (f.status === "fresh") return { tone: "ok", text: "Fresh" };
   if (f.status === "missing") return { tone: "risk", text: `No data yet · waiting for ${formatPeriod(f.waitingFor!, m.granularity)}` };
   const n = f.overduePeriods;
-  const behind = f.status === "very_stale" ? `${n >= 3 ? "3+" : n} periods missing` : `Waiting for ${formatPeriod(f.waitingFor!, m.granularity)}`;
+  const behind =
+    n === 1 && !f.moreBeforeWindow
+      ? `Waiting for ${formatPeriod(f.waitingFor!, m.granularity)}`
+      : `${n}${f.moreBeforeWindow ? "+" : ""} missing · from ${formatPeriod(f.waitingFor!, m.granularity)}`;
   return { tone: freshnessTone(f.status) as Tone, text: `${behind} · due ${agoText(f.dueOn!, today)}` };
-}
-
-/** Period the "Enter value" form opens with: the one we are waiting for, else the next one (not in the future). */
-function defaultPeriod(m: MetricCard, today: IsoDate): IsoDate {
-  const current = periodStart(today, m.granularity);
-  if (m.freshness.waitingFor) return m.freshness.waitingFor;
-  if (m.latest) {
-    const next = nextPeriod(m.latest.period, m.granularity);
-    return next <= current ? next : m.latest.period;
-  }
-  return m.freshness.expectedPeriod;
 }
 
 export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: IsoDate; connectorNames: Record<string, string> }) {
@@ -61,6 +54,7 @@ export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: Is
           </p>
           <p className="text-[12px] text-muted">
             {m.latest ? formatPeriod(m.latest.period, m.granularity) : "No value yet"}
+            {m.latest?.inProgress && " · so far"}
             {change && (
               <>
                 {" · "}
@@ -84,6 +78,14 @@ export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: Is
         <Tag tone={tag.tone}>{tag.text}</Tag>
         {m.target !== null && <span className="text-[11px] text-muted">Target {formatMetricValue(m.target, m.unit)}</span>}
       </div>
+      {m.disagreements[0] && (
+        <p className="text-[11px] text-warn" data-testid="kpi-disagrees">
+          Source disagrees: {connectorNames[m.disagreements[0].connectorId] ?? m.disagreements[0].connectorId} says {formatMetricValue(m.disagreements[0].reported, m.unit)} for{" "}
+          {formatPeriod(m.disagreements[0].period, m.granularity)} (kept {formatMetricValue(m.disagreements[0].kept, m.unit)}{" "}
+          {m.disagreements[0].keptSource === "upload" ? "from the upload" : "entered by hand"})
+          {m.disagreements.length > 1 && ` +${m.disagreements.length - 1} more`}
+        </p>
+      )}
       <p className="text-[11px] text-muted" data-testid="kpi-freshness" title={`Expected source: ${sourceLabel(m, connectorNames)}`}>
         {m.latest
           ? `Updated ${agoText(m.latest.enteredDay, today)}${m.latest.enteredByName ? ` by ${m.latest.enteredByName}` : ""} · ${
@@ -96,8 +98,8 @@ export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: Is
         label={m.label}
         unit={m.unit}
         granularity={m.granularity}
-        defaultPeriod={defaultPeriod(m, today)}
-        maxPeriod={periodStart(today, m.granularity)}
+        defaultPeriod={defaultEntryPeriod({ granularity: m.granularity, freshness: m.freshness, latestPeriod: m.latest?.period ?? null }, today)}
+        maxDate={m.granularity === "day" ? today : periodEnd(lastEnterablePeriod(today, m.granularity), m.granularity)}
       />
     </div>
   );
