@@ -9,7 +9,13 @@ import { NewTaskPanel } from "@/components/tasks/NewTaskPanel";
 import { TaskList } from "@/components/tasks/TaskList";
 import { toTaskItem } from "@/components/tasks/types";
 import { ComingSoon, CompanyDot, PageHeader, Section, TabNav, Tag } from "@/components/ui";
-import { kpisFor } from "@/lib/kpis";
+import { DataSources } from "@/components/metrics/DataSources";
+import { KpiCard } from "@/components/metrics/KpiCard";
+import { NumbersGrid } from "@/components/metrics/NumbersGrid";
+import { formatPeriodShort, GRANULARITY_LABELS, lastPeriods, type Granularity } from "@/lib/metrics";
+import { STUB_SPECS } from "@/server/connectors/stubs";
+import { listConnectorStatuses } from "@/server/services/connectors";
+import { currentValues, listCompanyMetricCards, listMetricDefinitions } from "@/server/services/metrics";
 import { getPageContext } from "@/server/context";
 import { getCompanyBySlug } from "@/server/services/companies";
 import { today } from "@/server/services/context";
@@ -22,6 +28,7 @@ import { listTasks } from "@/server/services/tasks";
 
 const TABS = [
   { key: "overview", label: "Overview" },
+  { key: "numbers", label: "Numbers" },
   { key: "projects", label: "Projects" },
   { key: "tasks", label: "Tasks" },
   { key: "people", label: "People" },
@@ -31,7 +38,7 @@ const TABS = [
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
-type Props = { params: Promise<{ slug: string }>; searchParams: Promise<{ tab?: string }> };
+type Props = { params: Promise<{ slug: string }>; searchParams: Promise<{ tab?: string; g?: string }> };
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
@@ -50,7 +57,7 @@ async function loadCompany(slug: string) {
 
 export default async function CompanyPage({ params, searchParams }: Props) {
   const { slug } = await params;
-  const { tab: rawTab } = await searchParams;
+  const { tab: rawTab, g } = await searchParams;
   const tab: TabKey = TABS.some((t) => t.key === rawTab) ? (rawTab as TabKey) : "overview";
   const { ctx, company } = await loadCompany(slug);
 
@@ -72,7 +79,8 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         tabs={TABS.map((t) => ({ key: t.key, label: t.label, href: `/companies/${slug}${t.key === "overview" ? "" : `?tab=${t.key}`}` }))}
       />
 
-      {tab === "overview" && <Overview company={company} />}
+      {tab === "overview" && <Overview ctx={ctx} company={company} />}
+      {tab === "numbers" && <NumbersTab ctx={ctx} company={company} granularity={g} />}
       {tab === "projects" && <ProjectsTab ctx={ctx} companyId={company.id} />}
       {tab === "tasks" && <TasksTab ctx={ctx} companyId={company.id} />}
       {tab === "people" && <PeopleTab ctx={ctx} companyId={company.id} slug={company.slug} />}
@@ -89,27 +97,43 @@ export default async function CompanyPage({ params, searchParams }: Props) {
   );
 }
 
-function Overview({ company }: { company: Awaited<ReturnType<typeof getCompanyBySlug>> }) {
-  const kpis = kpisFor(company.slug);
-  const unitName = (slug?: string) => company.units.find((u) => u.slug === slug)?.name;
+const CONNECTOR_NAMES: Record<string, string> = Object.fromEntries(STUB_SPECS.map((c) => [c.id, c.name]));
+
+type Ctx = Awaited<ReturnType<typeof getPageContext>>;
+type CompanyFull = Awaited<ReturnType<typeof getCompanyBySlug>>;
+
+async function Overview({ ctx, company }: { ctx: Ctx; company: CompanyFull }) {
+  const [cards, sources] = await Promise.all([
+    listCompanyMetricCards(ctx, company.id),
+    listConnectorStatuses(ctx, { companyId: company.id }),
+  ]);
+  const t = today(ctx);
   return (
     <>
-      <Section title="Key numbers">
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          {kpis.map((k) => (
-            <div key={`${k.key}-${k.unit ?? ""}`} className="card p-4">
-              <p className="eyebrow">
-                {k.label}
-                {k.unit ? ` · ${unitName(k.unit) ?? k.unit}` : ""}
-              </p>
-              <p className="num mt-2 text-[24px] font-semibold text-muted">—</p>
-              <div className="mt-2 flex items-center justify-between gap-2">
-                <Tag tone="warn">No data yet</Tag>
-                <span className="text-[11px] text-muted">{k.source}</span>
-              </div>
-            </div>
-          ))}
-        </div>
+      <Section
+        title="Key numbers"
+        action={
+          cards.length > 0 && (
+            <span className="flex gap-3 text-[12px]">
+              <Link href={`/companies/${company.slug}?tab=numbers`} className="text-accent hover:underline">
+                Numbers grid
+              </Link>
+              <Link href={`/companies/${company.slug}/numbers/import`} className="text-accent hover:underline">
+                Upload file
+              </Link>
+            </span>
+          )
+        }
+      >
+        {cards.length === 0 ? (
+          <div className="card px-4 py-6 text-center text-[13px] text-muted">No numbers are tracked for this company yet.</div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {cards.map((m) => (
+              <KpiCard key={m.id} m={m} today={t} connectorNames={CONNECTOR_NAMES} />
+            ))}
+          </div>
+        )}
       </Section>
       <Section title="Work">
         <div className="grid grid-cols-3 gap-3">
@@ -118,6 +142,13 @@ function Overview({ company }: { company: Awaited<ReturnType<typeof getCompanyBy
           <Counter label="Active projects" value={company.activeProjects} />
         </div>
       </Section>
+      {sources.length > 0 && (
+        <Section title="Data sources">
+          <div className="card px-4 py-1">
+            <DataSources sources={sources} timeZone={ctx.timeZone} />
+          </div>
+        </Section>
+      )}
       {company.units.length > 0 && (
         <Section title="Units (tracked separately)">
           <div className="flex flex-wrap gap-2">
@@ -129,6 +160,47 @@ function Overview({ company }: { company: Awaited<ReturnType<typeof getCompanyBy
           </div>
         </Section>
       )}
+    </>
+  );
+}
+
+const GRID_ROWS: Record<Granularity, number> = { day: 14, week: 12, month: 12 };
+
+async function NumbersTab({ ctx, company, granularity }: { ctx: Ctx; company: CompanyFull; granularity?: string }) {
+  const defs = await listMetricDefinitions(ctx, company.id);
+  if (defs.length === 0) {
+    return <div className="card px-4 py-6 text-center text-[13px] text-muted">No numbers are tracked for this company yet.</div>;
+  }
+  const available = (["month", "week", "day"] as const).filter((x) => defs.some((d) => d.granularity === x));
+  const g: Granularity = available.includes(granularity as Granularity) ? (granularity as Granularity) : available[0]!;
+  const metrics = defs.filter((d) => d.granularity === g);
+  const periods = lastPeriods(today(ctx), g, GRID_ROWS[g]).reverse();
+  const current = await currentValues(ctx.db, metrics.map((m) => m.id), { from: periods.at(-1)!, to: periods[0]! });
+  const values = Object.fromEntries([...current.entries()].map(([k, v]) => [k, String(v)]));
+  return (
+    <>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        {available.map((x) => (
+          <Link
+            key={x}
+            href={`/companies/${company.slug}?tab=numbers&g=${x}`}
+            aria-current={x === g ? "page" : undefined}
+            className={`btn btn-sm ${x === g ? "btn-primary" : ""}`}
+          >
+            {GRANULARITY_LABELS[x]}
+          </Link>
+        ))}
+        <Link href={`/companies/${company.slug}/numbers/import`} className="btn btn-sm ml-auto">
+          Upload file
+        </Link>
+      </div>
+      <NumbersGrid
+        key={g}
+        companyId={company.id}
+        metrics={metrics.map((m) => ({ id: m.id, label: m.label, unit: m.unit }))}
+        rows={periods.map((p) => ({ period: p, label: formatPeriodShort(p, g) }))}
+        values={values}
+      />
     </>
   );
 }

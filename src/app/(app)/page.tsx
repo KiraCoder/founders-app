@@ -1,9 +1,11 @@
 import Link from "next/link";
+import { GroupFreshness } from "@/components/metrics/FreshnessRow";
 import { QuickAdd } from "@/components/tasks/QuickAdd";
 import { TaskList } from "@/components/tasks/TaskList";
 import { toTaskItem } from "@/components/tasks/types";
 import { PageHeader, Section } from "@/components/ui";
 import { getPageContext } from "@/server/context";
+import { companyFreshness } from "@/server/services/metrics";
 import { getTaskFormOptions } from "@/server/services/options";
 import { getTodaySummary } from "@/server/services/tasks";
 
@@ -20,7 +22,7 @@ function longDate(iso: string) {
 
 export default async function TodayPage() {
   const ctx = await getPageContext();
-  const [summary, options] = await Promise.all([getTodaySummary(ctx), getTaskFormOptions(ctx)]);
+  const [summary, options, freshness] = await Promise.all([getTodaySummary(ctx), getTaskFormOptions(ctx), companyFreshness(ctx)]);
   const list = (items: typeof summary.overdue, empty: string) => (
     <TaskList tasks={items.map(toTaskItem)} today={summary.today} options={options} empty={empty} />
   );
@@ -63,6 +65,18 @@ export default async function TodayPage() {
           >
             {list(summary.personal, "No personal todos. Use quick add above.")}
           </Section>
+          {freshness.length > 0 && (
+            <Section
+              title="Company numbers"
+              action={
+                <Link href="/companies" className="text-[12px] text-accent hover:underline">
+                  Companies →
+                </Link>
+              }
+            >
+              <GroupFreshness rows={freshness} />
+            </Section>
+          )}
         </div>
       </div>
     </>

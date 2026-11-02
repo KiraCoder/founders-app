@@ -1,10 +1,12 @@
 import Link from "next/link";
+import { DataSources } from "@/components/metrics/DataSources";
 import { PreferencesForm } from "@/components/settings/PreferencesForm";
 import { SalaryAccessCard } from "@/components/settings/SalaryAccessCard";
 import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
 import { PageHeader } from "@/components/ui";
 import { getPageContext } from "@/server/context";
 import { devToolsEnabled, telegramBotToken, telegramBotUsername } from "@/server/notifications/config";
+import { listConnectorStatuses } from "@/server/services/connectors";
 import { getMyPreferences, getMyTelegramLink } from "@/server/services/notifications";
 import { canViewSalaries, listSalaryAccessLog, listSalaryViewers } from "@/server/services/salaries";
 
@@ -12,11 +14,12 @@ export const metadata = { title: "Settings" };
 
 export default async function SettingsPage() {
   const ctx = await getPageContext();
-  const [prefs, link, viewers, isViewer] = await Promise.all([
+  const [prefs, link, viewers, isViewer, sources] = await Promise.all([
     getMyPreferences(ctx),
     getMyTelegramLink(ctx),
     listSalaryViewers(ctx),
     canViewSalaries(ctx),
+    listConnectorStatuses(ctx),
   ]);
   const log = isViewer ? await listSalaryAccessLog(ctx, 15) : [];
   const fmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: ctx.timeZone });
@@ -68,6 +71,17 @@ export default async function SettingsPage() {
             </ul>
           </details>
         )}
+      </section>
+
+      <section className="card mb-5 p-4 md:p-5" aria-labelledby="sources-heading">
+        <h2 id="sources-heading" className="eyebrow mb-1">
+          Data sources
+        </h2>
+        <p className="mb-2 text-[12px] text-muted">
+          Numbers are pulled automatically once a source is connected. Until then, enter or upload them on each company page.
+          Keys are added only as environment variables in Vercel (see README), never here.
+        </p>
+        <DataSources sources={sources} timeZone={ctx.timeZone} showCompany />
       </section>
 
       {devToolsEnabled() && (

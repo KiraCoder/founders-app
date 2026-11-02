@@ -1,7 +1,9 @@
 import Link from "next/link";
+import { FreshnessCounts } from "@/components/metrics/FreshnessRow";
 import { CompanyDot, PageHeader, Tag } from "@/components/ui";
 import { getPageContext } from "@/server/context";
 import { listCompanyCards } from "@/server/services/companies";
+import { companyFreshness } from "@/server/services/metrics";
 
 export const metadata = { title: "Companies" };
 
@@ -9,7 +11,8 @@ const KIND_LABEL = { operating: "Operating", service: "Service", holding: "Holdi
 
 export default async function CompaniesPage() {
   const ctx = await getPageContext();
-  const cards = await listCompanyCards(ctx);
+  const [cards, freshness] = await Promise.all([listCompanyCards(ctx), companyFreshness(ctx)]);
+  const freshBy = new Map(freshness.map((f) => [f.companyId, f]));
   return (
     <>
       <PageHeader eyebrow="Asqa Zou group" title="Companies" />
@@ -32,6 +35,14 @@ export default async function CompaniesPage() {
               <Stat label="Overdue" value={c.overdueTasks} tone={c.overdueTasks > 0 ? "text-risk" : undefined} />
               <Stat label="Projects" value={c.activeProjects} />
             </dl>
+            {freshBy.get(c.id) ? (
+              <div className="flex items-center justify-between gap-2 border-t border-line pt-2.5">
+                <span className="eyebrow">Numbers</span>
+                <FreshnessCounts f={freshBy.get(c.id)!} />
+              </div>
+            ) : (
+              <p className="border-t border-line pt-2.5 text-[12px] text-muted">No numbers tracked</p>
+            )}
           </Link>
         ))}
       </div>
