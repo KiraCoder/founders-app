@@ -57,3 +57,29 @@ test("login → create personal todo → visible in My tasks → hidden from the
   await mine.getByRole("button", { name: "Yes, delete" }).click();
   await expect(page.getByText(title)).toHaveCount(0);
 });
+
+test("REST API: create, change deadline (audited), validation errors, delete", async ({ page }) => {
+  await login(page, "talant");
+  const companies = (await (await page.request.get("/api/v1/companies")).json()) as {
+    data: { id: string; slug: string }[];
+  };
+  const kiwi = companies.data.find((c) => c.slug === "kiwi-go")!;
+
+  const bad = await page.request.post("/api/v1/tasks", { data: { title: "", visibility: "shared" } });
+  expect(bad.status()).toBe(400);
+  expect((await bad.json()).error.code).toBe("validation");
+
+  const created = await page.request.post("/api/v1/tasks", {
+    data: { title: `[e2e] api task ${Date.now()}`, companyId: kiwi.id, dueDate: "2026-01-01" },
+  });
+  expect(created.status()).toBe(201);
+  const task = (await created.json()).data as { id: string; isOverdue: boolean };
+  expect(task.isOverdue).toBe(true);
+
+  const patched = await page.request.patch(`/api/v1/tasks/${task.id}`, { data: { dueDate: "2099-01-01" } });
+  expect(patched.ok()).toBeTruthy();
+  expect((await patched.json()).data.isOverdue).toBe(false);
+
+  expect((await page.request.delete(`/api/v1/tasks/${task.id}`)).status()).toBe(204);
+  expect((await page.request.get(`/api/v1/tasks/${task.id}`)).status()).toBe(404);
+});

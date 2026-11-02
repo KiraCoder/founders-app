@@ -19,9 +19,9 @@ export function QuickAdd() {
         maxLength={300}
         placeholder="Quick add a personal todo…"
         aria-label="New personal todo"
-        className="input min-w-0 flex-1 border-transparent"
+        className="input w-full min-w-0 border-transparent sm:w-auto sm:flex-1"
       />
-      <input type="date" name="dueDate" aria-label="Due date" className="input w-[150px]" />
+      <input type="date" name="dueDate" aria-label="Due date" className="input min-w-0 flex-1 sm:w-[150px] sm:flex-none" />
       <button type="submit" className="btn btn-primary" disabled={pending}>
         Add
       </button>
