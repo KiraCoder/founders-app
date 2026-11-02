@@ -9,7 +9,7 @@ const TABS: { href: string; label: string; icon: IconName; match: string[] }[] =
   { href: "/", label: "Today", icon: "today", match: ["/"] },
   { href: "/tasks", label: "Tasks", icon: "tasks", match: ["/tasks", "/projects"] },
   { href: "/companies", label: "Companies", icon: "building", match: ["/companies"] },
-  { href: "/more", label: "More", icon: "more", match: ["/more", "/holding", "/people", "/org", "/ai-roles", "/search"] },
+  { href: "/more", label: "More", icon: "more", match: ["/more", "/holding", "/people", "/org", "/ai-roles", "/search", "/settings", "/dev"] },
 ];
 
 export function BottomTabs() {

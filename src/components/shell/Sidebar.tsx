@@ -13,7 +13,13 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-export function Sidebar({ companies }: { companies: Pick<Company, "slug" | "name" | "color" | "status">[] }) {
+export function Sidebar({
+  companies,
+  showDevTools = false,
+}: {
+  companies: Pick<Company, "slug" | "name" | "color" | "status">[];
+  showDevTools?: boolean;
+}) {
   return (
     <aside className="sticky top-0 hidden h-dvh w-[240px] shrink-0 flex-col border-r border-line bg-surface md:flex">
       <Link href="/" className="flex h-14 items-center gap-2.5 border-b border-line px-4">
@@ -56,6 +62,16 @@ export function Sidebar({ companies }: { companies: Pick<Company, "slug" | "name
           <NavLink href="/ai-roles">
             <Icon name="sparkles" /> AI roles
           </NavLink>
+        </Group>
+        <Group title="You">
+          <NavLink href="/settings">
+            <Icon name="settings" /> Settings
+          </NavLink>
+          {showDevTools && (
+            <NavLink href="/dev/notifications">
+              <Icon name="bell" /> Dev inbox
+            </NavLink>
+          )}
         </Group>
       </nav>
     </aside>

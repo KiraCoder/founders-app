@@ -33,6 +33,11 @@ export default defineConfig({
         timeout: 240_000,
         env: {
           SESSION_SECRET: process.env.SESSION_SECRET ?? "e2e-local-secret-0123456789abcdef0123456789",
+          // Test-only values. No bot token: nothing is ever sent to Telegram from e2e.
+          TELEGRAM_BOT_TOKEN: "",
+          TELEGRAM_WEBHOOK_SECRET: process.env.TELEGRAM_WEBHOOK_SECRET ?? "e2e-telegram-webhook-secret",
+          CRON_SECRET: process.env.CRON_SECRET ?? "e2e-cron-secret",
+          DEV_TOOLS: "1",
         },
       },
 });

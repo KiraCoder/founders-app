@@ -3,6 +3,7 @@ import { BottomTabs } from "@/components/shell/BottomTabs";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
 import { getPageContext } from "@/server/context";
+import { devToolsEnabled } from "@/server/notifications/config";
 import { listCompanies } from "@/server/services/companies";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +13,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const companies = await listCompanies(ctx);
   return (
     <div className="flex min-h-dvh">
-      <Sidebar companies={companies} />
+      <Sidebar companies={companies} showDevTools={devToolsEnabled()} />
       <div className="flex min-w-0 flex-1 flex-col">
         <Suspense fallback={<div className="h-14 border-b border-line bg-surface" />}>
           <TopBar user={{ name: ctx.user.name, shortName: ctx.user.shortName, email: ctx.user.email }} />

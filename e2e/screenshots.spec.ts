@@ -24,3 +24,18 @@ test("mobile screenshot", async ({ browser }) => {
   await page.screenshot({ path: "docs/screenshots/today-mobile.png" });
   await context.close();
 });
+
+test("notification screenshots", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await login(page, "talant");
+  await page.goto("/settings");
+  const unlink = page.getByRole("button", { name: "Unlink" });
+  if (await unlink.isVisible()) await unlink.click();
+  await page.getByRole("button", { name: "Generate link code" }).click();
+  await page.getByTestId("link-command").waitFor();
+  await page.screenshot({ path: "docs/screenshots/settings-desktop.png", fullPage: true });
+  await page.goto("/dev/notifications");
+  await page.getByRole("button", { name: "Simulate morning" }).click();
+  await page.getByText("Good morning, Talant").first().waitFor();
+  await page.screenshot({ path: "docs/screenshots/dev-notifications-desktop.png", fullPage: true });
+});
