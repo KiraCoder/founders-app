@@ -84,6 +84,8 @@ the Vercel / Supabase dashboards.
 - **Company numbers** (metrics, values, connector runs) belong to their company and follow the
   company rule (`visibleMetricsWhere` / `assertMetricAccess` in `access.ts`): shared between the
   founders, never mixed between companies.
+- **Holding** (intercompany flows, акты, договоры, debts, documents) is founders-only
+  (`assertHoldingAccess`); documents are served only through an access-checked route.
 - **Salaries are restricted** (see *People and salaries* below): only users in `salary_viewers`
   see or change them. The check is `isSalaryViewer` / `assertSalaryViewer` in `access.ts`, and
   `src/server/services/salaries.ts` is the only code that touches the `salaries` table.
@@ -363,6 +365,78 @@ The env var names are in `.env.example` (all empty). To plug in a real source: i
 `Connector` in its own file, return it from `defaultRegistry()` in `registry.ts`, add its keys
 in Vercel.
 
+## Holding (intercompany акты, договоры, debts)
+
+`/holding` (sidebar → Group → Holding). Founders only (`canSeeHolding` / `assertHoldingAccess`
+in `access.ts`); all logic in `src/server/services/holding.ts` (+ `holding-asks.ts`,
+`holding-files.ts`), pure rules in `src/lib/holding.ts`. Nothing is hard-deleted: flows,
+договоры and ledger entries are **archived**.
+
+- **Flows** (`intercompany_flows`): from company → to company, service ("пошив"), since,
+  optional until, status *active* / *planned*. Seeded (`db:seed`, only missing ones): Alura
+  Style → Alura Brand · пошив; Jobutify → Alura Style · ERP; Jobutify → Kiwi Go · приложение
+  и платформа; Kiwi Go → Alura Brand · доставка; Marketing → each company · маркетинг
+  (*planned*, no акты expected). **Start dates are unknown**, so a real database gets the
+  active flows *without* a start date ("Set the start date" tag): nothing is expected and
+  nobody is asked until a founder sets it. The local sample seed uses 1 Jan 2026.
+  The two companies of a flow can't be changed (archive it and add a new one).
+- **Акты grid** (`intercompany_acts`, one row per flow per month, written the first time a
+  founder changes a cell): rows = active flows, columns = the last 12 finished months + the
+  current one. Green = signed / received, yellow = requested (asked Elmurat on a date), red =
+  missing, grey = not needed / before the flow started, dashed = not due yet. A month is
+  **expected** from the 1st of the next month + a grace of **10 days**
+  (`HOLDING_ACTS_GRACE_DAYS`): October from 11 November; the current month never. Click a
+  cell → panel: status, amount (KGS, exact, max 2 decimals, "85.000" refused as ambiguous),
+  act number / date, "asked on", note, scan. A recorded status always wins (an акт received
+  early shows green).
+- **Договоры** (`intercompany_contracts`): flow, number, signed on, valid until, status
+  draft / signed / expired / terminated, amount terms, optional scan. A *signed* contract
+  ending within **30 days** shows "Ends in N days"; one whose end date passed shows "Ended N
+  days ago — renew or mark as expired".
+- **Debts** (derived, `intercompany_ledger_entries` for the rest): an акт with an amount that
+  is *received* or *signed* means the receiving company owes the providing one (dated by its
+  act date, else the month's last day); plus opening balances and payments entered by hand.
+  Both directions are netted per pair ("Alura Brand owes Alura Style 1 240 000 KGS") and
+  summed (exact to the tyiyn). A wrong entry is cancelled (archived), never deleted.
+- **Metric feed:** the Holding KPI "Intercompany debt total" gets the total **as of the last
+  day of the latest finished month**, source `derived` (new value of the `metric_source`
+  enum), after every change that affects debts and on every scheduler tick. Same rule as
+  connectors: it never replaces a number a founder entered or uploaded for that month (the
+  card then keeps the founder's number), and nothing is written while no debt data exists.
+- **Documents:** PDF, JPG or PNG, max **10 MB**; the type is decided by the file's first bytes
+  (a renamed .html is refused). Uploaded with `POST /api/v1/holding/files` (multipart — the
+  only non-JSON endpoint; it requires an `Origin` of this site or `Sec-Fetch-Site:
+  same-origin`, see `request-guard.ts`) and served only to signed-in founders by
+  `GET /api/v1/holding/files/:id` (`nosniff`, sandbox CSP, `no-store`). Bytes go through
+  `FileStorage` (`src/server/storage/file-storage.ts`): local disk `.data/uploads` now,
+  a `SupabaseFileStorage` placeholder (no network) for later. **On Vercel the local disk is
+  not kept** — set up Supabase Storage before uploading real documents there.
+
+### Pushing the founders to ask Elmurat
+
+Акты are Elmurat's job; the founders ask him. **The app never messages Elmurat** (he is a
+people record, not a user; the outbox refuses anyone who is not a founder). It pushes the
+**founders**, inside their **morning summary** only — no separate push, so it uses no budget,
+can't be parked and follows quiet hours and "not linked" holding like the summary itself:
+
+- **Monthly**, from the day after the grace period (the **11th** by default): ONE grouped item
+  per founder, e.g. "Ask Elmurat for 3 missing акты: Alura Style → Alura Brand (Sep, Oct),
+  Jobutify → Kiwi Go (Oct)" with a button **I asked Elmurat** (Telegram button = one-time
+  server-side token, like task buttons). Both founders get it (holding matters are shared).
+- **I asked Elmurat** (Telegram or the in-app button on `/holding`) marks those months
+  *requested* with today's date, and **cancels the other founder's pending item** for the
+  same months (it never reaches his summary; an already-shown button answers "Already done:
+  Nuraaly marked these as asked on …").
+- **Reminder:** акты requested ≥ 7 days ago and still not received get ONE line in the next
+  **Monday** summary ("Still waiting for 3 акты from Elmurat (asked 11 Nov): …", button *I
+  asked again*). At most weekly per founder (one item per Monday).
+- Each item is shown once (`holding_ask_items`, unique per founder + kind + month/week, so a
+  tick every 5 minutes changes nothing). Planned in `planHoldingAsks` (called by `planTick`),
+  rendered by `holdingSummarySection` (called by the dispatcher for the morning summary).
+- `/holding` shows the same list plus a **ready message in Russian** with a Copy button
+  ("Элмурат, здравствуйте! Пришлите, пожалуйста, акты приёма-передачи за: …"). The founder
+  sends it himself; the app never does.
+
 ## REST API (for the future iOS app)
 
 Session-cookie auth for now; JSON errors look like `{ "error": { "code", "message", "fields?" } }`.
@@ -384,7 +458,14 @@ Session-cookie auth for now; JSON errors look like `{ "error": { "code", "messag
 - `GET /api/v1/metrics/:id/values?history=1&limit=` (current value per period; with `history=1` also corrected rows)
 - `POST /api/v1/metrics/:id/values` `{ "period": "2026-10" | "2026-10-31", "value": 123, "note"? }` (201 new, 200 correction/unchanged)
 
-Input shapes are the Zod schemas in `src/lib/schemas.ts`, `src/lib/people-schemas.ts` and `src/lib/metric-schemas.ts`.
+- `GET /api/v1/holding/acts` (grid: months, rows with cells, missing / requested counts, `ask` with the copyable message)
+- `PATCH /api/v1/holding/acts` `{ flowId, period: "2026-10", status?, amount?, actNumber?, actDate?, requestedOn?, note?, attachmentFileId? }` (left-out fields stay, `null` clears)
+- `POST /api/v1/holding/asked` `{ cells: [{ flowId, period }], again? }` ("I asked Elmurat")
+- `GET | POST /api/v1/holding/flows`, `GET | POST /api/v1/holding/contracts`, `PATCH /api/v1/holding/contracts/:id` (fields or `{ "archived": true }`)
+- `GET /api/v1/holding/debts?asOf=` (pairs, total, ledger entries), `POST /api/v1/holding/debts` `{ kind: "payment" | "opening", debtorCompanyId, creditorCompanyId, entryDate, amount, note? }`
+- `POST /api/v1/holding/files` (multipart `file`) → `{ id }`; `GET /api/v1/holding/files/:id`
+
+Input shapes are the Zod schemas in `src/lib/schemas.ts`, `src/lib/people-schemas.ts`, `src/lib/metric-schemas.ts` and `src/lib/holding-schemas.ts`.
 
 ## Folder map
 
@@ -398,7 +479,8 @@ src/
       companies/[slug]/    Company page with tabs (Overview KPI cards, Numbers grid); numbers/import upload
       projects/[id]/       Project with tasks and progress
       people/              People list, person page, new person, import wizard (+ server actions)
-      search/ more/ holding/ org/ ai-roles/
+      holding/             Holding: акты grid + cell panel, Ask Elmurat, debts, договоры, flows (+ server actions)
+      search/ more/ org/ ai-roles/
       settings/            Own notification preferences + Telegram link; Access (salary viewers)
       dev/notifications/   Dev inbox (dev tools only)
       actions.ts           Server actions (call the service layer)
@@ -407,12 +489,15 @@ src/
     api/cron/tick/         Scheduler tick (CRON_SECRET)
   components/              UI: shell (sidebar, top bar, tabs), tasks, projects, people, settings
   lib/                     Pure code: dates.ts (timezone), schemas.ts + people-schemas.ts + metric-schemas.ts (Zod),
-                           kpis.ts (default metrics), metrics.ts (periods, freshness, change), money.ts
+                           kpis.ts (default metrics), metrics.ts (periods, freshness, change), money.ts,
+                           holding.ts + holding-schemas.ts (акты, debts, contracts rules)
   server/
     auth/                  AuthProvider: local (now) and supabase (stub), session cookie, login rate limit
     db/                    schema.ts, connect.ts (PGlite or Postgres), migrate.ts, seed.ts
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
-                           people-import, metrics, metrics-import, connectors, search, notifications)
+                           people-import, metrics, metrics-import, connectors, search, notifications,
+                           holding, holding-asks, holding-files)
+    storage/               FileStorage for documents: local .data/uploads, Supabase placeholder
     import/parse-table.ts  .xlsx/.csv parsing for the people and numbers imports (in memory, 2 MB limit)
     connectors/            Data sources: Connector interface, registry, stubs (no network), runner
     notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot
@@ -423,7 +508,7 @@ scripts/                   db:migrate / db:seed / db:reset / cron:tick / telegra
 supabase/policies.sql      RLS policies for a future direct-client mode (applied by hand)
 tests/                     Vitest unit + service tests
 e2e/                       Playwright smoke test + screenshots
-docs/screenshots/          UI screenshots (company-overview-kpis.png, numbers-grid.png, people-list-salaries.png, …)
+docs/screenshots/          UI screenshots (holding-desktop.png, holding-act-panel.png, numbers-grid.png, people-list-salaries.png, …)
 docs/samples/              people-sample.csv, kiwi-go-numbers-sample.csv (fake data) for the importers
 docs/reviews/              Independent reviews and how each finding was resolved
 ```
