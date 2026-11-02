@@ -257,9 +257,22 @@ export interface AskGroup {
   months: IsoDate[];
 }
 
-/** Months in order, grouped "Sep, Oct" or "Dec 25, Jan" when years differ from `today`'s. */
-function monthList(months: readonly IsoDate[], today: IsoDate): string {
-  return [...months].sort().map((m) => monthShort(m, today.slice(0, 4))).join(", ");
+/**
+ * Months in order: "Sep, Oct", "Dec 25, Jan" (year shown when it differs from `today`'s),
+ * and runs of 3+ consecutive months as a range: "Feb–Sep".
+ */
+export function monthList(months: readonly IsoDate[], today: IsoDate): string {
+  const sorted = [...new Set(months.map(monthStart))].sort();
+  const year = today.slice(0, 4);
+  const parts: string[] = [];
+  for (let i = 0; i < sorted.length; ) {
+    let j = i;
+    while (j + 1 < sorted.length && sorted[j + 1] === nextPeriod(sorted[j]!, "month")) j++;
+    if (j - i >= 2) parts.push(`${monthShort(sorted[i]!, year)}–${monthShort(sorted[j]!, year)}`);
+    else for (let k = i; k <= j; k++) parts.push(monthShort(sorted[k]!, year));
+    i = j + 1;
+  }
+  return parts.join(", ");
 }
 
 export function countMonths(groups: readonly AskGroup[]): number {

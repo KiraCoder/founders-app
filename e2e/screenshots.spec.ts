@@ -84,3 +84,15 @@ test("numbers screenshots", async ({ page }) => {
   await page.goto("/companies");
   await page.screenshot({ path: "docs/screenshots/companies-freshness.png", fullPage: true });
 });
+
+test("holding screenshots", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await login(page, "nuraaly");
+  await page.goto("/holding");
+  await page.getByTestId("acts-grid").waitFor();
+  await page.screenshot({ path: "docs/screenshots/holding-desktop.png", fullPage: true });
+  const cell = page.locator('[data-testid="act-cell"][data-cell-state="missing"]').first();
+  await cell.click();
+  await page.getByTestId("act-panel").waitFor();
+  await page.screenshot({ path: "docs/screenshots/holding-act-panel.png" });
+});

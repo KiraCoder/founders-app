@@ -10,6 +10,7 @@ import {
   expectation,
   graceDays,
   gridMonths,
+  monthList,
   netDebts,
   reminderLine,
   totalDebt,
@@ -140,6 +141,12 @@ describe("asking Elmurat", () => {
     expect(reminderLine(groups, "2026-11-23", "2026-11-11")).toBe(
       "Still waiting for 3 акты from Elmurat (asked 11 Nov): Alura Style → Alura Brand (Sep, Oct), Jobutify → Kiwi Go (Oct)",
     );
+  });
+
+  it("runs of 3+ months are shown as a range", () => {
+    const m = ["2026-01-01", "2026-02-01", "2026-03-01", "2026-05-01", "2026-06-01", "2026-08-01", "2026-09-01", "2026-10-01"];
+    expect(monthList(m, "2026-11-11")).toBe("Jan–Mar, May, Jun, Aug–Oct");
+    expect(monthList(["2025-11-01", "2025-12-01", "2026-01-01"], "2026-02-11")).toBe("Nov 25–Jan");
   });
 
   it("the copyable message is in Russian and lists months per flow", () => {
