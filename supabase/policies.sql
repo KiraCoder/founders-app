@@ -37,6 +37,11 @@ alter table public.projects             enable row level security;
 alter table public.tasks                enable row level security;
 alter table public.task_events          enable row level security;
 alter table public.notifications_outbox enable row level security;
+alter table public.notification_preferences   enable row level security;
+alter table public.telegram_links             enable row level security;
+alter table public.telegram_link_codes        enable row level security;
+alter table public.notification_action_tokens enable row level security;
+alter table public.reminder_snoozes           enable row level security;
 
 -- users: founders can see founders (names for assignee pickers); nobody reads hashes
 -- via the API because password_hash is excluded by a column grant below.
@@ -92,5 +97,27 @@ create policy task_events_insert on public.task_events for insert with check (
 -- notifications_outbox: each founder sees only their own notifications.
 -- Writes are done by the server (service role), never by clients.
 create policy notifications_own on public.notifications_outbox for select using (
+  user_id = public.app_user_id()
+);
+
+-- notification_preferences: each founder reads and edits only their own row.
+create policy notification_preferences_own on public.notification_preferences for all
+  using (user_id = public.app_user_id())
+  with check (user_id = public.app_user_id());
+
+-- telegram_links: a founder may see and remove their own link. Creating a link happens only
+-- on the server (webhook consuming a one-time code), so there is no insert/update policy.
+create policy telegram_links_select_own on public.telegram_links for select using (
+  user_id = public.app_user_id()
+);
+create policy telegram_links_delete_own on public.telegram_links for delete using (
+  user_id = public.app_user_id()
+);
+
+-- telegram_link_codes, notification_action_tokens: server-only secrets (hashes).
+-- RLS on and NO policy = no client access at all.
+
+-- reminder_snoozes: own rows only (written by the server when "Snooze 1 day" is pressed).
+create policy reminder_snoozes_own on public.reminder_snoozes for select using (
   user_id = public.app_user_id()
 );

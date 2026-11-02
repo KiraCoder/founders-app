@@ -31,8 +31,12 @@ Stop `npm run dev` before running `db:*` scripts: the embedded database allows o
 | `npm run db:migrate` | Apply migrations (PGlite or `DATABASE_URL`) |
 | `npm run db:seed` | Load founders, companies, people and `[sample]` tasks (safe to re-run) |
 | `npm run db:reset` | **Local only.** Wipe + migrate + seed. Refuses to run against a non-localhost database |
+| `npm run cron:tick` | Run the notification scheduler once against the running app (needs `CRON_SECRET`) |
+| `npm run telegram:poll` | Local Telegram bot without a public URL (needs `TELEGRAM_BOT_TOKEN` + `TELEGRAM_WEBHOOK_SECRET`) |
 
 Screenshots: `SCREENSHOTS=1 npx playwright test screenshots` (writes `docs/screenshots/`).
+
+After pulling new code, run `npm run db:migrate` again (new tables are added by new migrations).
 
 ## Moving to Supabase + Vercel later (for a non-developer)
 
@@ -53,6 +57,7 @@ the Vercel / Supabase dashboards.
    - `SESSION_SECRET` = a long random text (on a Mac/Linux: `openssl rand -base64 48`)
    - `AUTH_MODE` = `local`
    - `APP_TIMEZONE` = `Asia/Bishkek`
+   - Telegram and scheduler variables: see *Telegram setup* below
 6. **Deploy.** Vercel builds automatically on every push. The app refuses to start without
    `SESSION_SECRET`, which protects you from an insecure setup.
 7. **Later (developer task):** switch to Supabase Auth (`AUTH_MODE=supabase`, see
@@ -70,6 +75,102 @@ the Vercel / Supabase dashboards.
 - **Overdue** = not done/cancelled and due date before *today in Asia/Bishkek*. It stays overdue until
   someone moves the deadline or closes the task. Every deadline change is written to `task_events`.
 - Salaries are deliberately **not** in `person_companies`; they will get their own restricted table.
+
+## Notifications and the Telegram bot
+
+Each founder gets **only their own** messages: a morning summary, an evening check, a
+due-today nudge and overdue chases. People records (Edil, Elmurat, …) never receive anything:
+the outbox refuses any recipient that is not a founder.
+
+How it works (all in `src/server/notifications/`):
+
+1. A **tick** (every 5–15 minutes) runs the **planner** and then the **dispatcher**.
+2. The planner queues, per founder and per day (local time, Asia/Bishkek):
+   morning summary (default 08:30), evening check (default 19:00, can be turned off),
+   due-today nudge at 12:00, and overdue chases at 10:00 on day 1, 3, 7, then every week.
+   Each item has a dedupe key, so running the tick again never queues it twice.
+3. The dispatcher sends what is due, following each founder's **Settings**:
+   - **Quiet hours** (default 21:00–08:00): everything waits, urgent items too, unless
+     "Urgent at night" is on.
+   - **Daily budget**: the two summaries plus at most 3 other pushes (default). Extra items
+     are **parked** and listed in the next summary instead of being sent (no spam).
+   - Channel errors are retried after 1, 5, 15, 60 minutes, then marked failed.
+4. **Channel:** Telegram when a bot token is set and the founder linked their chat;
+   otherwise the message is kept in the **dev inbox** (`/dev/notifications`).
+   The iOS app can add a `push` channel later in `channels.ts` without touching the rest.
+
+Buttons under task reminders: **Done**, **Snooze 1 day** (moves only the reminder),
+**Deadline +1 day / +3 days** (moves the deadline from today if the task is overdue; logged in
+the task history). A button carries only a random one-time token stored on the server; it
+works only from the chat of the founder it was made for.
+
+Bot commands: `/today`, `/tasks`, `/help`, and `/start CODE` to link. Any chat that is not
+linked gets one polite "not linked" reply and nothing else.
+
+### See it working without Telegram
+
+Sign in, open **Settings → Developer tools** (or `/dev/notifications`) and press
+**Simulate morning**: the page shows the morning summary you would have received.
+The dev inbox is on in development only; a production build shows it only with `DEV_TOOLS=1`
+(fine for preview deployments, never for the real site).
+
+### Telegram setup (for a non-developer, free)
+
+1. **Create the bot.** In Telegram open **@BotFather** → send `/newbot` → choose a name
+   (e.g. "Founder Cockpit") and a username ending in `bot` (e.g. `asqa_cockpit_bot`).
+   BotFather replies with a **token** like `123456789:AA…`. Treat it like a password:
+   do not paste it into chats or into the code.
+2. **Make a webhook secret**: any random text of letters/digits, e.g. from
+   `openssl rand -hex 32` (or a password manager, 40+ characters, no spaces).
+3. **Add environment variables** in Vercel → *Settings → Environment Variables*:
+   - `TELEGRAM_BOT_TOKEN` = the token from step 1
+   - `TELEGRAM_WEBHOOK_SECRET` = the secret from step 2
+   - `TELEGRAM_BOT_USERNAME` = the bot username without `@` (shown on the Settings page)
+   - `CRON_SECRET` = another random text (protects the scheduler, see below)
+
+   Then redeploy (Vercel → *Deployments → … → Redeploy*).
+4. **Tell Telegram where to deliver messages** (once, from any computer; replace the three
+   values):
+   ```bash
+   curl -sS "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+     -d "url=https://<your-app>.vercel.app/api/telegram/webhook" \
+     -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>" \
+     -d 'allowed_updates=["message","callback_query"]'
+   ```
+   It should answer `{"ok":true,"result":true,"description":"Webhook was set"}`.
+   Check any time with `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`.
+5. **Link each founder.** Each founder signs in → **Settings** → *Generate link code* →
+   sends `/start CODE` to the bot within 15 minutes. The code works once. *Unlink* is on the
+   same page.
+
+**Local testing with a real bot (no public URL):** create a *second* bot for development
+(Telegram does not allow polling while a webhook is set), put its token and a webhook secret
+in `.env.local`, then run `npm run dev` in one terminal and `npm run telegram:poll` in another.
+The poller fetches updates from Telegram and forwards them to the same webhook handler.
+
+### Scheduler (cron)
+
+`POST /api/cron/tick` runs plan + dispatch. It needs the header
+`Authorization: Bearer <CRON_SECRET>`; anything else gets 401. Call it every 5–15 minutes:
+
+- **Locally:** add `CRON_SECRET=…` to `.env.local`, run the app, then `npm run cron:tick`
+  (or use the buttons on `/dev/notifications`).
+- **Supabase pg_cron (free):** in Supabase → *Database → Extensions* enable `pg_cron` and
+  `pg_net`, store the secret in *Vault* (`select vault.create_secret('<CRON_SECRET>', 'cron_secret');`),
+  then in the SQL editor:
+  ```sql
+  select cron.schedule('founders-tick', '*/10 * * * *', $$
+    select net.http_post(
+      url := 'https://<your-app>.vercel.app/api/cron/tick',
+      headers := jsonb_build_object('Authorization', 'Bearer ' ||
+        (select decrypted_secret from vault.decrypted_secrets where name = 'cron_secret'))
+    );
+  $$);
+  ```
+- **Or a free external cron** such as cron-job.org: URL `https://<your-app>.vercel.app/api/cron/tick`,
+  method POST, header `Authorization: Bearer <CRON_SECRET>`, every 10 minutes.
+  (Vercel's own cron on the free plan runs only once a day, too rare for reminders; the
+  endpoint also accepts its GET request if you upgrade later.)
 
 ## REST API (for the future iOS app)
 
@@ -94,17 +195,23 @@ src/
       companies/[slug]/    Company page with tabs
       projects/[id]/       Project with tasks and progress
       people/ search/ more/ holding/ org/ ai-roles/
+      settings/            Own notification preferences + Telegram link
+      dev/notifications/   Dev inbox (dev tools only)
       actions.ts           Server actions (call the service layer)
     api/v1/                REST API (thin, calls the service layer)
+    api/telegram/webhook/  Telegram webhook (secret header)
+    api/cron/tick/         Scheduler tick (CRON_SECRET)
   components/              UI: shell (sidebar, top bar, tabs), tasks, projects
   lib/                     Pure code: dates.ts (timezone), schemas.ts (Zod), kpis.ts
   server/
     auth/                  AuthProvider: local (now) and supabase (stub), session cookie
     db/                    schema.ts, connect.ts (PGlite or Postgres), migrate.ts, seed.ts
-    services/              Business logic + access rules (tasks, projects, companies, people, search)
+    services/              Business logic + access rules (tasks, projects, companies, people, search,
+                           notifications: preferences, Telegram link, button actions)
+    notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot
   middleware.ts            Redirects signed-out users to /login (401 JSON for /api)
 drizzle/                   SQL migrations (generated by drizzle-kit)
-scripts/                   db:migrate / db:seed / db:reset
+scripts/                   db:migrate / db:seed / db:reset / cron:tick / telegram:poll
 supabase/policies.sql      Draft RLS policies (not applied locally)
 tests/                     Vitest unit + service tests
 e2e/                       Playwright smoke test + screenshots
