@@ -295,14 +295,28 @@ whether higher or lower is better, an optional target, and its expected source
 (manual, upload or a connector). Marketing (planned) has none yet.
 
 - **KPI card:** latest value and its period, change vs the period right before (green/red by
-  direction; nothing when that period is missing), a sparkline of the last 12 periods, who
-  updated it and when ("Updated 3 days ago by Talant · via upload"). **Enter value** opens a
-  small form on the card.
+  direction; nothing when that period is missing; today's daily number is marked "so far"
+  and never compared), a sparkline of the last 12 periods, who updated it and when
+  ("Updated 3 days ago by Talant · via upload"), and "Source disagrees: … says X (kept Y)"
+  when a data source reported another number than the one entered by hand. **Enter value**
+  opens a small form on the card, set to the oldest missing period.
+- **Only finished periods:** daily numbers may be entered for today; weekly and monthly numbers
+  only for a **finished** week / month ("This month isn't finished yet"), so a month-to-date
+  total is never stored as the month's number. Future periods are refused everywhere.
+- **Exact numbers, no guessing:** "85.000" or "12,345" (thousands or decimals?) are refused
+  with a hint, "%" is accepted only for percentage numbers, at most 4 decimals and 15 digits.
+  `.xlsx` numbers are read from the stored value, never the display text: a cell showing
+  95.5 % (Excel stores 0.955) is 95.5, and 1 234 567.89 keeps its decimals. The people import
+  reads salaries the same way (more than 2 decimals is refused, never rounded).
+  A REST `period` must be a date (`2026-10-31` or `2026-10`), not a timestamp.
+  `note`: omitted keeps the existing note, `null` or `""` removes it.
 - **Freshness** (all days are Asia/Bishkek): data for a period is due N days after the period
   ends — daily: 1 day (so a daily number is stale once it is more than 2 days old), weekly:
   3 days (Wednesday), monthly: 10 days (the 10th of the next month); changeable per metric
-  (`due_days`). One period overdue → the card turns **warn** (yellow); two or more, or no
-  value at all → **risk** (red).
+  (`due_days`). Gaps are counted inside a window of the last **7 days / 4 weeks / 3 months**
+  of due periods (periods before a number's first value don't count), also behind a later
+  value: one missing → **warn** (yellow) with "Waiting for …", two or more → **risk** (red)
+  with "N missing"; no value at all → **risk**.
 - **Corrections keep history:** values are never overwritten. Entering a different number for
   the same period adds a new row and marks the old one as not current (latest wins). Entering
   the same number again changes nothing.
@@ -313,23 +327,38 @@ whether higher or lower is better, an optional target, and its expected source
   ("Orders per day" / "Заказы в день"; factory numbers with the factory: "Выпуск ХБК"). The
   accepted names are listed on the page. Columns are matched to **that company's numbers
   only**, so a file can never change another company. Preview shows each number as *new /
-  update / unchanged / error* (bad number, unknown date, future period, same period twice);
+  update / unchanged / error* (bad or ambiguous number, unknown date, future or unfinished
+  period, a month label like "Oct 2026" in a daily/weekly column, or several rows landing in
+  one period of a number — e.g. a daily file in a monthly column: **all** of those rows are
+  refused, the first one is not kept);
   then *Import*. Importing the same file again changes nothing. Same parser and limits as
   the people import (zip-bomb guard, same-file check, one import per company at a time). Try `docs/samples/kiwi-go-numbers-sample.csv` (clearly fake numbers).
 - **Group overview:** `/companies` and *Today* show one small row per company:
   fresh / stale / missing counts.
-- **Morning summary:** a short **Numbers waiting** section (at most 3 lines, grouped by
-  company) in each founder's morning summary. No separate pushes; both founders see the same
-  list because company data is shared. The hook is `staleMetricsFor(ctx)` in
+- **Morning summary:** a short **Numbers waiting** section in each founder's morning summary.
+  Numbers that had data and are late: every day, at most 3 lines grouped by company. On
+  **Mondays only**: one line for numbers that were never entered, and one line for numbers
+  that wait for a data source that is not set up ("18 numbers wait for data sources (Edil's
+  APIs, WB token)"). No separate pushes; both founders see the same list because company
+  data is shared. The hook is `staleMetricsFor(ctx)` in
   `src/server/services/metrics.ts`, so a later agent can chase "please upload X".
 
 **Data sources (connectors).** `src/server/connectors/`: a `Connector` interface (`id`,
-`companySlug`, `metrics`, `pull(range) → MetricPoint[]`, `healthCheck()`), a registry, and
+`companySlug`, `metrics`, `setup()` (static, no network), `healthCheck()`,
+`pull(range, { signal, cursor })` → points or a page with `nextCursor`), a registry, and
 placeholders for the **Kiwi Go app**, **WMS (wms.jobutify.com)**, **Alura Style ERP** and
 **Wildberries**. The placeholders make **no network calls**; they only report "Waiting for API
 access from Edil" / "Needs WB token". `runConnector(db, id, range)` writes what a connector
-returns as values with source *connector* and logs every attempt in `connector_runs`. Status
-is on *Settings → Data sources* and on each company's Overview (*Check now* logs an attempt).
+returns as values with source *connector* and logs every attempt in `connector_runs` (status
+*running* until it is finalised; the pull has a 60 s time limit and at most 50 pages).
+Rules: a connector **never overwrites a number entered or uploaded by a founder** (a different
+number is recorded as a conflict in the run's `details` and shown on the card); weekly /
+monthly numbers are written only for finished periods; daily points for a weekly / monthly
+number are combined by the metric's `aggregation` (*sum* for orders and money, *avg* for %,
+*last* for people counts and balances) only when every day of the period was received.
+Status is on *Settings → Data sources* and on each company's Overview; pages show the
+static setup and the **last check** only — the source itself is contacted only by
+*Check now* (range: from the 1st of last month to yesterday).
 The env var names are in `.env.example` (all empty). To plug in a real source: implement
 `Connector` in its own file, return it from `defaultRegistry()` in `registry.ts`, add its keys
 in Vercel.
