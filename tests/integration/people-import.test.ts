@@ -89,7 +89,7 @@ describe("import with the sample CSV", () => {
     expect(plan.rows.every((r) => !("salary" in r))).toBe(true);
     expect(JSON.stringify(plan)).not.toMatch(/32000|32 000|28000|45000/);
     expect(await code(planImport(tl, table, { ...mapping, salary: 7 }))).toBe("forbidden");
-    expect(await code(applyImport(tl, table, { ...mapping, salary: 7 }))).toBe("forbidden");
+    expect(await code(applyImport(tl, table, { ...mapping, salary: 7 }, { expectedSha256: table.sha256 }))).toBe("forbidden");
   });
 
   it("Nuraaly: preview reports create/skip/error rows; confirm creates; re-import changes nothing", async () => {
@@ -115,7 +115,7 @@ describe("import with the sample CSV", () => {
     // Preview writes no people.
     expect((await listPeople(n, { q: "(пример)" })).length).toBe(0);
 
-    const result = await applyImport(n, table, mapping);
+    const result = await applyImport(n, table, mapping, { expectedSha256: table.sha256 });
     expect(result.applied).toBe(6);
     const imported = await listPeople(n, { q: "(пример)" }, { salaryScope: "test" });
     expect(imported.map((p) => p.fullName).sort()).toEqual(
@@ -142,7 +142,7 @@ describe("import with the sample CSV", () => {
     const salariesBefore = (await t.handle.db.select().from(salaries)).length;
     const again = await planImport(n, table, mapping);
     expect(again.counts).toEqual({ create: 0, update: 0, skip: 7, error: 3 });
-    await applyImport(n, table, mapping);
+    await applyImport(n, table, mapping, { expectedSha256: table.sha256 });
     expect((await t.handle.db.select().from(people)).length).toBe(peopleBefore);
     expect((await t.handle.db.select().from(salaries)).length).toBe(salariesBefore);
   });
@@ -158,8 +158,12 @@ describe("import with the sample CSV", () => {
     const { mapping } = await describeImportFile(n, table);
     const plan = await planImport(n, table, mapping);
     expect(plan.rows[0]!.action).toBe("update");
-    expect(plan.rows[0]!.changes).toEqual(["Fill email", "Salary changed"]);
-    await applyImport(n, table, mapping);
+    expect(plan.rows[0]!.changes[0]).toBe("Fill email");
+    expect(plan.rows[0]!.changes[1]).toMatch(/^Salary 32\s000 KGS → 34\s000 KGS$/);
+    expect(plan.rows[0]!.salaryBefore).toEqual({ amount: 32000, currency: "KGS", payType: "monthly" });
+    expect(plan.rows[0]!.salaryDecrease).toBe(false);
+    expect(plan.salaryDecreases).toBe(0);
+    await applyImport(n, table, mapping, { expectedSha256: table.sha256 });
     const p = (await listPeople(n, { q: "Тестова Айгуль" }))[0]!;
     const full = await getPerson(n, p.id, { salaryScope: "test" });
     expect(full.phone).toBe("+996 555 000 001");
@@ -189,7 +193,7 @@ describe("import with the sample CSV", () => {
     expect(await code(planImport(n, table, { fullName: 0, role: 1, phone: 2 }))).toBe("validation");
     const plan = await planImport(n, table, { fullName: 0, role: 1, phone: 2 }, { defaultCompanyId: t.companyIds["kiwi-go"] });
     expect(plan.rows[0]!.companyName).toBe("Kiwi Go");
-    await applyImport(n, table, { fullName: 0, role: 1, phone: 2 }, { defaultCompanyId: t.companyIds["kiwi-go"] });
+    await applyImport(n, table, { fullName: 0, role: 1, phone: 2 }, { defaultCompanyId: t.companyIds["kiwi-go"], expectedSha256: table.sha256 });
     const p = (await listPeople(n, { q: "Default Co Person" }))[0]!;
     const { markPersonLeft } = await import("@/server/services/people");
     await markPersonLeft(n, p.id);

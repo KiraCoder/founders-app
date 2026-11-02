@@ -1,5 +1,5 @@
 import "server-only";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   EMPLOYMENT_TYPE_VALUES,
@@ -17,7 +17,10 @@ import { assertSalaryViewer, isSalaryViewer, visibleLinksWhere, visiblePeopleWhe
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { listCompanyUnitOptions, type CompanyUnitOption } from "./people";
+import { assertSameFile } from "./import-common";
+import { lockTransaction } from "./locks";
 import { addSalary, currentSalaries, logSalaryAccess } from "./salaries";
+import { formatMoney } from "@/lib/money";
 
 /**
  * Import people from a spreadsheet (replaces the founders' Excel sheet).
@@ -28,11 +31,21 @@ import { addSalary, currentSalaries, logSalaryAccess } from "./salaries";
  *
  * Matching (idempotent re-import): same name (case/ё-insensitive) AND same phone (digits,
  * +996/0 prefixes ignored). Without a phone, the name must match exactly one person.
- * A person with the same name but no phone yet is matched and gets the phone.
- * Existing values are never overwritten, only empty fields are filled.
+ * A person with the same name but no phone yet is matched and gets the phone — by the
+ * FIRST row of the file that does so (that row "claims" the person). A later row with the
+ * same name and another phone is a different person (new), so two people are never
+ * merged and a re-import of the same file matches each row by its phone.
+ * Existing values are never overwritten, only empty fields are filled (also enforced in
+ * the UPDATE itself: `coalesce(existing, new)`).
  *
  * Salaries: the salary column can be mapped ONLY by a salary viewer. For anyone else it is
- * refused (`forbidden`), and the preview never contains salary values.
+ * refused (`forbidden`), also when a salary-looking column is mapped to another field
+ * (e.g. notes), and the preview never contains salary values. Viewers see the current →
+ * new amount per row, and decreases are flagged.
+ *
+ * Preview and confirm: the preview returns the sha256 of the file; confirm must send it
+ * back and the file must have the same hash (`conflict` otherwise). Confirm runs under a
+ * transaction-scoped advisory lock, so two imports at once cannot both create a person.
  */
 
 export const IMPORT_FIELDS = [
@@ -94,10 +107,16 @@ export function isSalaryHeader(header: string): boolean {
   return [...SYNONYMS.salary, ...SYNONYMS.payType].some((s) => h === s || (s.length > 3 && h.includes(s)));
 }
 
+/** Indexes of columns whose header looks like a salary / pay type column. */
+export function salaryHeaderIndexes(headers: string[]): number[] {
+  return headers.map((h, i) => (isSalaryHeader(h) ? i : -1)).filter((i) => i >= 0);
+}
+
 /** Best-guess mapping from header names (English or Russian). Salary only when allowed. */
 export function guessMapping(headers: string[], opts: { allowSalary: boolean }): ImportMapping {
   const norm = headers.map((h) => normalizeName(h));
-  const used = new Set<number>();
+  // Non-viewers: salary-looking columns are never suggested for any field.
+  const used = new Set<number>(opts.allowSalary ? [] : salaryHeaderIndexes(headers));
   const out: ImportMapping = {};
   const fields = IMPORT_FIELDS.filter((f) => opts.allowSalary || !SALARY_FIELDS.includes(f));
   // Exact matches first, then "contains" (longest synonyms first).
@@ -135,17 +154,30 @@ export interface ImportRowPlan {
   personId?: string;
   /** Present only for salary viewers who mapped the salary column. */
   salary?: { amount: number; currency: string; payType: SalaryPayTypeValue } | null;
+  /** Viewers only: the current salary this row would replace (null: none yet). */
+  salaryBefore?: { amount: number; currency: string; payType: SalaryPayTypeValue } | null;
+  /** Viewers only: true when the file's amount is LOWER than the current salary. */
+  salaryDecrease?: boolean;
 }
 
 export interface ImportPlan {
   rows: ImportRowPlan[];
   counts: { create: number; update: number; skip: number; error: number };
   salaryIncluded: boolean;
+  /** Viewers only (0 otherwise): rows that would lower a current salary. */
+  salaryDecreases: number;
+  /** sha256 of the previewed file; the confirm step must send it back. */
+  fileSha256: string;
 }
 
 export interface ImportOptions {
   /** Used when the file has no company column or a row leaves it empty. */
   defaultCompanyId?: string | null;
+}
+
+export interface ApplyImportOptions extends ImportOptions {
+  /** `fileSha256` from the preview. The file must be the same, or nothing is imported. */
+  expectedSha256: string;
 }
 
 const EMPLOYMENT_WORDS: Record<string, EmploymentTypeValue> = {
@@ -233,6 +265,17 @@ async function buildPlan(
   const mapping = importMappingSchema.parse(rawMapping);
   const salaryMapped = SALARY_FIELDS.some((f) => mapping[f] !== undefined && mapping[f] !== null);
   if (salaryMapped) await assertSalaryViewer(ctx);
+  else if (!(await isSalaryViewer(ctx))) {
+    // A non-viewer may not read a salary column through another field (notes, role, ...).
+    const salaryCols = new Set(salaryHeaderIndexes(table.headers));
+    const forged = IMPORT_FIELDS.find((f) => {
+      const idx = mapping[f];
+      return idx !== undefined && idx !== null && salaryCols.has(idx);
+    });
+    if (forged) {
+      throw new ServiceError("forbidden", "Only salary viewers can import a salary column");
+    }
+  }
   if (mapping.fullName === undefined || mapping.fullName === null) {
     throw new ServiceError("validation", "Choose the column with the full name", { fullName: ["Required"] });
   }
@@ -413,6 +456,16 @@ async function buildPlan(
       if (Object.keys(fill).length > 0) {
         op.fill = fill;
         changes.push(`Fill ${Object.keys(fill).map((k) => (k === "telegramHandle" ? "telegram" : k)).join(", ")}`);
+        // This row claims the person: later rows see the filled values, so a second row
+        // with the same name and ANOTHER phone no longer matches (it is a new person),
+        // and nothing filled here is filled again.
+        if (fill.phone) {
+          person.phone = fill.phone;
+          person.phoneKey = phoneKey;
+        }
+        if (fill.telegramHandle) person.telegramHandle = fill.telegramHandle;
+        if (fill.email) person.email = fill.email;
+        if (fill.notes) person.notes = fill.notes;
       }
     }
 
@@ -459,10 +512,19 @@ async function buildPlan(
     // --- Salary ------------------------------------------------------------
     if (salary) {
       const cur = existing ? current.get(existing.id) : undefined;
+      plan.salaryBefore = cur ? { amount: cur.amount, currency: cur.currency, payType: cur.payType } : null;
       const same = cur && cur.amount === salary.amount && cur.currency === salary.currency && cur.payType === salary.payType;
       if (!same) {
         op.salary = salary;
-        changes.push(cur ? "Salary changed" : "Salary set");
+        if (cur) {
+          const decrease = cur.currency === salary.currency && salary.amount < cur.amount;
+          plan.salaryDecrease = decrease;
+          changes.push(
+            `Salary ${formatMoney(cur.amount, cur.currency)} → ${formatMoney(salary.amount, salary.currency)}${decrease ? " (DECREASE — check the file is current)" : ""}`,
+          );
+        } else {
+          changes.push(`Salary set: ${formatMoney(salary.amount, salary.currency)}`);
+        }
       }
     }
 
@@ -474,7 +536,11 @@ async function buildPlan(
 
   const counts = { create: 0, update: 0, skip: 0, error: 0 };
   for (const o of ops) counts[o.plan.action]++;
-  return { ops, plan: { rows: ops.map((o) => o.plan), counts, salaryIncluded: salaryMapped } };
+  const salaryDecreases = ops.filter((o) => o.plan.salaryDecrease && o.salary && o.plan.action === "update").length;
+  return {
+    ops,
+    plan: { rows: ops.map((o) => o.plan), counts, salaryIncluded: salaryMapped, salaryDecreases, fileSha256: table.sha256 },
+  };
 }
 
 /** Preview: what would be created / updated / skipped, with errors. Writes nothing (except the salary view audit). */
@@ -495,15 +561,21 @@ export interface ImportResult extends ImportPlan {
   applied: number;
 }
 
-/** Re-plans and applies in one transaction. Error rows are not applied; the rest is. */
+/**
+ * Re-plans and applies in one transaction. Error rows are not applied; the rest is.
+ * The file must be the previewed one (`expectedSha256`), and people imports are
+ * serialised by an advisory lock taken before planning.
+ */
 export async function applyImport(
   ctx: ServiceContext,
   table: ParsedTable,
   mapping: ImportMapping,
-  opts: ImportOptions = {},
+  opts: ApplyImportOptions,
 ): Promise<ImportResult> {
+  assertSameFile(table, opts.expectedSha256);
   return ctx.db.transaction(async (rawTx) => {
     const tx: ServiceContext = { ...ctx, db: rawTx as unknown as Db };
+    await lockTransaction(tx.db, "people-import");
     const { ops, plan } = await buildPlan(tx, table, mapping, opts);
     const created = new Map<string, string>(); // "new:<row>" → person id
     let applied = 0;
@@ -516,7 +588,15 @@ export async function applyImport(
         created.set(op.personRef, personId);
       }
       if (!personId) continue;
-      if (op.fill) await tx.db.update(people).set({ ...op.fill, updatedAt: ctx.now }).where(eq(people.id, personId));
+      if (op.fill) {
+        // Never overwrite: only empty fields take the file's value, even if the row changed meanwhile.
+        const set: Record<string, unknown> = { updatedAt: ctx.now };
+        if (op.fill.phone) set.phone = sql`coalesce(${people.phone}, ${op.fill.phone})`;
+        if (op.fill.telegramHandle) set.telegramHandle = sql`coalesce(${people.telegramHandle}, ${op.fill.telegramHandle})`;
+        if (op.fill.email) set.email = sql`coalesce(${people.email}, ${op.fill.email})`;
+        if (op.fill.notes) set.notes = sql`coalesce(${people.notes}, ${op.fill.notes})`;
+        await tx.db.update(people).set(set).where(eq(people.id, personId));
+      }
       let linkId = op.linkRef;
       if (op.link?.kind === "create") {
         const [l] = await tx.db
@@ -556,7 +636,7 @@ export async function describeImportFile(ctx: ServiceContext, table: ParsedTable
     headers: table.headers,
     rowCount: table.rows.length,
     allowSalary,
-    salaryHeaders: allowSalary ? [] : table.headers.map((h, i) => (isSalaryHeader(h) ? i : -1)).filter((i) => i >= 0),
+    salaryHeaders: allowSalary ? [] : salaryHeaderIndexes(table.headers),
     mapping: guessMapping(table.headers, { allowSalary }),
   };
 }

@@ -53,6 +53,8 @@ export function ImportWizard({ companies }: { companies: { id: string; name: str
     <form onSubmit={onSubmit} className="space-y-4" aria-label="Import people">
       <input ref={stepRef} type="hidden" name="step" defaultValue="analyze" />
       <input type="hidden" name="mapping" value={JSON.stringify(mapping)} />
+      {/* The confirm step must send the previewed file's hash back (server refuses another file). */}
+      <input type="hidden" name="fileSha256" value={plan?.fileSha256 ?? ""} />
 
       <section className={`card p-4 md:p-5 ${state.step === "upload" ? "" : "hidden"}`}>
         <p className="eyebrow mb-2">1 · Upload</p>
@@ -156,6 +158,19 @@ export function ImportWizard({ companies }: { companies: { id: string; name: str
               <span className="num">{plan.counts.error}</span> errors
             </Tag>
           </div>
+          {plan.salaryIncluded && plan.salaryDecreases > 0 && (
+            <p
+              className="mb-3 rounded-[8px] border border-risk-line bg-risk-soft px-3 py-2 text-[13px] text-risk"
+              role="alert"
+              data-testid="salary-decrease-warning"
+            >
+              <b>
+                <span className="num">{plan.salaryDecreases}</span> salary decrease{plan.salaryDecreases === 1 ? "" : "s"}
+              </b>{" "}
+              — the file has a LOWER amount than the current salary. If this is an old file, it would undo raises.
+              Check the rows marked “decrease” before importing.
+            </p>
+          )}
           {state.step === "done" && (
             <p className="mb-3 text-[13px]" role="status">
               Done: <span className="num">{state.applied}</span> rows applied. Rows with errors were not imported.{" "}
@@ -190,8 +205,17 @@ export function ImportWizard({ companies }: { companies: { id: string; name: str
                     </td>
                     <td className="num py-2 pr-3 whitespace-nowrap">{r.phone ?? ""}</td>
                     {plan.salaryIncluded && (
-                      <td className="num py-2 pr-3 text-right whitespace-nowrap">
+                      <td
+                        className={`num py-2 pr-3 text-right whitespace-nowrap ${r.salaryDecrease ? "font-semibold text-risk" : ""}`}
+                        data-testid={r.salaryDecrease ? "salary-decrease" : undefined}
+                      >
+                        {r.salary && r.salaryBefore && r.salaryBefore.amount !== r.salary.amount && (
+                          <span className={r.salaryDecrease ? "" : "text-muted"}>
+                            {formatMoney(r.salaryBefore.amount, r.salaryBefore.currency)} →{" "}
+                          </span>
+                        )}
                         {r.salary ? `${formatMoney(r.salary.amount, r.salary.currency)}${r.salary.payType !== "monthly" ? ` · ${PAY_TYPE_LABELS[r.salary.payType].toLowerCase()}` : ""}` : ""}
+                        {r.salaryDecrease && <span className="ml-1">▼ decrease</span>}
                       </td>
                     )}
                     <td className="py-2 text-[12px]">

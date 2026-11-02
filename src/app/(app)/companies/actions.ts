@@ -98,7 +98,9 @@ export async function importNumbersAction(prev: NumbersImportState, fd: FormData
   const companyId = str(fd, "companyId") ?? "";
   try {
     if (str(fd, "step") === "confirm") {
-      const { applied, ...plan } = await applyMetricsImport(ctx, companyId, upload.table);
+      const { applied, ...plan } = await applyMetricsImport(ctx, companyId, upload.table, {
+        expectedSha256: str(fd, "fileSha256") ?? "",
+      });
       revalidatePath("/", "layout");
       return { step: "done", fileName: upload.name, plan, applied };
     }

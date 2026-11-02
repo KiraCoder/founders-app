@@ -29,6 +29,8 @@ export function NumbersImportWizard({ companyId, companySlug }: { companyId: str
     <form onSubmit={onSubmit} className="space-y-4" aria-label="Import numbers">
       <input ref={stepRef} type="hidden" name="step" defaultValue="preview" />
       <input type="hidden" name="companyId" value={companyId} />
+      {/* The confirm step must send the previewed file's hash back (server refuses another file). */}
+      <input type="hidden" name="fileSha256" value={plan?.fileSha256 ?? ""} />
 
       <section className={`card p-4 md:p-5 ${state.step === "upload" ? "" : "hidden"}`}>
         <p className="eyebrow mb-2">1 · Upload</p>

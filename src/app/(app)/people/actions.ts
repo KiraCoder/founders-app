@@ -192,7 +192,7 @@ export async function importAction(prev: ImportState, fd: FormData): Promise<Imp
       return { ...base, step: "preview", plan };
     }
     if (step === "confirm") {
-      const result = await applyImport(ctx, table, mapping, { defaultCompanyId });
+      const result = await applyImport(ctx, table, mapping, { defaultCompanyId, expectedSha256: str(fd, "fileSha256") ?? "" });
       revalidatePath("/", "layout");
       const { applied, ...plan } = result;
       return { ...base, step: "done", plan, applied };

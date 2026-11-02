@@ -4,6 +4,8 @@ import { type Granularity, DATE_HEADERS, metricValueProblem, normalizeHeader, pa
 import type { Db } from "@/server/db/connect";
 import type { ParsedTable } from "@/server/import/parse-table";
 import { today, type ServiceContext } from "./context";
+import { assertSameFile } from "./import-common";
+import { lockTransaction } from "./locks";
 import { ServiceError } from "./errors";
 import { currentValues, listMetricDefinitions, writeMetricValueTx, type MetricView } from "./metrics";
 
@@ -19,6 +21,10 @@ import { currentValues, listMetricDefinitions, writeMetricValueTx, type MetricVi
  * Flow like the people import: parse (parse-table.ts) → `planMetricsImport` (preview:
  * create / update / unchanged / error per cell) → `applyMetricsImport` (re-plans in a
  * transaction and writes). Re-importing the same file changes nothing.
+ *
+ * Like every importer: the preview returns the file's sha256 and confirm must send it back
+ * (`assertSameFile`), and confirm runs under an advisory lock per company so two uploads
+ * at once are applied one after the other.
  */
 
 export type CellAction = "create" | "update" | "unchanged" | "error";
@@ -51,6 +57,8 @@ export interface MetricImportPlan {
   columns: MetricImportColumn[];
   cells: MetricImportCell[];
   counts: Record<CellAction, number>;
+  /** sha256 of the previewed file; the confirm step must send it back. */
+  fileSha256: string;
 }
 
 function candidates(def: MetricView): string[] {
@@ -173,7 +181,7 @@ async function buildPlan(ctx: ServiceContext, companyId: string, table: ParsedTa
   if (cells.length === 0) throw new ServiceError("validation", "The file has no numbers in the metric columns.");
   const counts: Record<CellAction, number> = { create: 0, update: 0, unchanged: 0, error: 0 };
   for (const c of cells) counts[c.action]++;
-  return { dateColumn: table.headers[dateIdx] ?? "Date", columns, cells, counts };
+  return { dateColumn: table.headers[dateIdx] ?? "Date", columns, cells, counts, fileSha256: table.sha256 };
 }
 
 /** Preview. Writes nothing. */
@@ -181,14 +189,17 @@ export async function planMetricsImport(ctx: ServiceContext, companyId: string, 
   return buildPlan(ctx, companyId, table);
 }
 
-/** Re-plans inside one transaction and writes the create/update cells (source = upload). */
+/** Re-plans inside one transaction (same file as the preview only) and writes the create/update cells (source = upload). */
 export async function applyMetricsImport(
   ctx: ServiceContext,
   companyId: string,
   table: ParsedTable,
+  opts: { expectedSha256: string },
 ): Promise<MetricImportPlan & { applied: number }> {
+  assertSameFile(table, opts.expectedSha256);
   return ctx.db.transaction(async (rawTx) => {
     const tx: ServiceContext = { ...ctx, db: rawTx as unknown as Db };
+    await lockTransaction(tx.db, `metrics-import:${companyId}`);
     const plan = await buildPlan(tx, companyId, table);
     let applied = 0;
     for (const c of plan.cells) {

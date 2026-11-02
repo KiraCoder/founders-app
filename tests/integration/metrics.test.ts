@@ -64,7 +64,7 @@ async function metricId(slug: string, key: string, unitSlug?: string): Promise<s
 }
 
 const cid = (slug: string): string => t.companyIds[slug]!;
-const table = (headers: string[], rows: string[][]): ParsedTable => ({ headers, rows, rowNumbers: rows.map((_, i) => i + 2) });
+const table = (headers: string[], rows: string[][]): ParsedTable => ({ headers, rows, rowNumbers: rows.map((_, i) => i + 2), sha256: "test-table" });
 
 describe("seeded definitions", () => {
   it("each company gets its metrics from kpis.ts; Alura Style per factory; Marketing none; re-seed adds nothing", async () => {
@@ -213,7 +213,7 @@ describe("upload: preview then confirm, idempotent", () => {
     // Preview writes nothing.
     expect((await listMetricValues(ctx, await metricId("alura-style", "defect_pct", "hbk"))).length).toBe(0);
 
-    const applied = await applyMetricsImport(ctx, company, file);
+    const applied = await applyMetricsImport(ctx, company, file, { expectedSha256: file.sha256 });
     expect(applied.applied).toBe(5);
     const hbk = await listMetricValues(ctx, await metricId("alura-style", "output_pcs", "hbk"), { includeHistory: true });
     expect(hbk.map((h) => [h.period, h.value, h.isCurrent, h.source])).toEqual([
@@ -225,7 +225,7 @@ describe("upload: preview then confirm, idempotent", () => {
     // Same file again: nothing to do.
     const second = await planMetricsImport(ctx, company, file);
     expect(second.counts).toMatchObject({ create: 0, update: 0, unchanged: 6 });
-    expect((await applyMetricsImport(ctx, company, file)).applied).toBe(0);
+    expect((await applyMetricsImport(ctx, company, file, { expectedSha256: file.sha256 })).applied).toBe(0);
     expect((await listMetricValues(ctx, await metricId("alura-style", "output_pcs", "hbk"), { includeHistory: true })).length).toBe(3);
   });
 
