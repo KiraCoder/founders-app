@@ -1,0 +1,123 @@
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { Icon } from "@/components/Icon";
+import { AddLinkForm, LinkActiveButton, PersonStatusButton, SalaryForm } from "@/components/people/PersonActions";
+import { EditPersonForm } from "@/components/people/PersonForm";
+import { CompanyDot, PageHeader, Section, Tag } from "@/components/ui";
+import { formatMoney } from "@/lib/money";
+import { EMPLOYMENT_TYPE_LABELS, PAY_TYPE_LABELS } from "@/lib/people-schemas";
+import { getPageContext } from "@/server/context";
+import { ServiceError } from "@/server/services/errors";
+import { getPerson, listCompanyUnitOptions } from "@/server/services/people";
+import { canViewSalaries } from "@/server/services/salaries";
+
+export const metadata = { title: "Person" };
+
+export default async function PersonPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const ctx = await getPageContext();
+  const showSalary = await canViewSalaries(ctx);
+  let person;
+  try {
+    person = await getPerson(ctx, id, { salaryScope: "person" });
+  } catch (err) {
+    if (err instanceof ServiceError && err.code === "not_found") notFound();
+    throw err;
+  }
+  const companies = (await listCompanyUnitOptions(ctx)).map((c) => ({ id: c.id, name: c.name, units: c.units.map((u) => ({ id: u.id, name: u.name })) }));
+  const left = person.leftAt !== null;
+
+  return (
+    <>
+      <PageHeader
+        eyebrow={
+          <Link href="/people" className="hover:underline">
+            People
+          </Link>
+        }
+        title={
+          <span className="flex items-center gap-2">
+            {person.fullName}
+            {left && <Tag tone="warn">Left</Tag>}
+            {person.isUser && <Tag tone="ok">App user</Tag>}
+          </span>
+        }
+        actions={<PersonStatusButton personId={person.id} left={left} />}
+      />
+
+      <Section title="Companies and roles" count={person.roles.filter((r) => r.isActive).length}>
+        <ul className="card mb-3 divide-y divide-line">
+          {person.roles.length === 0 && <li className="px-4 py-4 text-[13px] text-muted">Not linked to any company yet.</li>}
+          {person.roles.map((r) => (
+            <li key={r.id} className="px-4 py-3" data-testid="person-role">
+              <div className="flex flex-wrap items-center gap-2">
+                <CompanyDot color={r.companyColor} />
+                <Link href={`/companies/${r.companySlug}?tab=people`} className="font-medium hover:underline">
+                  {r.companyName}
+                </Link>
+                <span>· {r.title ?? r.role}</span>
+                {r.unitName && <Tag>{r.unitName}</Tag>}
+                <Tag tone={r.employmentType === "staff" ? "neutral" : "info"}>{EMPLOYMENT_TYPE_LABELS[r.employmentType]}</Tag>
+                {!r.isActive && <Tag tone="warn">Ended {r.endedOn ?? ""}</Tag>}
+                {r.startedOn && <span className="text-[12px] text-muted">since {r.startedOn}</span>}
+                <span className="ml-auto">
+                  <LinkActiveButton linkId={r.id} active={r.isActive} />
+                </span>
+              </div>
+              {showSalary && (
+                <div className="mt-2 rounded-[8px] bg-sunk px-3 py-2 text-[13px]" data-testid="salary-block">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Icon name="lock" size={14} className="text-warn" />
+                    <span className="text-muted">Current salary:</span>
+                    <span className="num font-semibold">
+                      {r.salary ? formatMoney(r.salary.amount, r.salary.currency) : "—"}
+                    </span>
+                    {r.salary && <span className="text-muted">{PAY_TYPE_LABELS[r.salary.payType].toLowerCase()} · from {r.salary.effectiveFrom}</span>}
+                    <span className="ml-auto">
+                      <SalaryForm linkId={r.id} />
+                    </span>
+                  </div>
+                  {r.salaryHistory && r.salaryHistory.length > 0 && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-[12px] text-muted">History ({r.salaryHistory.length})</summary>
+                      <table className="mt-1 w-full text-[12px]">
+                        <tbody>
+                          {r.salaryHistory.map((s) => (
+                            <tr key={s.id} className="border-t border-line">
+                              <td className="py-1 pr-3">{s.effectiveFrom}</td>
+                              <td className="num py-1 pr-3 text-right">{formatMoney(s.amount, s.currency)}</td>
+                              <td className="py-1 pr-3 text-muted">{PAY_TYPE_LABELS[s.payType].toLowerCase()}</td>
+                              <td className="py-1 pr-3 text-muted">{s.note ?? ""}</td>
+                              <td className="py-1 text-right text-muted">{s.createdByName ?? ""}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </details>
+                  )}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+        <AddLinkForm personId={person.id} companies={companies} showSalary={showSalary} />
+      </Section>
+
+      <Section title="Details">
+        <div className="card p-4 md:p-5">
+          <EditPersonForm
+            values={{
+              id: person.id,
+              fullName: person.fullName,
+              shortName: person.shortName,
+              phone: person.phone,
+              telegramHandle: person.telegramHandle,
+              email: person.email,
+              notes: person.notes,
+            }}
+          />
+        </div>
+      </Section>
+    </>
+  );
+}

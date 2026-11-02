@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { PeopleList } from "@/components/PeopleList";
+import Link from "next/link";
+import { Icon } from "@/components/Icon";
+import { PeopleTable } from "@/components/people/PeopleTable";
 import { NewProjectForm } from "@/components/projects/NewProjectForm";
 import { ProjectCard } from "@/components/projects/ProjectCard";
 import { NewTaskPanel } from "@/components/tasks/NewTaskPanel";
@@ -13,7 +15,8 @@ import { getCompanyBySlug } from "@/server/services/companies";
 import { today } from "@/server/services/context";
 import { ServiceError } from "@/server/services/errors";
 import { getTaskFormOptions } from "@/server/services/options";
-import { listPeople } from "@/server/services/people";
+import { companyHeadcount, listPeople } from "@/server/services/people";
+import { canViewSalaries } from "@/server/services/salaries";
 import { listProjects } from "@/server/services/projects";
 import { listTasks } from "@/server/services/tasks";
 
@@ -72,7 +75,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
       {tab === "overview" && <Overview company={company} />}
       {tab === "projects" && <ProjectsTab ctx={ctx} companyId={company.id} />}
       {tab === "tasks" && <TasksTab ctx={ctx} companyId={company.id} />}
-      {tab === "people" && <PeopleList people={await listPeople(ctx, { companyId: company.id })} showCompanies={false} />}
+      {tab === "people" && <PeopleTab ctx={ctx} companyId={company.id} slug={company.slug} />}
       {tab === "org" && (
         <ComingSoon title="Org structure">
           Editable org chart based on the Vysotsky model (7 divisions, 21 departments), labels in Russian.
@@ -155,6 +158,42 @@ async function ProjectsTab({ ctx, companyId }: { ctx: Awaited<ReturnType<typeof 
           ))}
         </div>
       )}
+    </>
+  );
+}
+
+async function PeopleTab({ ctx, companyId, slug }: { ctx: Awaited<ReturnType<typeof getPageContext>>; companyId: string; slug: string }) {
+  const [showSalary, headcount] = await Promise.all([canViewSalaries(ctx), companyHeadcount(ctx, companyId)]);
+  const people = await listPeople(ctx, { companyId }, { salaryScope: `company:${slug}` });
+  return (
+    <>
+      <Section
+        title="Headcount"
+        count={headcount.total}
+        action={
+          <Link href={`/people/new?companyId=${companyId}`} className="btn btn-sm">
+            <Icon name="plus" size={14} /> Add person
+          </Link>
+        }
+      >
+        <div className="flex flex-wrap gap-2" data-testid="headcount">
+          {headcount.byUnit.map((u) => (
+            <div key={u.unitId ?? "none"} className="card min-w-[120px] px-3 py-2">
+              <p className="eyebrow">{u.unitName}</p>
+              <p className="num text-[20px] font-semibold">{u.count}</p>
+            </div>
+          ))}
+        </div>
+        <p className="mt-2 text-[12px] text-muted">Active people; founders are not counted.</p>
+      </Section>
+      <Section title="People">
+        <PeopleTable people={people} showSalary={showSalary} showCompany={false} empty="No active people in this company." />
+        <p className="mt-2 text-[12px] text-muted">
+          <Link href={`/people?companyId=${companyId}&status=left`} className="hover:underline">
+            People who left
+          </Link>
+        </p>
+      </Section>
     </>
   );
 }
