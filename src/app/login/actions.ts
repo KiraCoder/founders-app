@@ -3,6 +3,7 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
+import { safeNext } from "@/lib/safe-next";
 import { signInWithPassword } from "@/server/auth";
 
 export interface LoginState {
@@ -15,11 +16,6 @@ const loginSchema = z.object({
   password: z.string().min(1).max(200),
   next: z.string().optional(),
 });
-
-/** Only allow relative in-app redirects after login. */
-function safeNext(next: string | undefined): string {
-  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/";
-}
 
 export async function loginAction(_prev: LoginState, formData: FormData): Promise<LoginState> {
   const parsed = loginSchema.safeParse(Object.fromEntries(formData));
