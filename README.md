@@ -219,14 +219,17 @@ The poller fetches updates from Telegram and forwards them to the same webhook h
 
 One shared people database for all companies (it replaces the Excel sheet): **People** in the
 sidebar, and the **People** tab of each company (with a headcount per unit, e.g. Alura Style
-ХБК / Ош Район; founders are not counted).
+ХБК / Ош Район; founders — people with an app account — are not counted, whatever their role text).
+Search ignores case and treats ё and е as the same letter.
 
 - A person has full name (Russian names are fine), short name, phone, Telegram, email, notes.
 - A person can work for **several companies** (e.g. the accountant): each company link has a
   role/title, optional unit, employment type (staff / contractor / part-time), start/end date
   and active flag.
-- **No hard delete.** *Mark as left* ends all their company roles (end date = today) and hides
-  them from active lists; *Left* in the status filter shows them again, with full history.
+- **No hard delete.** *Mark as left* ends all their company roles (end date = the leaving
+  date, default today; a future date is refused) and hides them from active lists; *Left* in
+  the status filter shows them again, with full history. Undoing it (status *active*) brings
+  back exactly the roles that *Mark as left* ended; roles ended by hand stay ended.
   Ending one role (*End role*) keeps the person active in their other companies.
   People ids never change, so a later org chart (`org_posts.manager_person_id`) can point at them.
 
@@ -234,11 +237,14 @@ sidebar, and the **People** tab of each company (with a headcount per unit, e.g.
 
 - Stored in their own table `salaries` (amount, currency default KGS, pay type
   monthly / piecework / hourly, effective from, note, who entered it). A change adds a new row;
-  the **current** salary is the latest *effective from* on or before today. History is on the
-  person page.
+  the **current** salary is the latest *effective from* on or before today (same date: the row
+  entered last). History is on the person page. A salary row and its audit row are written
+  together or not at all.
 - Only **salary viewers** see them. **Default: only Nuraaly** (pending the founders'
   decision). Change it in **Settings → Access**: one switch per founder, only an existing
-  salary viewer can flip it, and the last viewer cannot be removed.
+  salary viewer can flip it, and the last viewer cannot be removed (also when two viewers
+  revoke each other at the same moment: the rows are locked, so one of the two is refused).
+  A viewer must also still be a founder in the database.
 - Everyone else gets no salary column, no salary in the person page, API, search or import
   preview (the key is not even sent), and any salary change is refused (403).
 - **Audit:** `salary_access_log` records every change (who, which person, when), every
@@ -247,22 +253,34 @@ sidebar, and the **People** tab of each company (with a headcount per unit, e.g.
 
 **Import from Excel / CSV** (`/people/import`):
 
-1. Upload a `.xlsx` or `.csv` (max 2 MB; Russian or English headers; CSV in UTF-8 or
-   Windows-1251, comma or semicolon). It is parsed in memory on the server and **never stored**:
-   the browser sends the file again for each step.
+1. Upload a `.xlsx` or `.csv` (max 2 MB; Russian or English headers; CSV in UTF-8,
+   UTF-16 with BOM or Windows-1251, comma or semicolon). It is parsed in memory on the server
+   and **never stored**: the browser sends the file again for each step. An `.xlsx` is a zip:
+   it is refused if it has more than 100 parts or unpacks to more than 10 MB per part / 25 MB
+   in total (checked while unpacking, so a "zip bomb" cannot exhaust the server).
 2. Map the columns (guessed from the headers: ФИО, Компания, Должность, Цех, Телефон, Оклад, …).
    Optionally pick a default company for files without a company column.
 3. **Preview**: each row is *create*, *update*, *skip* or *error* with the reason (unknown
    company or unit, bad phone/email, salary not a number, empty name, duplicate line).
-4. **Import**: error rows are skipped, the rest is written in one transaction.
+4. **Import**: error rows are skipped, the rest is written in one transaction. The file must be
+   the one that was previewed (its sha256 is checked), and two imports at the same moment run
+   one after the other (database lock), so they cannot both create the same person.
 
 People are matched by **name + phone** (case and ё/е ignored; `+996 555…` = `0555…`), so
 importing the same file again changes nothing. Without a phone, the name must match exactly one
-person. Existing values are never overwritten, only empty fields are filled; people marked as
-left are not touched. The salary column can only be mapped by a salary viewer; a changed salary
-adds a history row. Try it with `docs/samples/people-sample.csv` (clearly fake data).
+person. A person without a phone is matched by the *first* row with that name and gets its
+phone; another row with the same name and a different phone is a new person (two people are
+never merged). Existing values are never overwritten, only empty fields are filled; people
+marked as left are not touched. The salary column can only be mapped by a salary viewer (also
+not to another field such as notes); a changed salary adds a history row. For viewers the
+preview shows *current → new* amounts and flags every **decrease** in red with a warning on
+top (an old file would otherwise undo raises). Try it with `docs/samples/people-sample.csv` (clearly fake data).
 
-Parsers: `exceljs` (xlsx) and `papaparse` (csv). The popular `xlsx` (SheetJS) npm package was
+**Exports:** none yet. Any future CSV export must build its cells with `csvSafe` /
+`toCsvLine` (`src/lib/csv-safe.ts`): text starting with `=`, `+`, `-`, `@`, tab or CR gets a
+leading `'` so Excel does not run it as a formula.
+
+Parsers: `exceljs` (xlsx), `jszip` (the zip check before it) and `papaparse` (csv). The popular `xlsx` (SheetJS) npm package was
 not used: its npm version has two unfixed high-severity advisories; `exceljs` has only moderate
 ones in its zip-*writing* dependencies, which the importer does not use.
 
@@ -297,7 +315,7 @@ whether higher or lower is better, an optional target, and its expected source
   only**, so a file can never change another company. Preview shows each number as *new /
   update / unchanged / error* (bad number, unknown date, future period, same period twice);
   then *Import*. Importing the same file again changes nothing. Same parser and limits as
-  the people import. Try `docs/samples/kiwi-go-numbers-sample.csv` (clearly fake numbers).
+  the people import (zip-bomb guard, same-file check, one import per company at a time). Try `docs/samples/kiwi-go-numbers-sample.csv` (clearly fake numbers).
 - **Group overview:** `/companies` and *Today* show one small row per company:
   fresh / stale / missing counts.
 - **Morning summary:** a short **Numbers waiting** section (at most 3 lines, grouped by
@@ -329,7 +347,9 @@ Session-cookie auth for now; JSON errors look like `{ "error": { "code", "messag
 - `GET /api/v1/people/:id` (all company roles; `salary` and `salaryHistory` only for salary viewers)
 - `PATCH /api/v1/people/:id` — person fields (e.g. `{ "status": "left" }`), or
   `{ person, addLinks, updateLinks: [{ id, changes }], addSalaries: [{ linkId, salary }] }`.
-  Salary changes from a non-viewer get 403 and nothing is changed.
+  Salary changes from a non-viewer get 403 and nothing is changed. The whole request is one
+  transaction: if any part fails (unknown link, conflict, validation), nothing is changed.
+  Two salaries for the same role and date in one request are refused (400).
 
 - `GET /api/v1/companies/:slug/metrics` (definitions with latest value, change, freshness and the last 12 periods)
 - `GET /api/v1/metrics/:id/values?history=1&limit=` (current value per period; with `history=1` also corrected rows)
