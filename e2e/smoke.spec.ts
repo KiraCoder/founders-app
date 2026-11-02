@@ -80,6 +80,25 @@ test("REST API: create, change deadline (audited), validation errors, delete", a
   expect(patched.ok()).toBeTruthy();
   expect((await patched.json()).data.isOverdue).toBe(false);
 
+  // CSRF guard: cross-site writes and non-JSON bodies are refused before reaching the API.
+  const crossSite = await page.request.patch(`/api/v1/tasks/${task.id}`, {
+    data: { dueDate: "2001-01-01" },
+    headers: { origin: "https://evil.example" },
+  });
+  expect(crossSite.status()).toBe(403);
+  const formPost = await page.request.post("/api/v1/tasks", { form: { title: "csrf" } });
+  expect(formPost.status()).toBe(415);
+  // Same-origin browser fetch still works.
+  const fromPage = await page.evaluate(async (id) => {
+    const r = await fetch(`/api/v1/tasks/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ priority: "high" }),
+    });
+    return r.status;
+  }, task.id);
+  expect(fromPage).toBe(200);
+
   expect((await page.request.delete(`/api/v1/tasks/${task.id}`)).status()).toBe(204);
   expect((await page.request.get(`/api/v1/tasks/${task.id}`)).status()).toBe(404);
 });

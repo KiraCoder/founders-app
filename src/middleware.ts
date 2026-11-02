@@ -1,18 +1,27 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, verifySessionToken } from "@/server/auth/session-token";
+import { checkMutatingApiRequest } from "@/server/http/request-guard";
 
 /** No session cookie needed. The two API routes check their own secrets (constant-time). */
 const PUBLIC_PATHS = ["/login", "/api/telegram/webhook", "/api/cron/tick"];
 
 /**
  * First gate: every route except /login needs a validly signed session cookie.
- * Pages are redirected to /login; API routes get a JSON 401.
+ * Pages are redirected to /login; API routes get a JSON 401. Mutating /api/v1 calls
+ * must also pass the same-origin + JSON check (src/server/http/request-guard.ts).
  * (Session revocation/expiry is re-checked against the DB in getCurrentUser().)
  */
 export async function middleware(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
   if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return NextResponse.next();
+  }
+  // CSRF: mutating REST calls must come from this site and carry JSON.
+  if (pathname.startsWith("/api/v1/") || pathname === "/api/v1") {
+    const guard = checkMutatingApiRequest(req);
+    if (!guard.ok) {
+      return NextResponse.json({ error: { code: guard.code, message: guard.message } }, { status: guard.status });
+    }
   }
   const claims = await verifySessionToken(req.cookies.get(SESSION_COOKIE)?.value);
   if (claims) return NextResponse.next();
