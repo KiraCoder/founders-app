@@ -81,6 +81,9 @@ the Vercel / Supabase dashboards.
   someone moves the deadline or closes the task. Every deadline change is written to `task_events`.
 - The task history (`task_events`) follows the same rule as the task: the history of a personal
   todo is visible only to its owner, also after the task was deleted or made private.
+- **Company numbers** (metrics, values, connector runs) belong to their company and follow the
+  company rule (`visibleMetricsWhere` / `assertMetricAccess` in `access.ts`): shared between the
+  founders, never mixed between companies.
 - **Salaries are restricted** (see *People and salaries* below): only users in `salary_viewers`
   see or change them. The check is `isSalaryViewer` / `assertSalaryViewer` in `access.ts`, and
   `src/server/services/salaries.ts` is the only code that touches the `salaries` table.
@@ -263,6 +266,56 @@ Parsers: `exceljs` (xlsx) and `papaparse` (csv). The popular `xlsx` (SheetJS) np
 not used: its npm version has two unfixed high-severity advisories; `exceljs` has only moderate
 ones in its zip-*writing* dependencies, which the importer does not use.
 
+## Company numbers (KPIs)
+
+Each company page has **key numbers** on its *Overview* tab and a **Numbers** tab.
+Definitions live in the `metric_definitions` table (seeded by `npm run db:seed` from
+`src/lib/kpis.ts`; the seed only adds missing ones, so later edits in the database are kept).
+Each metric has a company and optional factory (Alura Style ХБК and Ош Район are separate),
+an English name, a unit (KGS, pcs, orders, %, people, count), a period (day / week / month),
+whether higher or lower is better, an optional target, and its expected source
+(manual, upload or a connector). Marketing (planned) has none yet.
+
+- **KPI card:** latest value and its period, change vs the period right before (green/red by
+  direction; nothing when that period is missing), a sparkline of the last 12 periods, who
+  updated it and when ("Updated 3 days ago by Talant · via upload"). **Enter value** opens a
+  small form on the card.
+- **Freshness** (all days are Asia/Bishkek): data for a period is due N days after the period
+  ends — daily: 1 day (so a daily number is stale once it is more than 2 days old), weekly:
+  3 days (Wednesday), monthly: 10 days (the 10th of the next month); changeable per metric
+  (`due_days`). One period overdue → the card turns **warn** (yellow); two or more, or no
+  value at all → **risk** (red).
+- **Corrections keep history:** values are never overwritten. Entering a different number for
+  the same period adds a new row and marks the old one as not current (latest wins). Entering
+  the same number again changes nothing.
+- **Numbers tab:** a period × metric grid (Monthly / Weekly / Daily) for fast entry. Only changed
+  cells are saved; an empty cell never deletes a value.
+- **Upload** (`/companies/<slug>/numbers/import`): a `.xlsx` / `.csv` with a **Date** column
+  (Дата, Месяц, Period …) and one column per number, named like the card in English or Russian
+  ("Orders per day" / "Заказы в день"; factory numbers with the factory: "Выпуск ХБК"). The
+  accepted names are listed on the page. Columns are matched to **that company's numbers
+  only**, so a file can never change another company. Preview shows each number as *new /
+  update / unchanged / error* (bad number, unknown date, future period, same period twice);
+  then *Import*. Importing the same file again changes nothing. Same parser and limits as
+  the people import. Try `docs/samples/kiwi-go-numbers-sample.csv` (clearly fake numbers).
+- **Group overview:** `/companies` and *Today* show one small row per company:
+  fresh / stale / missing counts.
+- **Morning summary:** a short **Numbers waiting** section (at most 3 lines, grouped by
+  company) in each founder's morning summary. No separate pushes; both founders see the same
+  list because company data is shared. The hook is `staleMetricsFor(ctx)` in
+  `src/server/services/metrics.ts`, so a later agent can chase "please upload X".
+
+**Data sources (connectors).** `src/server/connectors/`: a `Connector` interface (`id`,
+`companySlug`, `metrics`, `pull(range) → MetricPoint[]`, `healthCheck()`), a registry, and
+placeholders for the **Kiwi Go app**, **WMS (wms.jobutify.com)**, **Alura Style ERP** and
+**Wildberries**. The placeholders make **no network calls**; they only report "Waiting for API
+access from Edil" / "Needs WB token". `runConnector(db, id, range)` writes what a connector
+returns as values with source *connector* and logs every attempt in `connector_runs`. Status
+is on *Settings → Data sources* and on each company's Overview (*Check now* logs an attempt).
+The env var names are in `.env.example` (all empty). To plug in a real source: implement
+`Connector` in its own file, return it from `defaultRegistry()` in `registry.ts`, add its keys
+in Vercel.
+
 ## REST API (for the future iOS app)
 
 Session-cookie auth for now; JSON errors look like `{ "error": { "code", "message", "fields?" } }`.
@@ -278,7 +331,11 @@ Session-cookie auth for now; JSON errors look like `{ "error": { "code", "messag
   `{ person, addLinks, updateLinks: [{ id, changes }], addSalaries: [{ linkId, salary }] }`.
   Salary changes from a non-viewer get 403 and nothing is changed.
 
-Input shapes are the Zod schemas in `src/lib/schemas.ts` and `src/lib/people-schemas.ts`.
+- `GET /api/v1/companies/:slug/metrics` (definitions with latest value, change, freshness and the last 12 periods)
+- `GET /api/v1/metrics/:id/values?history=1&limit=` (current value per period; with `history=1` also corrected rows)
+- `POST /api/v1/metrics/:id/values` `{ "period": "2026-10" | "2026-10-31", "value": 123, "note"? }` (201 new, 200 correction/unchanged)
+
+Input shapes are the Zod schemas in `src/lib/schemas.ts`, `src/lib/people-schemas.ts` and `src/lib/metric-schemas.ts`.
 
 ## Folder map
 
@@ -289,7 +346,7 @@ src/
     (app)/                 Signed-in app (shell layout)
       page.tsx             Today
       tasks/               Tasks (views, filters, inline edit)
-      companies/[slug]/    Company page with tabs
+      companies/[slug]/    Company page with tabs (Overview KPI cards, Numbers grid); numbers/import upload
       projects/[id]/       Project with tasks and progress
       people/              People list, person page, new person, import wizard (+ server actions)
       search/ more/ holding/ org/ ai-roles/
@@ -300,13 +357,15 @@ src/
     api/telegram/webhook/  Telegram webhook (secret header)
     api/cron/tick/         Scheduler tick (CRON_SECRET)
   components/              UI: shell (sidebar, top bar, tabs), tasks, projects, people, settings
-  lib/                     Pure code: dates.ts (timezone), schemas.ts + people-schemas.ts (Zod), kpis.ts, money.ts
+  lib/                     Pure code: dates.ts (timezone), schemas.ts + people-schemas.ts + metric-schemas.ts (Zod),
+                           kpis.ts (default metrics), metrics.ts (periods, freshness, change), money.ts
   server/
     auth/                  AuthProvider: local (now) and supabase (stub), session cookie, login rate limit
     db/                    schema.ts, connect.ts (PGlite or Postgres), migrate.ts, seed.ts
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
-                           people-import, search, notifications: preferences, Telegram link, button actions)
-    import/parse-table.ts  .xlsx/.csv parsing for the people import (in memory, 2 MB limit)
+                           people-import, metrics, metrics-import, connectors, search, notifications)
+    import/parse-table.ts  .xlsx/.csv parsing for the people and numbers imports (in memory, 2 MB limit)
+    connectors/            Data sources: Connector interface, registry, stubs (no network), runner
     notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot
     http/request-guard.ts  Same-origin + JSON check for mutating /api/v1 calls
   middleware.ts            Redirects signed-out users to /login (401 JSON for /api), CSRF guard
@@ -315,7 +374,7 @@ scripts/                   db:migrate / db:seed / db:reset / cron:tick / telegra
 supabase/policies.sql      RLS policies for a future direct-client mode (applied by hand)
 tests/                     Vitest unit + service tests
 e2e/                       Playwright smoke test + screenshots
-docs/screenshots/          UI screenshots (people-list-salaries.png, people-import-preview.png, …)
-docs/samples/              people-sample.csv (fake data) for the importer
+docs/screenshots/          UI screenshots (company-overview-kpis.png, numbers-grid.png, people-list-salaries.png, …)
+docs/samples/              people-sample.csv, kiwi-go-numbers-sample.csv (fake data) for the importers
 docs/reviews/              Independent reviews and how each finding was resolved
 ```

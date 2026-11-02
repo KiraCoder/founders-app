@@ -89,8 +89,10 @@ create policy users_select on public.users for select to authenticated
   using (public.is_founder());
 
 -- sessions, login_attempts, telegram_link_codes, notification_action_tokens,
--- salaries, salary_viewers, salary_access_log:
--- server-only. No grant, no policy = no client access at all.
+-- salaries, salary_viewers, salary_access_log,
+-- metric_definitions, metric_values, connector_runs:
+-- server-only. No grant, no policy = no client access at all. (Metric values are
+-- append-only with one current row per period; only services/metrics.ts keeps that rule.)
 
 -- companies, company_units, people, person_companies, projects: shared between founders.
 grant select, insert, update on public.companies, public.company_units, public.people,

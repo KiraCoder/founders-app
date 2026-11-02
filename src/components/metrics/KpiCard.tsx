@@ -84,12 +84,12 @@ export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: Is
         <Tag tone={tag.tone}>{tag.text}</Tag>
         {m.target !== null && <span className="text-[11px] text-muted">Target {formatMetricValue(m.target, m.unit)}</span>}
       </div>
-      <p className="text-[11px] text-muted" data-testid="kpi-freshness">
+      <p className="text-[11px] text-muted" data-testid="kpi-freshness" title={`Expected source: ${sourceLabel(m, connectorNames)}`}>
         {m.latest
-          ? `Updated ${agoText(m.latest.enteredDay, today)}${m.latest.enteredByName ? ` by ${m.latest.enteredByName}` : m.latest.source === "connector" ? " by connector" : ""}`
-          : "Never updated"}
-        {" · "}
-        {sourceLabel(m, connectorNames)}
+          ? `Updated ${agoText(m.latest.enteredDay, today)}${m.latest.enteredByName ? ` by ${m.latest.enteredByName}` : ""} · ${
+              m.latest.source === "connector" ? `via ${sourceLabel(m, connectorNames)}` : m.latest.source === "upload" ? "via upload" : "entered by hand"
+            }`
+          : `Never updated · expected from ${sourceLabel(m, connectorNames)}`}
       </p>
       <EnterValueForm
         metricId={m.id}

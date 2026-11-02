@@ -59,3 +59,28 @@ test("people screenshots", async ({ page }) => {
   await page.getByTestId("salary-header").waitFor();
   await page.screenshot({ path: "docs/screenshots/people-list-salaries.png", fullPage: true });
 });
+
+test("numbers screenshots", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await login(page, "nuraaly");
+  // Load the clearly fake sample numbers (idempotent). "Active couriers" stops two days
+  // early in the sample, so its card shows as stale.
+  await page.goto("/companies/kiwi-go/numbers/import");
+  await page.getByLabel("Spreadsheet file").setInputFiles("docs/samples/kiwi-go-numbers-sample.csv");
+  await page.getByRole("button", { name: "Preview" }).click();
+  await page.getByTestId("numbers-import-preview").waitFor();
+  await page.screenshot({ path: "docs/screenshots/numbers-import-preview.png", fullPage: true });
+  const confirm = page.getByRole("button", { name: /^Import \d+ numbers$/ });
+  if (await confirm.isEnabled()) {
+    await confirm.click();
+    await page.getByRole("status").waitFor();
+  }
+  await page.goto("/companies/kiwi-go");
+  await page.getByTestId("kpi-card").first().waitFor();
+  await page.screenshot({ path: "docs/screenshots/company-overview-kpis.png", fullPage: true });
+  await page.goto("/companies/kiwi-go?tab=numbers&g=day");
+  await page.getByTestId("numbers-grid").waitFor();
+  await page.screenshot({ path: "docs/screenshots/numbers-grid.png", fullPage: true });
+  await page.goto("/companies");
+  await page.screenshot({ path: "docs/screenshots/companies-freshness.png", fullPage: true });
+});

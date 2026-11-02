@@ -132,6 +132,41 @@ describe("0006 people + salaries on existing data", () => {
   });
 });
 
+describe("0007 metrics on existing data", () => {
+  it("adds the metric tables with RLS on a populated database; one current value per period is enforced", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0007") });
+    await client.exec(`
+      insert into users (id, email, name, short_name) values ('${NURAALY}', 'nuraaly@founders.local', 'Nuraaly', 'Nuraaly');
+      insert into companies (id, slug, name) values ('33333333-3333-4333-8333-333333333333', 'kiwi-go', 'Kiwi Go');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rls = await client.query<{ relname: string; relrowsecurity: boolean }>(
+      "select relname, relrowsecurity from pg_class where relname in ('metric_definitions','metric_values','connector_runs') order by relname",
+    );
+    expect(rls.rows).toEqual([
+      { relname: "connector_runs", relrowsecurity: true },
+      { relname: "metric_definitions", relrowsecurity: true },
+      { relname: "metric_values", relrowsecurity: true },
+    ]);
+    await client.exec(`
+      insert into metric_definitions (id, company_id, key, name, unit, granularity)
+        values ('66666666-6666-4666-8666-666666666666', '33333333-3333-4333-8333-333333333333', 'orders_day', 'Orders per day', 'orders', 'day');
+      insert into metric_values (metric_id, period_start, value, source) values ('66666666-6666-4666-8666-666666666666', '2026-11-01', 5, 'manual');
+      insert into metric_values (metric_id, period_start, value, source, is_current) values ('66666666-6666-4666-8666-666666666666', '2026-11-01', 4, 'manual', false);
+    `);
+    await expect(
+      client.exec(`insert into metric_values (metric_id, period_start, value, source) values ('66666666-6666-4666-8666-666666666666', '2026-11-01', 6, 'manual')`),
+    ).rejects.toThrow(/metric_values_current_uq/);
+    // Same key twice for the whole company (unit null) is refused too (NULLS NOT DISTINCT).
+    await expect(
+      client.exec(`insert into metric_definitions (company_id, key, name, unit, granularity) values ('33333333-3333-4333-8333-333333333333', 'orders_day', 'Dup', 'orders', 'day')`),
+    ).rejects.toThrow(/metric_definitions_company_unit_key_uq/);
+    // Values cannot be lost by deleting the metric (restrict).
+    await expect(client.exec(`delete from metric_definitions`)).rejects.toThrow(/foreign key/);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();
