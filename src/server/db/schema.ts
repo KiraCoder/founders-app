@@ -12,6 +12,7 @@
  */
 import { sql } from "drizzle-orm";
 import {
+  boolean,
   check,
   date,
   index,
@@ -253,8 +254,11 @@ export const taskEvents = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// Notifications (channel layer arrives next chunk; table only)
+// Notifications (outbox, preferences, Telegram links). See src/server/notifications/.
+// Only founders (users) ever receive notifications. People records never do.
 // ---------------------------------------------------------------------------
+export const notificationPriorityEnum = pgEnum("notification_priority", ["low", "normal", "high", "urgent"]);
+
 export const notificationsOutbox = pgTable(
   "notifications_outbox",
   {
@@ -262,19 +266,129 @@ export const notificationsOutbox = pgTable(
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    /** e.g. "telegram", later "push". */
-    channel: text("channel").notNull(),
-    /** e.g. "morning_summary", "overdue_chase", "agent_request". */
+    /** Channel actually used ("telegram", "dev", later "push"). "auto" until dispatched. */
+    channel: text("channel").notNull().default("auto"),
+    /** e.g. "morning_summary", "evening_check", "task_due_today", "overdue_chase", "task_reminder". */
     kind: text("kind").notNull(),
+    /** Kind-specific references (task id, summary line). The message itself is built at send time. */
     payload: jsonb("payload").notNull().default({}),
+    /** Task this item is about (if any). Deleting the task removes its reminders. */
+    taskId: uuid("task_id").references(() => tasks.id, { onDelete: "cascade" }),
+    priority: notificationPriorityEnum("priority").notNull().default("normal"),
     scheduledFor: timestamp("scheduled_for", { withTimezone: true }).notNull().defaultNow(),
+    /** After this instant the item is stale and gets cancelled instead of sent. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     sentAt: timestamp("sent_at", { withTimezone: true }),
     status: outboxStatusEnum("status").notNull().default("pending"),
-    /** Prevents sending the same reminder twice. */
-    dedupeKey: text("dedupe_key").unique(),
+    /** Prevents queueing the same reminder twice for the same user. */
+    dedupeKey: text("dedupe_key"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    /** Retry backoff: not retried before this instant. */
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    /** Set when the daily budget was full and the item was parked for the next summary. */
+    parkedAt: timestamp("parked_at", { withTimezone: true }),
+    /** The summary item that later included this parked item. */
+    bundledIntoId: uuid("bundled_into_id"),
+    providerMessageId: text("provider_message_id"),
+    /** Channel-neutral message as rendered at send time (shown in the dev inbox). */
+    message: jsonb("message"),
     createdAt: createdAt(),
   },
-  (t) => [index("notifications_outbox_due_idx").on(t.status, t.scheduledFor)],
+  (t) => [
+    index("notifications_outbox_due_idx").on(t.status, t.scheduledFor),
+    index("notifications_outbox_user_idx").on(t.userId, t.createdAt),
+    uniqueIndex("notifications_outbox_user_dedupe_uq").on(t.userId, t.dedupeKey),
+  ],
+);
+
+/** Per-founder notification settings. Times are "HH:MM" in APP_TIMEZONE. */
+export const notificationPreferences = pgTable("notification_preferences", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  morningSummaryTime: text("morning_summary_time").notNull().default("08:30"),
+  eveningCheckEnabled: boolean("evening_check_enabled").notNull().default(true),
+  eveningCheckTime: text("evening_check_time").notNull().default("19:00"),
+  quietStart: text("quiet_start").notNull().default("21:00"),
+  quietEnd: text("quiet_end").notNull().default("08:00"),
+  /** Max pushes per day besides the morning summary and evening check. */
+  maxOtherPerDay: integer("max_other_per_day").notNull().default(3),
+  /** Let priority "urgent" items through during quiet hours. */
+  urgentAtNight: boolean("urgent_at_night").notNull().default(false),
+  updatedAt: updatedAt(),
+});
+
+/** A founder's linked Telegram private chat. One per user, one user per chat. */
+export const telegramLinks = pgTable("telegram_links", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id")
+    .notNull()
+    .unique()
+    .references(() => users.id, { onDelete: "cascade" }),
+  chatId: text("chat_id").notNull().unique(),
+  telegramUserId: text("telegram_user_id").notNull(),
+  username: text("username"),
+  firstName: text("first_name"),
+  createdAt: createdAt(),
+});
+
+/** One-time codes for `/start CODE`. Only a SHA-256 hash is stored. */
+export const telegramLinkCodes = pgTable(
+  "telegram_link_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    codeHash: text("code_hash").notNull().unique(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("telegram_link_codes_user_idx").on(t.userId)],
+);
+
+/**
+ * Server-side tokens behind Telegram inline buttons. The callback data carries only a
+ * random token; the user, task and action live here (hash of the token is the key).
+ */
+export const notificationActionTokens = pgTable(
+  "notification_action_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tokenHash: text("token_hash").notNull().unique(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    /** "done" | "snooze_1d" | "move_1d" | "move_3d" */
+    action: text("action").notNull(),
+    outboxId: uuid("outbox_id").references(() => notificationsOutbox.id, { onDelete: "set null" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("notification_action_tokens_user_idx").on(t.userId)],
+);
+
+/** "Snooze 1 day": no reminders/chases for this task to this user until `snoozedUntil`. */
+export const reminderSnoozes = pgTable(
+  "reminder_snoozes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    snoozedUntil: timestamp("snoozed_until", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("reminder_snoozes_user_task_uq").on(t.userId, t.taskId)],
 );
 
 export type User = typeof users.$inferSelect;
@@ -284,6 +398,10 @@ export type Person = typeof people.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
 export type TaskEvent = typeof taskEvents.$inferSelect;
+export type OutboxItem = typeof notificationsOutbox.$inferSelect;
+export type NotificationPreferences = typeof notificationPreferences.$inferSelect;
+export type TelegramLink = typeof telegramLinks.$inferSelect;
+export type NotificationPriority = (typeof notificationPriorityEnum.enumValues)[number];
 
 export const TASK_STATUSES = taskStatusEnum.enumValues;
 export const TASK_PRIORITIES = taskPriorityEnum.enumValues;

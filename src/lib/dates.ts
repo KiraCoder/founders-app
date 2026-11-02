@@ -79,3 +79,74 @@ export function formatDueDate(iso: IsoDate, today: IsoDate): string {
   const label = `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
   return iso.slice(0, 4) === today.slice(0, 4) ? label : `${label} ${d.getUTCFullYear()}`;
 }
+
+// ---------------------------------------------------------------------------
+// Wall-clock times ("HH:MM") in APP_TIMEZONE — used by notification scheduling.
+// ---------------------------------------------------------------------------
+
+/** "HH:MM" 24h wall-clock time. */
+export type HmTime = string;
+
+const HM_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+export function isHmTime(value: string): boolean {
+  return HM_RE.test(value);
+}
+
+/** Minutes since midnight for "HH:MM". */
+export function hmToMinutes(hm: HmTime): number {
+  const m = HM_RE.exec(hm);
+  if (!m) throw new Error(`Invalid HH:MM time: ${hm}`);
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+/** Offset of `timeZone` from UTC at instant `at`, in minutes (Bishkek = +360). */
+function tzOffsetMinutes(at: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(at);
+  const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0);
+  const asUtc = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+  return Math.round((asUtc - Math.floor(at.getTime() / 1000) * 1000) / 60_000);
+}
+
+/** Minutes since local midnight at instant `now` in `timeZone`. */
+export function localMinutesOfDay(now: Date, timeZone: string = DEFAULT_TIMEZONE): number {
+  const shifted = new Date(now.getTime() + tzOffsetMinutes(now, timeZone) * 60_000);
+  return shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+}
+
+/** The UTC instant of local date `iso` at wall-clock `hm` in `timeZone`. */
+export function zonedTimeToUtc(iso: IsoDate, hm: HmTime, timeZone: string = DEFAULT_TIMEZONE): Date {
+  const guess = new Date(toUtcDate(iso).getTime() + hmToMinutes(hm) * 60_000);
+  const first = new Date(guess.getTime() - tzOffsetMinutes(guess, timeZone) * 60_000);
+  // Re-check once in case the offset differs at the target instant (DST zones).
+  return new Date(guess.getTime() - tzOffsetMinutes(first, timeZone) * 60_000);
+}
+
+/**
+ * True when local time at `now` is inside [start, end). Windows may wrap midnight
+ * (21:00–08:00). start === end means "no quiet hours".
+ */
+export function isWithinWindow(now: Date, start: HmTime, end: HmTime, timeZone: string = DEFAULT_TIMEZONE): boolean {
+  const s = hmToMinutes(start);
+  const e = hmToMinutes(end);
+  if (s === e) return false;
+  const m = localMinutesOfDay(now, timeZone);
+  return s < e ? m >= s && m < e : m >= s || m < e;
+}
+
+/** First instant at/after `now` when the window [start, end) is over. */
+export function windowEndAfter(now: Date, start: HmTime, end: HmTime, timeZone: string = DEFAULT_TIMEZONE): Date {
+  const todayIso = todayInTimeZone(now, timeZone);
+  const endToday = zonedTimeToUtc(todayIso, end, timeZone);
+  if (!isWithinWindow(now, start, end, timeZone)) return now;
+  return endToday.getTime() > now.getTime() ? endToday : zonedTimeToUtc(addDays(todayIso, 1), end, timeZone);
+}

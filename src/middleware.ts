@@ -1,7 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, verifySessionToken } from "@/server/auth/session-token";
 
-const PUBLIC_PATHS = ["/login"];
+/** No session cookie needed. The two API routes check their own secrets (constant-time). */
+const PUBLIC_PATHS = ["/login", "/api/telegram/webhook", "/api/cron/tick"];
 
 /**
  * First gate: every route except /login needs a validly signed session cookie.

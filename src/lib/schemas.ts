@@ -89,3 +89,23 @@ export function parseAssignee(value: unknown): {
   if (kind === "person" && id) return { assigneeUserId: null, assigneePersonId: id };
   return { assigneeUserId: null, assigneePersonId: null };
 }
+
+// ---------------------------------------------------------------------------
+// Notification preferences (Settings page)
+// ---------------------------------------------------------------------------
+const hmTime = z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, "Use HH:MM (24h)");
+/** Checkboxes post "on" or nothing. */
+const formBool = z.preprocess((v) => v === true || v === "on" || v === "true" || v === "1", z.boolean());
+
+export const notificationPrefsSchema = z
+  .object({
+    morningSummaryTime: hmTime,
+    eveningCheckEnabled: formBool,
+    eveningCheckTime: hmTime,
+    quietStart: hmTime,
+    quietEnd: hmTime,
+    maxOtherPerDay: z.coerce.number().int().min(0, "0 or more").max(10, "At most 10"),
+    urgentAtNight: formBool,
+  })
+  .strict();
+export type NotificationPrefsInput = z.input<typeof notificationPrefsSchema>;
