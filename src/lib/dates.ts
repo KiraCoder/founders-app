@@ -136,10 +136,15 @@ export function zonedTimeToUtc(iso: IsoDate, hm: HmTime, timeZone: string = DEFA
  * (21:00–08:00). start === end means "no quiet hours".
  */
 export function isWithinWindow(now: Date, start: HmTime, end: HmTime, timeZone: string = DEFAULT_TIMEZONE): boolean {
+  return isTimeInWindow(localMinutesOfDay(now, timeZone), start, end);
+}
+
+/** True when the wall-clock time (minutes since midnight or "HH:MM") is inside [start, end). */
+export function isTimeInWindow(time: number | HmTime, start: HmTime, end: HmTime): boolean {
   const s = hmToMinutes(start);
   const e = hmToMinutes(end);
   if (s === e) return false;
-  const m = localMinutesOfDay(now, timeZone);
+  const m = typeof time === "number" ? time : hmToMinutes(time);
   return s < e ? m >= s && m < e : m >= s || m < e;
 }
 

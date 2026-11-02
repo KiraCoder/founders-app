@@ -3,7 +3,7 @@
  * Form posts send "" for empty fields; `blankToNull` turns those into null.
  */
 import { z } from "zod";
-import { isIsoDate } from "./dates";
+import { isIsoDate, isTimeInWindow } from "./dates";
 
 export const TASK_STATUS_VALUES = ["todo", "in_progress", "waiting", "done", "cancelled"] as const;
 export const TASK_PRIORITY_VALUES = ["urgent", "high", "normal", "low"] as const;
@@ -107,5 +107,17 @@ export const notificationPrefsSchema = z
     maxOtherPerDay: z.coerce.number().int().min(0, "0 or more").max(10, "At most 10"),
     urgentAtNight: formBool,
   })
-  .strict();
+  .strict()
+  .superRefine((p, ctx) => {
+    // The evening check expires at midnight, so inside quiet hours it is held and then
+    // dropped unseen (22:00 with quiet hours 21:00-08:00 would never arrive). Rejected.
+    const quiet = `${p.quietStart}–${p.quietEnd}`;
+    if (p.eveningCheckEnabled && isTimeInWindow(p.eveningCheckTime, p.quietStart, p.quietEnd)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["eveningCheckTime"],
+        message: `The evening check is inside your quiet hours (${quiet}) so it would arrive late or not at all. Pick a time outside them or change the quiet hours.`,
+      });
+    }
+  });
 export type NotificationPrefsInput = z.input<typeof notificationPrefsSchema>;

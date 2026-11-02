@@ -16,6 +16,8 @@ const STATUS_TONE: Record<OutboxItem["status"], Tone> = {
   parked: "warn",
   failed: "risk",
   cancelled: "neutral",
+  sending: "info",
+  not_linked: "warn",
 };
 
 function Message({ m }: { m: NeutralMessage }) {
@@ -62,7 +64,7 @@ export default async function DevNotificationsPage() {
     timeZone: ctx.timeZone,
   });
   const byId = new Map(items.map((i) => [i.id, i]));
-  const route = telegramBotToken() && link ? "Telegram" : "this dev inbox";
+  const route = !telegramBotToken() ? "this dev inbox" : link ? "Telegram" : "nowhere yet: they wait until you link Telegram";
 
   return (
     <>
@@ -84,9 +86,10 @@ export default async function DevNotificationsPage() {
         }
       >
         <p className="mt-1 text-[13px] text-muted">
-          What {ctx.user.shortName} would have received. Only your own messages are shown. Right now they go to{" "}
+          What {ctx.user.shortName} would have received. Only your own messages are shown. Scheduled messages go to{" "}
           <strong>{route}</strong>
-          {link ? ` (Telegram linked${link.username ? ` as @${link.username}` : ""})` : " (Telegram not linked)"}.
+          {link ? ` (Telegram linked${link.username ? ` as @${link.username}` : ""})` : " (Telegram not linked)"}. The
+          buttons here run the scheduler for you only and always deliver into this inbox, never to Telegram.
         </p>
       </PageHeader>
 
@@ -113,13 +116,16 @@ export default async function DevNotificationsPage() {
                 ) : (
                   payload.summaryLine && <p className="mt-1 text-[13px]">{payload.summaryLine}</p>
                 )}
+                {item.status === "not_linked" && (
+                  <p className="mt-1 text-[12px] text-warn">Held: Telegram is not linked yet. Sent once you link, if still valid.</p>
+                )}
                 {item.status === "parked" && (
                   <p className="mt-1 text-[12px] text-warn">
                     Daily budget was full, so this was parked
                     {bundled ? ` and listed in the ${KIND_LABELS[bundled.kind as NotificationKind]?.toLowerCase()}` : " for the next summary"}.
                   </p>
                 )}
-                {item.lastError && item.status !== "parked" && (
+                {item.lastError && item.status !== "parked" && item.status !== "not_linked" && (
                   <p className="mt-1 text-[12px] text-muted">
                     {item.status === "pending" ? "Last error" : "Reason"}: {item.lastError}
                     {item.attempts > 0 ? ` · attempts ${item.attempts}` : ""}

@@ -65,6 +65,10 @@ export const outboxStatusEnum = pgEnum("outbox_status", [
   "failed",
   "cancelled",
   "parked",
+  /** Claimed by a dispatcher run (see claimed_at); not visible to other runs. */
+  "sending",
+  /** Telegram is configured but the founder has not linked a chat: held, sent once linked. */
+  "not_linked",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -310,6 +314,8 @@ export const notificationsOutbox = pgTable(
     dedupeKey: text("dedupe_key"),
     attempts: integer("attempts").notNull().default(0),
     lastError: text("last_error"),
+    /** Wall-clock time a dispatcher run claimed this item (status "sending"). */
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
     /** Retry backoff: not retried before this instant. */
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
     /** Set when the daily budget was full and the item was parked for the next summary. */
@@ -343,7 +349,13 @@ export const notificationPreferences = pgTable("notification_preferences", {
   /** Let priority "urgent" items through during quiet hours. */
   urgentAtNight: boolean("urgent_at_night").notNull().default(false),
   updatedAt: updatedAt(),
-});
+}, (t) => [
+  check("notification_preferences_morning_hm", sql`${t.morningSummaryTime} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
+  check("notification_preferences_evening_hm", sql`${t.eveningCheckTime} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
+  check("notification_preferences_quiet_start_hm", sql`${t.quietStart} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
+  check("notification_preferences_quiet_end_hm", sql`${t.quietEnd} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
+  check("notification_preferences_max_other_range", sql`${t.maxOtherPerDay} between 0 and 10`),
+]);
 
 /** A founder's linked Telegram private chat. One per user, one user per chat. */
 export const telegramLinks = pgTable("telegram_links", {

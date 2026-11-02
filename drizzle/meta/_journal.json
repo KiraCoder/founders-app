@@ -36,6 +36,13 @@
       "when": 1793654039519,
       "tag": "0004_login_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793654566879,
+      "tag": "0005_notifications_hardening",
+      "breakpoints": true
     }
   ]
 }

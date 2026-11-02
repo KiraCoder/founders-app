@@ -195,12 +195,16 @@ create policy notifications_own on public.notifications_outbox for select to aut
   user_id = public.app_user_id()
 );
 
--- notification_preferences: each founder reads and edits only their own row.
-grant select, insert, update on public.notification_preferences to authenticated;
+-- notification_preferences: each founder reads only their own row. Changes go through the
+-- app's service layer (Zod validation, e.g. no evening check inside quiet hours), never
+-- directly from a client. Re-running this file also takes back the old insert/update grant.
+revoke insert, update, delete on public.notification_preferences from authenticated;
+grant select on public.notification_preferences to authenticated;
 drop policy if exists notification_preferences_own on public.notification_preferences;
-create policy notification_preferences_own on public.notification_preferences for all to authenticated
-  using (user_id = public.app_user_id())
-  with check (user_id = public.app_user_id());
+drop policy if exists notification_preferences_select_own on public.notification_preferences;
+create policy notification_preferences_select_own on public.notification_preferences for select to authenticated using (
+  user_id = public.app_user_id()
+);
 
 -- telegram_links: a founder may see and remove their own link. Linking happens only on
 -- the server (webhook consuming a one-time code), so there is no insert/update policy.

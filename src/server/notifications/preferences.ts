@@ -1,5 +1,6 @@
 import "server-only";
 import { eq } from "drizzle-orm";
+import { isHmTime } from "@/lib/dates";
 import type { Db } from "@/server/db/connect";
 import { notificationPreferences, type NotificationPreferences } from "@/server/db/schema";
 
@@ -23,5 +24,16 @@ export async function loadPreferences(db: Db, userId: string): Promise<Preferenc
   const { userId: _u, updatedAt: _t, ...prefs } = row;
   void _u;
   void _t;
-  return prefs;
+  // The DB has CHECK constraints (migration 0005); this keeps one bad value from ever
+  // breaking a dispatch run.
+  const hm = (v: string, d: string) => (isHmTime(v) ? v : d);
+  const D = DEFAULT_PREFERENCES;
+  return {
+    ...prefs,
+    morningSummaryTime: hm(prefs.morningSummaryTime, D.morningSummaryTime),
+    eveningCheckTime: hm(prefs.eveningCheckTime, D.eveningCheckTime),
+    quietStart: hm(prefs.quietStart, D.quietStart),
+    quietEnd: hm(prefs.quietEnd, D.quietEnd),
+    maxOtherPerDay: Number.isInteger(prefs.maxOtherPerDay) && prefs.maxOtherPerDay >= 0 ? Math.min(prefs.maxOtherPerDay, 10) : D.maxOtherPerDay,
+  };
 }

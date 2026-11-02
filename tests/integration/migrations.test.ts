@@ -77,6 +77,37 @@ describe("0003 task_events visibility backfill on existing data", () => {
   });
 });
 
+describe("0005 notifications hardening on existing data", () => {
+  it("repairs malformed preferences before adding the checks and keeps outbox rows", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0005") });
+    await client.exec(`
+      insert into users (id, email, name, short_name) values
+        ('${NURAALY}', 'n@x', 'Nuraaly', 'Nuraaly'), ('${TALANT}', 't@x', 'Talant', 'Talant');
+      insert into notification_preferences (user_id, quiet_start, max_other_per_day) values
+        ('${NURAALY}', '9pm', 99), ('${TALANT}', '22:00', 2);
+      insert into notifications_outbox (user_id, kind, dedupe_key, status) values
+        ('${NURAALY}', 'morning_summary', 'morning:2026-11-01', 'sent'),
+        ('${TALANT}', 'overdue_chase', 'chase:x:2026-11-01', 'parked');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const prefs = await client.query<{ quiet_start: string; max_other_per_day: number }>(
+      "select quiet_start, max_other_per_day from notification_preferences order by user_id",
+    );
+    expect(prefs.rows).toEqual([
+      { quiet_start: "21:00", max_other_per_day: 10 },
+      { quiet_start: "22:00", max_other_per_day: 2 },
+    ]);
+    const outbox = await client.query<{ status: string; claimed_at: Date | null }>(
+      "select status, claimed_at from notifications_outbox order by dedupe_key",
+    );
+    expect(outbox.rows).toEqual([
+      { status: "parked", claimed_at: null },
+      { status: "sent", claimed_at: null },
+    ]);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();
@@ -187,6 +218,16 @@ describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
       ).rows,
     ).toHaveLength(1);
     expect((await asTalant("delete from task_events")).error).toMatch(/permission denied/);
+
+    // notification_preferences: own row readable, but writes only through the app (Zod).
+    await client.exec(`
+      insert into notification_preferences (user_id) values ('${NURAALY}'), ('${TALANT}');
+    `);
+    expect((await asTalant("select user_id from notification_preferences")).rows).toEqual([{ user_id: TALANT }]);
+    expect((await asTalant(`update notification_preferences set evening_check_time = '22:00'`)).error).toMatch(/permission denied/);
+    expect((await asTalant(`insert into notification_preferences (user_id) values ('${TALANT}')`)).error).toMatch(/permission denied/);
+    // And the database itself refuses malformed values (migration 0005), even for the server.
+    await expect(client.exec(`update notification_preferences set quiet_start = '25:00'`)).rejects.toThrow(/check constraint/);
 
     // anon gets nothing at all.
     const anon = await client
