@@ -81,7 +81,9 @@ the Vercel / Supabase dashboards.
   someone moves the deadline or closes the task. Every deadline change is written to `task_events`.
 - The task history (`task_events`) follows the same rule as the task: the history of a personal
   todo is visible only to its owner, also after the task was deleted or made private.
-- Salaries are deliberately **not** in `person_companies`; they will get their own restricted table.
+- **Salaries are restricted** (see *People and salaries* below): only users in `salary_viewers`
+  see or change them. The check is `isSalaryViewer` / `assertSalaryViewer` in `access.ts`, and
+  `src/server/services/salaries.ts` is the only code that touches the `salaries` table.
 
 Security notes:
 
@@ -210,6 +212,57 @@ The poller fetches updates from Telegram and forwards them to the same webhook h
   (Vercel's own cron on the free plan runs only once a day, too rare for reminders; the
   endpoint also accepts its GET request if you upgrade later.)
 
+## People and salaries
+
+One shared people database for all companies (it replaces the Excel sheet): **People** in the
+sidebar, and the **People** tab of each company (with a headcount per unit, e.g. Alura Style
+ХБК / Ош Район; founders are not counted).
+
+- A person has full name (Russian names are fine), short name, phone, Telegram, email, notes.
+- A person can work for **several companies** (e.g. the accountant): each company link has a
+  role/title, optional unit, employment type (staff / contractor / part-time), start/end date
+  and active flag.
+- **No hard delete.** *Mark as left* ends all their company roles (end date = today) and hides
+  them from active lists; *Left* in the status filter shows them again, with full history.
+  Ending one role (*End role*) keeps the person active in their other companies.
+  People ids never change, so a later org chart (`org_posts.manager_person_id`) can point at them.
+
+**Salaries (sensitive).**
+
+- Stored in their own table `salaries` (amount, currency default KGS, pay type
+  monthly / piecework / hourly, effective from, note, who entered it). A change adds a new row;
+  the **current** salary is the latest *effective from* on or before today. History is on the
+  person page.
+- Only **salary viewers** see them. **Default: only Nuraaly** (pending the founders'
+  decision). Change it in **Settings → Access**: one switch per founder, only an existing
+  salary viewer can flip it, and the last viewer cannot be removed.
+- Everyone else gets no salary column, no salary in the person page, API, search or import
+  preview (the key is not even sent), and any salary change is refused (403).
+- **Audit:** `salary_access_log` records every change (who, which person, when), every
+  grant/revoke of access, and one row per page/API view that showed salaries (not per row).
+  Viewers see the latest entries under Settings → Access.
+
+**Import from Excel / CSV** (`/people/import`):
+
+1. Upload a `.xlsx` or `.csv` (max 2 MB; Russian or English headers; CSV in UTF-8 or
+   Windows-1251, comma or semicolon). It is parsed in memory on the server and **never stored**:
+   the browser sends the file again for each step.
+2. Map the columns (guessed from the headers: ФИО, Компания, Должность, Цех, Телефон, Оклад, …).
+   Optionally pick a default company for files without a company column.
+3. **Preview**: each row is *create*, *update*, *skip* or *error* with the reason (unknown
+   company or unit, bad phone/email, salary not a number, empty name, duplicate line).
+4. **Import**: error rows are skipped, the rest is written in one transaction.
+
+People are matched by **name + phone** (case and ё/е ignored; `+996 555…` = `0555…`), so
+importing the same file again changes nothing. Without a phone, the name must match exactly one
+person. Existing values are never overwritten, only empty fields are filled; people marked as
+left are not touched. The salary column can only be mapped by a salary viewer; a changed salary
+adds a history row. Try it with `docs/samples/people-sample.csv` (clearly fake data).
+
+Parsers: `exceljs` (xlsx) and `papaparse` (csv). The popular `xlsx` (SheetJS) npm package was
+not used: its npm version has two unfixed high-severity advisories; `exceljs` has only moderate
+ones in its zip-*writing* dependencies, which the importer does not use.
+
 ## REST API (for the future iOS app)
 
 Session-cookie auth for now; JSON errors look like `{ "error": { "code", "message", "fields?" } }`.
@@ -218,8 +271,14 @@ Session-cookie auth for now; JSON errors look like `{ "error": { "code", "messag
 - `GET /api/v1/tasks?view=my|assigned|company|overdue&companyId=&projectId=&status=&priority=&q=&limit=`
 - `POST /api/v1/tasks`
 - `GET | PATCH | DELETE /api/v1/tasks/:id`
+- `GET /api/v1/people?q=&companyId=&unitId=&status=active|left|all&limit=`
+- `POST /api/v1/people` (person + `links[]`; `links[].salary` only for salary viewers)
+- `GET /api/v1/people/:id` (all company roles; `salary` and `salaryHistory` only for salary viewers)
+- `PATCH /api/v1/people/:id` — person fields (e.g. `{ "status": "left" }`), or
+  `{ person, addLinks, updateLinks: [{ id, changes }], addSalaries: [{ linkId, salary }] }`.
+  Salary changes from a non-viewer get 403 and nothing is changed.
 
-Input shapes are the Zod schemas in `src/lib/schemas.ts`.
+Input shapes are the Zod schemas in `src/lib/schemas.ts` and `src/lib/people-schemas.ts`.
 
 ## Folder map
 
@@ -232,20 +291,22 @@ src/
       tasks/               Tasks (views, filters, inline edit)
       companies/[slug]/    Company page with tabs
       projects/[id]/       Project with tasks and progress
-      people/ search/ more/ holding/ org/ ai-roles/
-      settings/            Own notification preferences + Telegram link
+      people/              People list, person page, new person, import wizard (+ server actions)
+      search/ more/ holding/ org/ ai-roles/
+      settings/            Own notification preferences + Telegram link; Access (salary viewers)
       dev/notifications/   Dev inbox (dev tools only)
       actions.ts           Server actions (call the service layer)
     api/v1/                REST API (thin, calls the service layer)
     api/telegram/webhook/  Telegram webhook (secret header)
     api/cron/tick/         Scheduler tick (CRON_SECRET)
-  components/              UI: shell (sidebar, top bar, tabs), tasks, projects
-  lib/                     Pure code: dates.ts (timezone), schemas.ts (Zod), kpis.ts
+  components/              UI: shell (sidebar, top bar, tabs), tasks, projects, people, settings
+  lib/                     Pure code: dates.ts (timezone), schemas.ts + people-schemas.ts (Zod), kpis.ts, money.ts
   server/
     auth/                  AuthProvider: local (now) and supabase (stub), session cookie, login rate limit
     db/                    schema.ts, connect.ts (PGlite or Postgres), migrate.ts, seed.ts
-    services/              Business logic + access rules (tasks, projects, companies, people, search,
-                           notifications: preferences, Telegram link, button actions)
+    services/              Business logic + access rules (tasks, projects, companies, people, salaries,
+                           people-import, search, notifications: preferences, Telegram link, button actions)
+    import/parse-table.ts  .xlsx/.csv parsing for the people import (in memory, 2 MB limit)
     notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot
     http/request-guard.ts  Same-origin + JSON check for mutating /api/v1 calls
   middleware.ts            Redirects signed-out users to /login (401 JSON for /api), CSRF guard
@@ -254,6 +315,7 @@ scripts/                   db:migrate / db:seed / db:reset / cron:tick / telegra
 supabase/policies.sql      RLS policies for a future direct-client mode (applied by hand)
 tests/                     Vitest unit + service tests
 e2e/                       Playwright smoke test + screenshots
-docs/screenshots/          UI screenshots
+docs/screenshots/          UI screenshots (people-list-salaries.png, people-import-preview.png, …)
+docs/samples/              people-sample.csv (fake data) for the importer
 docs/reviews/              Independent reviews and how each finding was resolved
 ```

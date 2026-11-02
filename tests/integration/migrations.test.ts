@@ -108,6 +108,30 @@ describe("0005 notifications hardening on existing data", () => {
   });
 });
 
+describe("0006 people + salaries on existing data", () => {
+  it("keeps people and links (active, staff) and makes Nuraaly the only salary viewer", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0006") });
+    await client.exec(`
+      insert into users (id, email, name, short_name) values
+        ('${NURAALY}', 'nuraaly@founders.local', 'Nuraaly', 'Nuraaly'), ('${TALANT}', 'talant@founders.local', 'Talant', 'Talant');
+      insert into companies (id, slug, name) values ('33333333-3333-4333-8333-333333333333', 'kiwi-go', 'Kiwi Go');
+      insert into people (id, full_name) values ('55555555-5555-4555-8555-555555555555', 'Elmurat');
+      insert into person_companies (person_id, company_id, role) values
+        ('55555555-5555-4555-8555-555555555555', '33333333-3333-4333-8333-333333333333', 'accountant');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const links = await client.query<{ role: string; is_active: boolean; employment_type: string }>(
+      "select role, is_active, employment_type from person_companies",
+    );
+    expect(links.rows).toEqual([{ role: "accountant", is_active: true, employment_type: "staff" }]);
+    const ppl = await client.query<{ full_name: string; left_at: Date | null }>("select full_name, left_at from people");
+    expect(ppl.rows).toEqual([{ full_name: "Elmurat", left_at: null }]);
+    const viewers = await client.query<{ user_id: string }>("select user_id from salary_viewers");
+    expect(viewers.rows).toEqual([{ user_id: NURAALY }]);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();

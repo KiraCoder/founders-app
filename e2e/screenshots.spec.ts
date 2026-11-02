@@ -39,3 +39,23 @@ test("notification screenshots", async ({ page }) => {
   await page.getByText("Good morning, Talant").first().waitFor();
   await page.screenshot({ path: "docs/screenshots/dev-notifications-desktop.png", fullPage: true });
 });
+
+test("people screenshots", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await login(page, "nuraaly");
+  await page.goto("/people/import");
+  await page.getByLabel("Spreadsheet file").setInputFiles("docs/samples/people-sample.csv");
+  await page.getByRole("button", { name: "Read file" }).click();
+  await page.getByRole("button", { name: "Preview" }).click();
+  await page.getByTestId("import-preview").waitFor();
+  await page.screenshot({ path: "docs/screenshots/people-import-preview.png", fullPage: true });
+  // Import the clearly fake sample people (idempotent) so the list shows salaries.
+  const confirm = page.getByRole("button", { name: /^Import \d+ rows$/ });
+  if (await confirm.isEnabled()) {
+    await confirm.click();
+    await page.getByRole("status").waitFor();
+  }
+  await page.goto("/people");
+  await page.getByTestId("salary-header").waitFor();
+  await page.screenshot({ path: "docs/screenshots/people-list-salaries.png", fullPage: true });
+});

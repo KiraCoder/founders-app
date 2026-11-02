@@ -29,7 +29,9 @@
 --
 -- Assumptions (to finish when AUTH_MODE=supabase is implemented):
 --   * users.external_auth_id holds auth.uid()::text for each founder.
---   * Staff accounts and salaries come later and will add their own policies.
+--   * Staff accounts come later and will add their own policies.
+--   * salaries, salary_viewers and salary_access_log stay server-only (no client
+--     grants): salary access is checked by access.ts and every change is audited there.
 -- The file is idempotent (drop ... if exists / create or replace).
 -- =============================================================================
 
@@ -86,7 +88,8 @@ drop policy if exists users_select on public.users;
 create policy users_select on public.users for select to authenticated
   using (public.is_founder());
 
--- sessions, login_attempts, telegram_link_codes, notification_action_tokens:
+-- sessions, login_attempts, telegram_link_codes, notification_action_tokens,
+-- salaries, salary_viewers, salary_access_log:
 -- server-only. No grant, no policy = no client access at all.
 
 -- companies, company_units, people, person_companies, projects: shared between founders.

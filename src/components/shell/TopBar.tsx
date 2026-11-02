@@ -52,7 +52,7 @@ export function TopBar({ user }: { user: { name: string; shortName: string; emai
             name="q"
             defaultValue={q}
             type="search"
-            placeholder="Search tasks, projects, companies"
+            placeholder="Search tasks, projects, companies, people"
             aria-label="Search"
             className="input pl-8"
           />
