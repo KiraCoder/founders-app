@@ -1,0 +1,22 @@
+# deps
+node_modules/
+# next
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+# env (never commit secrets)
+.env
+.env*
+!.env.example
+# local embedded database
+.data/
+# test output
+test-results/
+playwright-report/
+blob-report/
+coverage/
+# misc
+.DS_Store
+*.log
+.vercel
