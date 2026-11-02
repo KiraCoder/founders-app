@@ -4,8 +4,10 @@
  * Rules baked in here:
  * - Every company-owned row carries `company_id`. Services always filter by it.
  * - Personal todos are tasks with visibility = 'private'; only `owner_user_id` may see them.
- * - People ↔ companies has NO salary columns. Salaries will live in a separate,
- *   access-restricted table in a later chunk.
+ * - People ↔ companies has NO salary columns. Salaries live in `salaries`, readable only
+ *   through the salary service for users listed in `salary_viewers` (see access.ts).
+ * - People are never hard-deleted ("mark as left"), so later tables (e.g.
+ *   `org_posts.manager_person_id`) can safely reference `people.id`.
  *
  * This file is imported by app code, CLI scripts and tests, so it must stay free of
  * runtime side effects (no `server-only`, no connections).
@@ -18,6 +20,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   pgTable,
   text,
@@ -59,6 +62,8 @@ export const taskEventKindEnum = pgEnum("task_event_kind", [
   "assignee_changed",
   "deleted",
 ]);
+export const employmentTypeEnum = pgEnum("employment_type", ["staff", "contractor", "part_time"]);
+export const salaryPayTypeEnum = pgEnum("salary_pay_type", ["monthly", "piecework", "hourly"]);
 export const outboxStatusEnum = pgEnum("outbox_status", [
   "pending",
   "sent",
@@ -161,19 +166,35 @@ export const companyUnits = pgTable(
 // ---------------------------------------------------------------------------
 // People (shared across companies)
 // ---------------------------------------------------------------------------
-export const people = pgTable("people", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  fullName: text("full_name").notNull(),
-  phone: text("phone"),
-  telegramHandle: text("telegram_handle"),
-  notes: text("notes"),
-  /** Set when this person is also an app user (e.g. a founder). */
-  userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
-  createdAt: createdAt(),
-  updatedAt: updatedAt(),
-});
+export const people = pgTable(
+  "people",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    fullName: text("full_name").notNull(),
+    /** How the team calls them ("Эльмурат", "Edil"). */
+    shortName: text("short_name"),
+    phone: text("phone"),
+    telegramHandle: text("telegram_handle"),
+    email: text("email"),
+    notes: text("notes"),
+    /** Set when this person is also an app user (e.g. a founder). */
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    /**
+     * Set when the person left the group entirely ("mark as left"). Rows are never deleted,
+     * so history (tasks, salaries, a future org chart) keeps pointing at them.
+     */
+    leftAt: timestamp("left_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("people_full_name_idx").on(t.fullName)],
+);
 
-/** Person ↔ company link with role/title. Deliberately NO salary columns. */
+/**
+ * Person ↔ company link with role/title, optional unit (e.g. Alura Style ХБК) and
+ * employment type. One person can have links to several companies (the accountant).
+ * Deliberately NO salary columns (see `salaries`).
+ */
 export const personCompanies = pgTable(
   "person_companies",
   {
@@ -187,14 +208,80 @@ export const personCompanies = pgTable(
     unitId: uuid("unit_id").references(() => companyUnits.id, { onDelete: "set null" }),
     role: text("role").notNull(),
     title: text("title"),
+    employmentType: employmentTypeEnum("employment_type").notNull().default("staff"),
+    /** False once the person stopped working for this company (ended_on keeps the date). */
+    isActive: boolean("is_active").notNull().default(true),
     startedOn: date("started_on", { mode: "string" }),
     endedOn: date("ended_on", { mode: "string" }),
     createdAt: createdAt(),
+    updatedAt: updatedAt(),
   },
   (t) => [
     uniqueIndex("person_companies_uq").on(t.personId, t.companyId, t.role),
     index("person_companies_company_idx").on(t.companyId),
   ],
+);
+
+// ---------------------------------------------------------------------------
+// Salaries (RESTRICTED). Only users in salary_viewers may read or write these, and only
+// through src/server/services/salaries.ts. Every change is written to salary_access_log.
+// ---------------------------------------------------------------------------
+
+/**
+ * Salary history per person-company link. A change is a NEW row; the current salary is
+ * the latest `effective_from` on or before today (ties: the newest row).
+ */
+export const salaries = pgTable(
+  "salaries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    personCompanyId: uuid("person_company_id")
+      .notNull()
+      .references(() => personCompanies.id, { onDelete: "restrict" }),
+    amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
+    currency: text("currency").notNull().default("KGS"),
+    payType: salaryPayTypeEnum("pay_type").notNull().default("monthly"),
+    effectiveFrom: date("effective_from", { mode: "string" }).notNull(),
+    note: text("note"),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("salaries_link_idx").on(t.personCompanyId, t.effectiveFrom),
+    check("salaries_amount_nonneg", sql`${t.amount} >= 0`),
+    check("salaries_currency_code", sql`${t.currency} ~ '^[A-Z]{3}$'`),
+  ],
+);
+
+/** Users allowed to see and edit salaries. Default: only Nuraaly (seeded). */
+export const salaryViewers = pgTable("salary_viewers", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  grantedBy: uuid("granted_by").references(() => users.id, { onDelete: "set null" }),
+  createdAt: createdAt(),
+});
+
+/**
+ * Audit log for salaries: who viewed (one row per page/API view, not per row) or changed
+ * which person's salary, and who granted/revoked salary access. Append-only.
+ */
+export const salaryAccessLog = pgTable(
+  "salary_access_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** "view" | "change" | "import" | "grant_viewer" | "revoke_viewer" */
+    action: text("action").notNull(),
+    /** Where it happened, e.g. "people_list", "company:alura-style", "person", "api". */
+    scope: text("scope").notNull(),
+    personId: uuid("person_id").references(() => people.id, { onDelete: "set null" }),
+    personCompanyId: uuid("person_company_id").references(() => personCompanies.id, { onDelete: "set null" }),
+    targetUserId: uuid("target_user_id").references(() => users.id, { onDelete: "set null" }),
+    details: jsonb("details"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("salary_access_log_created_idx").on(t.createdAt)],
 );
 
 // ---------------------------------------------------------------------------
@@ -433,6 +520,12 @@ export type User = typeof users.$inferSelect;
 export type Company = typeof companies.$inferSelect;
 export type CompanyUnit = typeof companyUnits.$inferSelect;
 export type Person = typeof people.$inferSelect;
+export type PersonCompany = typeof personCompanies.$inferSelect;
+export type Salary = typeof salaries.$inferSelect;
+export const EMPLOYMENT_TYPES = employmentTypeEnum.enumValues;
+export const SALARY_PAY_TYPES = salaryPayTypeEnum.enumValues;
+export type EmploymentType = (typeof EMPLOYMENT_TYPES)[number];
+export type SalaryPayType = (typeof SALARY_PAY_TYPES)[number];
 export type Project = typeof projects.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
 export type TaskEvent = typeof taskEvents.$inferSelect;

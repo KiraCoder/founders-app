@@ -16,6 +16,7 @@ import {
   people,
   personCompanies,
   projects,
+  salaryViewers,
   sessions,
   tasks,
   users,
@@ -150,6 +151,13 @@ export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResul
       .returning({ id: users.id });
     userIds[f.key] = row!.id;
     if (options.resetPasswords) await db.delete(sessions).where(eq(sessions.userId, row!.id));
+  }
+
+  // --- Salary access: default only Nuraaly (pending the founders' decision) ----
+  // Only when nobody has access yet, so a choice made in Settings → Access is kept.
+  const viewers = await db.select({ userId: salaryViewers.userId }).from(salaryViewers).limit(1);
+  if (viewers.length === 0) {
+    await db.insert(salaryViewers).values({ userId: userIds.nuraaly }).onConflictDoNothing();
   }
 
   // --- Companies & units -----------------------------------------------------

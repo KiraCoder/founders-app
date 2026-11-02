@@ -43,6 +43,13 @@
       "when": 1793654566879,
       "tag": "0005_notifications_hardening",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793655526558,
+      "tag": "0006_people_salaries",
+      "breakpoints": true
     }
   ]
 }

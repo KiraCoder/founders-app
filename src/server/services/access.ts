@@ -2,7 +2,7 @@ import "server-only";
 import { and, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { companies, people, personCompanies, taskEvents, tasks } from "@/server/db/schema";
+import { companies, people, personCompanies, salaryViewers, taskEvents, tasks } from "@/server/db/schema";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 
@@ -76,4 +76,36 @@ const uuidSchema = z.uuid();
  */
 export function assertValidId(id: unknown, what: string): asserts id is string {
   if (!uuidSchema.safeParse(id).success) throw new ServiceError("not_found", `${what} not found`);
+}
+
+// ---------------------------------------------------------------------------
+// Salaries (restricted)
+// ---------------------------------------------------------------------------
+
+/**
+ * Salary access rule: only users listed in `salary_viewers` may see or change salaries
+ * (default: Nuraaly only; toggled in Settings → Access by an existing viewer). Everyone
+ * else gets no salary data from any service, page, API, search or import preview.
+ * Salary rows are additionally limited to companies the user can access
+ * (`visibleLinksWhere`).
+ */
+export async function isSalaryViewer(ctx: ServiceContext): Promise<boolean> {
+  const [row] = await ctx.db
+    .select({ userId: salaryViewers.userId })
+    .from(salaryViewers)
+    .where(eq(salaryViewers.userId, ctx.user.id))
+    .limit(1);
+  return !!row;
+}
+
+/** Throws `forbidden` unless the user is a salary viewer. Call before touching `salaries`. */
+export async function assertSalaryViewer(ctx: ServiceContext): Promise<void> {
+  if (!(await isSalaryViewer(ctx))) {
+    throw new ServiceError("forbidden", "Only salary viewers can see or change salaries");
+  }
+}
+
+/** Person-company links the user may see (links of accessible companies). */
+export function visibleLinksWhere(ctx: ServiceContext): SQL | undefined {
+  return inAccessibleCompany(ctx, personCompanies.companyId);
 }
