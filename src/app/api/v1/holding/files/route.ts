@@ -6,6 +6,8 @@ export const dynamic = "force-dynamic";
 
 /** Multipart overhead allowed on top of the file itself (boundaries, headers, the name). */
 const OVERHEAD = 64 * 1024;
+/** Same message for every "too big" case (declared length, streamed body, the file itself). */
+const TOO_LARGE = "The file is larger than 10 MB — scan it at a lower resolution or split it, then upload again";
 
 /** Reads the body but stops as soon as it is larger than `max` bytes (never buffers more). */
 async function readLimited(req: Request, max: number): Promise<Uint8Array | null> {
@@ -42,9 +44,9 @@ export async function POST(req: NextRequest) {
     const type = req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
     if (type !== "multipart/form-data") return jsonError(415, "unsupported_media_type", "Send the file as multipart/form-data");
     const declared = Number(req.headers.get("content-length") ?? "0");
-    if (declared > MAX_HOLDING_FILE_BYTES + OVERHEAD) return jsonError(413, "too_large", "The file is larger than 10 MB");
+    if (declared > MAX_HOLDING_FILE_BYTES + OVERHEAD) return jsonError(413, "too_large", TOO_LARGE);
     const body = await readLimited(req, MAX_HOLDING_FILE_BYTES + OVERHEAD);
-    if (!body) return jsonError(413, "too_large", "The file is larger than 10 MB");
+    if (!body) return jsonError(413, "too_large", TOO_LARGE);
     let form: FormData;
     try {
       form = await new Response(body as BodyInit, { headers: { "content-type": req.headers.get("content-type")! } }).formData();
@@ -53,7 +55,7 @@ export async function POST(req: NextRequest) {
     }
     const file = form.get("file");
     if (!file || typeof file === "string") return jsonError(400, "validation", "Choose a file", { file: ["Choose a file"] });
-    if (file.size > MAX_HOLDING_FILE_BYTES) return jsonError(413, "too_large", "The file is larger than 10 MB");
+    if (file.size > MAX_HOLDING_FILE_BYTES) return jsonError(413, "too_large", TOO_LARGE);
     try {
       const saved = await saveHoldingFile(ctx, { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
       return NextResponse.json({ data: saved }, { status: 201 });

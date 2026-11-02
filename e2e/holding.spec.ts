@@ -67,3 +67,30 @@ test("holding documents are not served without signing in", async ({ request }) 
   const res = await request.get("/api/v1/holding/files/00000000-0000-4000-8000-000000000000");
   expect(res.status()).toBe(401);
 });
+
+test("holding: a scan just under 10 MB uploads intact through the middleware; over the limit gets a clear 413", async ({ page, baseURL }) => {
+  await login(page, "nuraaly");
+  await page.goto("/holding");
+  await page.locator('[data-testid="act-cell"][data-cell-state="missing"]').first().click();
+  const panel = page.getByTestId("act-panel");
+  const big = Buffer.alloc(10 * 1024 * 1024 - 1024, 0x20);
+  big.write("%PDF-1.4\n");
+  await panel.getByLabel("Attach a scan").setInputFiles({ name: "big-scan.pdf", mimeType: "application/pdf", buffer: big });
+  const link = panel.getByRole("link", { name: "big-scan.pdf" });
+  await expect(link).toBeVisible({ timeout: 20_000 });
+  const file = await page.request.get((await link.getAttribute("href"))!);
+  expect(file.status()).toBe(200);
+  expect((await file.body()).length).toBe(big.length);
+  // PDFs open inline without the sandbox CSP (Chrome's viewer needs that).
+  expect(file.headers()["content-disposition"]).toMatch(/^inline;/);
+  expect(file.headers()["content-security-policy"]).toBeUndefined();
+
+  const tooBig = Buffer.alloc(10 * 1024 * 1024 + 300 * 1024, 0x20);
+  tooBig.write("%PDF-1.4\n");
+  const res = await page.request.post("/api/v1/holding/files", {
+    headers: { origin: new URL(baseURL!).origin },
+    multipart: { file: { name: "huge.pdf", mimeType: "application/pdf", buffer: tooBig } },
+  });
+  expect(res.status()).toBe(413);
+  expect(((await res.json()) as { error: { message: string } }).error.message).toMatch(/larger than 10 MB/);
+});

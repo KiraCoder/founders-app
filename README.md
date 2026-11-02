@@ -388,7 +388,13 @@ in `access.ts`); all logic in `src/server/services/holding.ts` (+ `holding-asks.
   (`HOLDING_ACTS_GRACE_DAYS`): October from 11 November; the current month never. Click a
   cell → panel: status, amount (KGS, exact, max 2 decimals, "85.000" refused as ambiguous),
   act number / date, "asked on", note, scan. A recorded status always wins (an акт received
-  early shows green).
+  early shows green). **Months older than the grid** (a flow that started more than a year
+  ago) are not columns, but the flow row shows "N older missing" (click opens the oldest),
+  they count in "Missing акты" and are included in the ask and the message for Elmurat.
+- **Archived flows:** their акты still count in the debts (an акт is a real invoice), so in
+  *Flows → Show archived → Correct акты* a founder can still change the **status, amount and
+  act date** of an акт already recorded on an archived flow. Nothing else (no new акты, no
+  "requested", no notes or scans) until the flow is restored.
 - **Договоры** (`intercompany_contracts`): flow, number, signed on, valid until, status
   draft / signed / expired / terminated, amount terms, optional scan. A *signed* contract
   ending within **30 days** shows "Ends in N days"; one whose end date passed shows "Ended N
@@ -398,19 +404,34 @@ in `access.ts`); all logic in `src/server/services/holding.ts` (+ `holding-asks.
   act date, else the month's last day); plus opening balances and payments entered by hand.
   Both directions are netted per pair ("Alura Brand owes Alura Style 1 240 000 KGS") and
   summed (exact to the tyiyn). A wrong entry is cancelled (archived), never deleted.
-- **Metric feed:** the Holding KPI "Intercompany debt total" gets the total **as of the last
-  day of the latest finished month**, source `derived` (new value of the `metric_source`
-  enum), after every change that affects debts and on every scheduler tick. Same rule as
-  connectors: it never replaces a number a founder entered or uploaded for that month (the
-  card then keeps the founder's number), and nothing is written while no debt data exists.
+- **Metric feed:** the Holding KPI "Intercompany debt total" gets, for each month, the total
+  **as of that month's last day**, source `derived` (new value of the `metric_source` enum).
+  Every scheduler tick writes the latest finished month; a change that affects debts (an
+  акт's amount / status / date, a payment or opening balance, a cancelled entry) recomputes
+  **every month from the earliest month it touches** up to the latest finished one, so a late
+  September акт also corrects October. Only months whose value is `derived` (or empty) are
+  written: a number a founder entered or uploaded (or a connector's) is never replaced (the
+  card keeps it). Months without any debt data stay empty — except a month that already had
+  a derived value (e.g. every entry was cancelled since): it gets **0**, a new version with
+  history, rather than keeping a stale total (values are never deleted).
 - **Documents:** PDF, JPG or PNG, max **10 MB**; the type is decided by the file's first bytes
   (a renamed .html is refused). Uploaded with `POST /api/v1/holding/files` (multipart — the
   only non-JSON endpoint; it requires an `Origin` of this site or `Sec-Fetch-Site:
   same-origin`, see `request-guard.ts`) and served only to signed-in founders by
-  `GET /api/v1/holding/files/:id` (`nosniff`, sandbox CSP, `no-store`). Bytes go through
+  `GET /api/v1/holding/files/:id` (`nosniff`, `no-store`; images also get a sandbox CSP, PDFs
+  not — Chrome's PDF viewer refuses to render sandboxed documents). Bytes go through
   `FileStorage` (`src/server/storage/file-storage.ts`): local disk `.data/uploads` now,
   a `SupabaseFileStorage` placeholder (no network) for later. **On Vercel the local disk is
   not kept** — set up Supabase Storage before uploading real documents there.
+  The metadata row is written before the bytes (a failed write removes the row), and uploads
+  never attached to an акт or договор are removed after **24 h** by the scheduler tick (20
+  per run); a document attached once is never removed. `next.config.ts` raises
+  `middlewareClientMaxBodySize` to 11 MB so a file near 10 MB is not cut off by the
+  middleware; anything over 10 MB gets a 413 with a clear message.
+  **Vercel limit:** Vercel refuses request bodies over **4.5 MB** before they reach the app,
+  so on Vercel scans above ~4.5 MB will fail until the Supabase storage adapter is written
+  with a **signed direct upload** (the browser uploads straight to Supabase Storage with a
+  short-lived URL the server signs; the app only records the metadata).
 
 ### Pushing the founders to ask Elmurat
 
@@ -431,7 +452,10 @@ can't be parked and follows quiet hours and "not linked" holding like the summar
   **Monday** summary ("Still waiting for 3 акты from Elmurat (asked 11 Nov): …", button *I
   asked again*). At most weekly per founder (one item per Monday).
 - Each item is shown once (`holding_ask_items`, unique per founder + kind + month/week, so a
-  tick every 5 minutes changes nothing). Planned in `planHoldingAsks` (called by `planTick`),
+  tick every 5 minutes changes nothing). **Nothing piles up** when a summary is not delivered
+  (Telegram not linked yet, failed sends, quiet hours): a new round cancels the founder's
+  older pending item of the same kind (`superseded`; the new one already covers every open
+  month), and the summary shows at most one ask line and one reminder line. Planned in `planHoldingAsks` (called by `planTick`),
   rendered by `holdingSummarySection` (called by the dispatcher for the morning summary).
 - `/holding` shows the same list plus a **ready message in Russian** with a Copy button
   ("Элмурат, здравствуйте! Пришлите, пожалуйста, акты приёма-передачи за: …"). The founder

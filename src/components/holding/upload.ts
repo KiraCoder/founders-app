@@ -9,6 +9,7 @@ export async function uploadHoldingFile(file: File): Promise<{ id: string; name:
   try {
     const res = await fetch("/api/v1/holding/files", { method: "POST", body: fd, credentials: "same-origin" });
     const body = (await res.json().catch(() => null)) as { data?: { id: string; name: string }; error?: { message: string } } | null;
+    if (res.status === 413) return { error: body?.error?.message ?? "The file is too large to upload (max 10 MB)" };
     if (!res.ok || !body?.data) return { error: body?.error?.message ?? `Upload failed (${res.status})` };
     return body.data;
   } catch {

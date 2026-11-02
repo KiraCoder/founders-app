@@ -80,6 +80,7 @@ describe("holding documents: upload and download", () => {
     big.set(PDF);
     const tooBig = await upload(uploadReq(big, "big.pdf"));
     expect(tooBig.status).toBe(413);
+    expect((await tooBig.json()).error.message).toMatch(/larger than 10 MB/);
     const empty = await upload(uploadReq(new Uint8Array(), "empty.pdf"));
     expect(empty.status).toBe(400);
     const notMultipart = await upload(jsonReq("/api/v1/holding/files", "POST", { file: "x" }) as NextRequest);
