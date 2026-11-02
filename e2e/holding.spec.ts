@@ -36,6 +36,8 @@ test("holding: attach a scan to an акт (upload through the browser, served ba
   const cell = page.locator('[data-testid="act-cell"][data-cell-state="missing"]').first();
   const flow = await cell.locator("xpath=ancestor::tr").getAttribute("data-flow");
   const period = await cell.getAttribute("data-period");
+  const totalNow = async () => ((await (await page.request.get("/api/v1/holding/debts")).json()) as { data: { total: number } }).data.total;
+  const before = await totalNow();
   await cell.click();
   const panel = page.getByTestId("act-panel");
   await panel.getByLabel("Received").check();
@@ -51,7 +53,9 @@ test("holding: attach a scan to an акт (upload through the browser, served ba
   await expect(panel).toBeHidden();
   const saved = page.locator(`tr[data-flow="${flow}"] [data-testid="act-cell"][data-period="${period}"]`);
   await expect(saved).toHaveAttribute("data-cell-state", "received");
-  await expect(page.getByTestId("debts-table")).toContainText("125");
+  // The received amount now counts as owed (debts are derived from the акты).
+  expect(await totalNow()).toBe(before + 125000);
+  await expect(page.getByTestId("debts-total")).toBeVisible();
 
   // A wrong file type is refused with a clear message.
   await page.locator('[data-testid="act-cell"][data-cell-state="missing"]').first().click();
