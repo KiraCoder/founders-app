@@ -39,7 +39,7 @@ import {
   type TaskStatus,
   type TaskVisibility,
 } from "@/server/db/schema";
-import { assertCompanyAccess, visibleTasksWhere } from "./access";
+import { assertCompanyAccess, visibleEventsWhere, visibleTasksWhere } from "./access";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { CLOSED_STATUSES, isOverdue, nextCompletedAt, thisWeekRange } from "./tasks-rules";
@@ -221,7 +221,7 @@ export async function listTaskEvents(ctx: ServiceContext, taskId: string): Promi
   return ctx.db
     .select()
     .from(taskEvents)
-    .where(eq(taskEvents.taskId, taskId))
+    .where(and(eq(taskEvents.taskId, taskId), visibleEventsWhere(ctx)))
     .orderBy(asc(taskEvents.createdAt));
 }
 
@@ -335,6 +335,8 @@ export async function createTask(ctx: ServiceContext, input: TaskCreateInput): P
       taskId: row!.id,
       companyId,
       actorUserId: ctx.user.id,
+      visibility: data.visibility,
+      ownerUserId: ctx.user.id,
       kind: "created",
       newValue: { title: data.title, dueDate: data.dueDate ?? null, status: data.status },
     });
@@ -410,8 +412,19 @@ export async function updateTask(ctx: ServiceContext, id: string, input: TaskUpd
       })
       .where(eq(tasks.id, id));
 
+    // The audit log follows the task: when it becomes private (or shared), so does its history.
+    if (next.visibility !== current.visibility) {
+      await tx.update(taskEvents).set({ visibility: next.visibility }).where(eq(taskEvents.taskId, id));
+    }
+
     const events: (typeof taskEvents.$inferInsert)[] = [];
-    const base = { taskId: id, companyId: next.companyId, actorUserId: ctx.user.id };
+    const base = {
+      taskId: id,
+      companyId: next.companyId,
+      actorUserId: ctx.user.id,
+      visibility: next.visibility,
+      ownerUserId: current.ownerUserId,
+    };
     for (const field of changed) {
       const kind =
         field === "dueDate"
@@ -443,6 +456,8 @@ export async function deleteTask(ctx: ServiceContext, id: string): Promise<void>
       taskId: id,
       companyId: current.companyId,
       actorUserId: ctx.user.id,
+      visibility: current.visibility,
+      ownerUserId: current.ownerUserId,
       kind: "deleted",
       oldValue: {
         title: current.title,

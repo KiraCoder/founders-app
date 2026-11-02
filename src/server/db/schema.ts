@@ -244,6 +244,13 @@ export const taskEvents = pgTable(
     taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
     companyId: uuid("company_id").references(() => companies.id, { onDelete: "set null" }),
     actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    /**
+     * Copy of the task's visibility/owner, so the audit log follows the same rule as the
+     * task (see visibleEventsWhere in access.ts). Kept in sync while the task exists and
+     * frozen as a snapshot after it is deleted.
+     */
+    visibility: taskVisibilityEnum("visibility").notNull().default("private"),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
     kind: taskEventKindEnum("kind").notNull(),
     field: text("field"),
     oldValue: jsonb("old_value"),

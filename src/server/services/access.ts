@@ -1,6 +1,6 @@
 import "server-only";
 import { and, eq, isNull, or, type SQL } from "drizzle-orm";
-import { companies, tasks } from "@/server/db/schema";
+import { companies, taskEvents, tasks } from "@/server/db/schema";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 
@@ -13,6 +13,15 @@ import { ServiceError } from "./errors";
  */
 export function visibleTasksWhere(ctx: ServiceContext): SQL {
   return or(eq(tasks.visibility, "shared"), eq(tasks.ownerUserId, ctx.user.id))!;
+}
+
+/**
+ * Audit-log rows follow the same rule as their task. task_events carries a copy of the
+ * task's visibility/owner (kept after the task is deleted), so history of a private
+ * todo, including deleted ones and tasks that were shared earlier, never leaks.
+ */
+export function visibleEventsWhere(ctx: ServiceContext): SQL {
+  return or(eq(taskEvents.visibility, "shared"), eq(taskEvents.ownerUserId, ctx.user.id))!;
 }
 
 /** SQL filter for companies the user may access. */

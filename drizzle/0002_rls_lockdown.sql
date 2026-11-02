@@ -17,8 +17,9 @@
 -- Safe to re-run; changes no data. Narrow, policy-based client access for a future
 -- direct-client mode lives in supabase/policies.sql (applied by hand, reviewed).
 --
--- Every later migration that creates a table must end with this same block
--- (tests/integration/rls.test.ts fails otherwise).
+-- Every later migration that creates a table must enable RLS on THAT table and revoke
+-- anon/authenticated on it (tests/integration/rls.test.ts fails otherwise). Do not
+-- re-run this loop over all tables later: it would undo grants from policies.sql.
 -- =============================================================================
 DO $$
 DECLARE
