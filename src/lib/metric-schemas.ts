@@ -1,9 +1,13 @@
 import { z } from "zod";
 
-/** One value typed by a founder (form, REST). The period is any day inside it ("2026-10", "2026-10-31"). */
+/**
+ * One value typed by a founder (form, REST). The period is any day inside it ("2026-10",
+ * "2026-10-31"; a date only — a timestamp is refused). `note`: omitted = keep the
+ * existing note, null or "" = remove it, text = set it.
+ */
 export const metricValueInputSchema = z
   .object({
-    period: z.string().trim().min(1, "Choose the period").max(20),
+    period: z.string().trim().min(1, "Choose the period").max(40),
     value: z.union([z.number(), z.string().trim().min(1, "Enter a number").max(40)]),
     note: z.string().trim().max(500).nullish(),
   })

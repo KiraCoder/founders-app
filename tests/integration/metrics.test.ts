@@ -120,6 +120,13 @@ describe("values: correction keeps history, latest wins", () => {
     // A monthly metric takes "2026-10" and any day in October.
     const revenue = await metricId("kiwi-go", "revenue");
     expect(await recordMetricValue(ctx, revenue, { period: "2026-10-17", value: "1 250 000" })).toMatchObject({ period: "2026-10-01", value: 1250000 });
+    // The current month / week is not finished: refused (a month-to-date total is not the month's number).
+    await expect(recordMetricValue(ctx, revenue, { period: "2026-11", value: 1 })).rejects.toThrow("This month isn't finished yet");
+    const defect = await metricId("alura-style", "defect_pct", "hbk");
+    await expect(recordMetricValue(ctx, defect, { period: "2026-11-02", value: 1 })).rejects.toThrow("This week isn't finished yet");
+    expect(await recordMetricValue(ctx, defect, { period: "2026-11-01", value: 1 })).toMatchObject({ period: "2026-10-26" });
+    // Daily numbers may be entered for today.
+    expect(await recordMetricValue(ctx, pct, { period: "2026-11-02", value: 90 })).toMatchObject({ period: "2026-11-02" });
   });
 
   it("grid saves changed cells in one go and reports errors per cell", async () => {
@@ -130,10 +137,15 @@ describe("values: correction keeps history, latest wins", () => {
       { metricId: revenue, period: "2026-10-01", value: "950 000" },
       { metricId: revenue, period: "2026-08-01", value: "" },
       { metricId: revenue, period: "2026-12-01", value: "1" },
+      { metricId: revenue, period: "2026-11-01", value: "1" },
       { metricId: await metricId("alura-style", "output_pcs", "hbk"), period: "2026-11-01", value: "5" },
     ]);
     expect(res).toMatchObject({ created: 2, updated: 0, unchanged: 0 });
-    expect(res.errors.map((e) => e.message)).toEqual(["Revenue: That period is in the future", "Metric not found in this company"]);
+    expect(res.errors.map((e) => e.message)).toEqual([
+      "Revenue: That period is in the future",
+      "Revenue: This month isn't finished yet",
+      "Metric not found in this company",
+    ]);
     const again = await saveMetricGrid(ctx, cid("kiwi-go"), [{ metricId: revenue, period: "2026-10-01", value: "950000" }]);
     expect(again).toMatchObject({ created: 0, updated: 0, unchanged: 1 });
   });
@@ -204,9 +216,16 @@ describe("upload: preview then confirm, idempotent", () => {
     expect(plan.dateColumn).toBe("Дата");
     expect(plan.columns.find((c) => c.header === "Unknown column")?.metricId).toBeNull();
     expect(plan.columns.find((c) => c.header === "Брак % ХБК")?.metricLabel).toBe("Defect rate · ХБК");
-    expect(plan.counts).toEqual({ create: 4, update: 1, unchanged: 1, error: 4 });
+    expect(plan.counts).toEqual({ create: 4, update: 0, unchanged: 1, error: 5 });
     const errs = plan.cells.filter((c) => c.action === "error").map((c) => c.error);
-    expect(errs).toEqual(['Not a number: “abc”', "Same period as row 3", "Date not recognised: “soon”", "Period is in the future"]);
+    // Two rows for the same day: BOTH are refused (the first one is not silently kept).
+    expect(errs).toEqual([
+      "Rows 3, 5 are the same day twice",
+      "Not a number: “abc”",
+      "Rows 3, 5 are the same day twice",
+      "Date not recognised: “soon”",
+      "That period is in the future",
+    ]);
     // Defect rate is weekly: 30 Oct → the week of 26 Oct. Piecework is monthly: October.
     expect(plan.cells.find((c) => c.metricLabel === "Defect rate · ХБК")).toMatchObject({ period: "2026-10-26", value: 1.8 });
     expect(plan.cells.find((c) => c.metricLabel === "Piecework pay total · ХБК")).toMatchObject({ period: "2026-10-01", value: 1200000 });
@@ -214,19 +233,18 @@ describe("upload: preview then confirm, idempotent", () => {
     expect((await listMetricValues(ctx, await metricId("alura-style", "defect_pct", "hbk"))).length).toBe(0);
 
     const applied = await applyMetricsImport(ctx, company, file, { expectedSha256: file.sha256 });
-    expect(applied.applied).toBe(5);
+    expect(applied.applied).toBe(4);
     const hbk = await listMetricValues(ctx, await metricId("alura-style", "output_pcs", "hbk"), { includeHistory: true });
     expect(hbk.map((h) => [h.period, h.value, h.isCurrent, h.source])).toEqual([
-      ["2026-10-31", 425, true, "upload"],
-      ["2026-10-31", 400, false, "manual"],
+      ["2026-10-31", 400, true, "manual"],
       ["2026-10-30", 410, true, "upload"],
     ]);
 
     // Same file again: nothing to do.
     const second = await planMetricsImport(ctx, company, file);
-    expect(second.counts).toMatchObject({ create: 0, update: 0, unchanged: 6 });
+    expect(second.counts).toMatchObject({ create: 0, update: 0, unchanged: 5 });
     expect((await applyMetricsImport(ctx, company, file, { expectedSha256: file.sha256 })).applied).toBe(0);
-    expect((await listMetricValues(ctx, await metricId("alura-style", "output_pcs", "hbk"), { includeHistory: true })).length).toBe(3);
+    expect((await listMetricValues(ctx, await metricId("alura-style", "output_pcs", "hbk"), { includeHistory: true })).length).toBe(2);
   });
 
   it("the sample file in docs/samples parses and matches every column", async () => {
@@ -255,6 +273,7 @@ describe("connectors", () => {
       name: "Fake Kiwi",
       companySlug: "kiwi-go",
       metrics: [{ key: "orders_day" }, { key: "couriers_active" }],
+      setup: () => ({ configured: true, message: "ok", shortReason: "fake", envVars: [], missingEnv: [] }),
       healthCheck: async () => ({ state: "ok", message: "ok", envVars: [], missingEnv: [] }),
       pull: async () => {
         if (opts.failPull) throw new Error("boom");
@@ -373,8 +392,12 @@ describe("staleness hook and morning summary", () => {
       const idx = s.message.lines.findIndex((l) => l.text.startsWith("Numbers waiting"));
       expect(idx).toBeGreaterThan(0);
       const section = s.message.lines.slice(idx + 1);
-      expect(section.length).toBeLessThanOrEqual(3);
-      expect(section[0]!.text).toMatch(/^Kiwi Go: /);
+      // Monday, nothing entered yet: one line for numbers never entered and ONE line for
+      // the 18 numbers that wait for data sources that are not set up.
+      expect(section.map((l) => l.text)).toEqual([
+        "Never entered yet: Revenue (Kiwi Go), Orders to factory (Alura Brand) +2 more",
+        "18 numbers wait for data sources (Edil's APIs, WB token)",
+      ]);
     }
     const kinds = (await db.select().from(notificationsOutbox)).map((r) => r.kind);
     expect(kinds.every((k) => k === "morning_summary" || k === "evening_check")).toBe(true);

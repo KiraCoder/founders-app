@@ -32,10 +32,56 @@ export interface ParsedTable {
   /** Spreadsheet row number (1-based) of each data row, for error messages. */
   rowNumbers: number[];
   /**
+   * .xlsx only: for each cell of `rows` that holds a NUMBER in the workbook, the exact
+   * number and its display format (null for text, dates and empty cells; absent for CSV).
+   * Importers that store numbers read the value from here, never from the display text,
+   * so 95.5 % (stored by Excel as 0.955) or 1 234 567.89 keep every digit.
+   */
+  numbers?: (NumericCell | null)[][];
+  /**
    * sha256 (hex) of the uploaded bytes. The preview returns it and the confirm step must
    * send the same value, so the rows applied are the rows that were previewed.
    */
   sha256: string;
+}
+
+export interface NumericCell {
+  /** The number Excel stores, float noise removed (15 significant digits, like Excel). */
+  value: number;
+  /** Excel number format, e.g. "0.00%", "#,##0", "General". */
+  numFmt: string | null;
+  /** The format shows the number as a percentage (Excel stores 95.5 % as 0.955). */
+  percent: boolean;
+  /** What the cell shows as a number: `value`, or `value × 100` for percent formats. */
+  shown: number;
+}
+
+/** Excel format codes: a "%" outside quotes / brackets means "shown × 100". */
+export function isPercentFormat(numFmt: string | null | undefined): boolean {
+  if (!numFmt) return false;
+  const bare = numFmt.replace(/"[^"]*"/g, "").replace(/\[[^\]]*\]/g, "").replace(/\\./g, "");
+  return bare.includes("%");
+}
+
+/** A date format without a day part ("mmm yyyy", "mm.yyyy") shows a whole month. */
+export function isMonthOnlyFormat(numFmt: string | null | undefined): boolean {
+  if (!numFmt) return false;
+  const bare = numFmt.replace(/"[^"]*"/g, "").replace(/\[[^\]]*\]/g, "").replace(/\\./g, "").toLowerCase();
+  return /y/.test(bare) && /m/.test(bare) && !/d/.test(bare) && !/[hs]/.test(bare);
+}
+
+/** Removes binary float noise: 15 significant digits, exactly what Excel keeps and shows. */
+function clean(n: number): number {
+  return Number(n.toPrecision(15));
+}
+
+/** Exact text of a number, without exponent notation where possible. */
+function numberText(n: number): string {
+  const s = String(n);
+  if (!/e/i.test(s)) return s;
+  // Very small / large numbers: fixed notation with as many digits as needed (max 20).
+  const fixed = Math.abs(n) < 1 ? n.toFixed(20).replace(/0+$/, "").replace(/\.$/, "") : s;
+  return fixed;
 }
 
 export function sha256Hex(bytes: Uint8Array): string {
@@ -49,12 +95,37 @@ export class ImportFileError extends Error {
   }
 }
 
-function cellToString(value: ExcelJS.CellValue): string {
+function numericOf(value: ExcelJS.CellValue): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (value && typeof value === "object" && !(value instanceof Date) && "result" in value) {
+    const r = (value as { result?: unknown }).result;
+    return typeof r === "number" && Number.isFinite(r) ? r : null;
+  }
+  return null;
+}
+
+function dateOf(value: ExcelJS.CellValue): Date | null {
+  if (value instanceof Date) return value;
+  if (value && typeof value === "object" && "result" in value) {
+    const r = (value as { result?: unknown }).result;
+    return r instanceof Date ? r : null;
+  }
+  return null;
+}
+
+/**
+ * Display text of a cell. Numbers keep every digit (no rounding); a percent-formatted
+ * number becomes "95.5%"; a date becomes "YYYY-MM-DD", or "YYYY-MM" when its format has
+ * no day (e.g. "mmm yyyy"), so a month label stays a month.
+ */
+function cellToString(value: ExcelJS.CellValue, numFmt: string | null = null): string {
   if (value === null || value === undefined) return "";
-  if (typeof value === "number") return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
+  const n = numericOf(value);
+  if (n !== null) return isPercentFormat(numFmt) ? `${numberText(clean(n * 100))}%` : numberText(clean(n));
+  const d = dateOf(value);
+  if (d) return isMonthOnlyFormat(numFmt) ? d.toISOString().slice(0, 7) : d.toISOString().slice(0, 10);
   if (typeof value === "string") return value;
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
   if (typeof value === "object") {
     if ("richText" in value && Array.isArray(value.richText)) return value.richText.map((r) => r.text).join("");
     if ("text" in value && typeof value.text === "string") return value.text; // hyperlink
@@ -133,7 +204,7 @@ export async function assertSafeXlsx(bytes: Uint8Array): Promise<void> {
   }
 }
 
-function finish(raw: string[][], sha256: string): ParsedTable {
+function finish(raw: string[][], sha256: string, rawNumbers?: (NumericCell | null)[][]): ParsedTable {
   const cleaned = raw.map((r) => r.slice(0, MAX_IMPORT_COLUMNS).map((c) => (c ?? "").toString().trim()));
   const headerIdx = cleaned.findIndex((r) => r.some((c) => c !== ""));
   if (headerIdx < 0) throw new ImportFileError("The file is empty.");
@@ -141,16 +212,18 @@ function finish(raw: string[][], sha256: string): ParsedTable {
   const width = headers.length;
   const rows: string[][] = [];
   const rowNumbers: number[] = [];
+  const numbers: (NumericCell | null)[][] = [];
   for (let i = headerIdx + 1; i < cleaned.length; i++) {
     const r = cleaned[i]!;
     if (!r.some((c) => c !== "")) continue;
     rows.push(Array.from({ length: width }, (_, j) => r[j] ?? ""));
+    if (rawNumbers) numbers.push(Array.from({ length: width }, (_, j) => rawNumbers[i]?.[j] ?? null));
     rowNumbers.push(i + 1);
     if (rows.length > MAX_IMPORT_ROWS) {
       throw new ImportFileError(`Too many rows (more than ${MAX_IMPORT_ROWS}). Split the file.`);
     }
   }
-  return { headers, rows, rowNumbers, sha256 };
+  return rawNumbers ? { headers, rows, rowNumbers, sha256, numbers } : { headers, rows, rowNumbers, sha256 };
 }
 
 /** Parses .xlsx or .csv bytes. Throws ImportFileError with a user-facing message. */
@@ -185,14 +258,30 @@ export async function parseTableFile(bytes: Uint8Array, filename: string): Promi
       throw new ImportFileError(`Too many rows (more than ${MAX_IMPORT_ROWS}). Split the file.`);
     }
     const raw: string[][] = [];
+    const rawNumbers: (NumericCell | null)[][] = [];
     ws.eachRow({ includeEmpty: true }, (row, rowNumber) => {
       const cells: string[] = [];
+      const nums: (NumericCell | null)[] = [];
       const count = Math.min(row.cellCount, MAX_IMPORT_COLUMNS);
-      for (let c = 1; c <= count; c++) cells.push(cellToString(row.getCell(c).value));
+      for (let c = 1; c <= count; c++) {
+        const cell = row.getCell(c);
+        const numFmt = typeof cell.numFmt === "string" && cell.numFmt ? cell.numFmt : null;
+        cells.push(cellToString(cell.value, numFmt));
+        const n = numericOf(cell.value);
+        if (n === null) nums.push(null);
+        else {
+          const percent = isPercentFormat(numFmt);
+          nums.push({ value: clean(n), numFmt, percent, shown: percent ? clean(n * 100) : clean(n) });
+        }
+      }
       raw[rowNumber - 1] = cells;
+      rawNumbers[rowNumber - 1] = nums;
     });
-    for (let i = 0; i < raw.length; i++) raw[i] ??= [];
-    return finish(raw, sha256);
+    for (let i = 0; i < raw.length; i++) {
+      raw[i] ??= [];
+      rawNumbers[i] ??= [];
+    }
+    return finish(raw, sha256, rawNumbers);
   }
 
   if (name.endsWith(".xls")) {

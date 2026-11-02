@@ -533,7 +533,12 @@ export const reminderSnoozes = pgTable(
 export const metricGranularityEnum = pgEnum("metric_granularity", ["day", "week", "month"]);
 export const metricDirectionEnum = pgEnum("metric_direction", ["higher_is_better", "lower_is_better", "neutral"]);
 export const metricSourceEnum = pgEnum("metric_source", ["manual", "upload", "connector"]);
-export const connectorRunStatusEnum = pgEnum("connector_run_status", ["ok", "not_configured", "error"]);
+export const connectorRunStatusEnum = pgEnum("connector_run_status", ["ok", "not_configured", "error", "running"]);
+/**
+ * How finer-grained connector points (e.g. days) become one value of a coarser metric
+ * (e.g. a week): sum (orders, money), avg (percentages), last (headcount, balances).
+ */
+export const metricAggregationEnum = pgEnum("metric_aggregation", ["sum", "avg", "last"]);
 
 /**
  * What a company tracks (seeded from src/lib/kpis.ts, editable later). One row per
@@ -556,6 +561,8 @@ export const metricDefinitions = pgTable(
     /** Measurement unit: KGS, pcs, orders, %, people, count. */
     unit: text("unit").notNull(),
     granularity: metricGranularityEnum("granularity").notNull(),
+    /** How a connector's daily points are combined into one week/month value. */
+    aggregation: metricAggregationEnum("aggregation").notNull().default("sum"),
     direction: metricDirectionEnum("direction").notNull().default("higher_is_better"),
     /**
      * Data for a period is due this many days after the period ends (null = default per
@@ -596,7 +603,7 @@ export const metricValues = pgTable(
     source: metricSourceEnum("source").notNull(),
     isCurrent: boolean("is_current").notNull().default(true),
     enteredBy: uuid("entered_by").references(() => users.id, { onDelete: "set null" }),
-    connectorRunId: uuid("connector_run_id"),
+    connectorRunId: uuid("connector_run_id").references(() => connectorRuns.id, { onDelete: "set null" }),
     note: text("note"),
     createdAt: createdAt(),
   },
@@ -619,6 +626,11 @@ export const connectorRuns = pgTable(
     pointsReceived: integer("points_received").notNull().default(0),
     valuesWritten: integer("values_written").notNull().default(0),
     message: text("message"),
+    /**
+     * Extra facts about the run, e.g. `conflicts`: values the source reported that differ
+     * from a value a founder entered or uploaded (the founder's value is kept).
+     */
+    details: jsonb("details").$type<ConnectorRunDetails>(),
     triggeredBy: uuid("triggered_by").references(() => users.id, { onDelete: "set null" }),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
@@ -626,12 +638,29 @@ export const connectorRuns = pgTable(
   (t) => [index("connector_runs_connector_idx").on(t.connectorId, t.startedAt)],
 );
 
+export interface ConnectorRunConflict {
+  metricId: string;
+  period: string;
+  /** The current (manual / upload) value that was kept. */
+  kept: number;
+  keptSource: "manual" | "upload";
+  /** What the source reported. */
+  reported: number;
+}
+
+export interface ConnectorRunDetails {
+  conflicts?: ConnectorRunConflict[];
+  /** Points not written, with the reason (capped). */
+  skippedReasons?: string[];
+}
+
 export type MetricDefinition = typeof metricDefinitions.$inferSelect;
 export type MetricValue = typeof metricValues.$inferSelect;
 export type ConnectorRun = typeof connectorRuns.$inferSelect;
 export type MetricGranularity = (typeof metricGranularityEnum.enumValues)[number];
 export type MetricDirection = (typeof metricDirectionEnum.enumValues)[number];
 export type MetricSource = (typeof metricSourceEnum.enumValues)[number];
+export type MetricAggregation = (typeof metricAggregationEnum.enumValues)[number];
 
 export type User = typeof users.$inferSelect;
 export type Company = typeof companies.$inferSelect;

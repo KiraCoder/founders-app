@@ -9,7 +9,7 @@
 import bcrypt from "bcryptjs";
 import { eq, like } from "drizzle-orm";
 import { addDays, todayInTimeZone } from "@/lib/dates";
-import { metricSeedFor } from "@/lib/kpis";
+import { metricSeedFor, seedAggregation } from "@/lib/kpis";
 import type { Db } from "./connect";
 import {
   companies,
@@ -269,6 +269,7 @@ export async function seedMetricDefinitions(db: Db, companyIds: Record<string, s
             aliases: d.aliases,
             unit: d.unit,
             granularity: d.granularity,
+            aggregation: seedAggregation(d),
             direction: d.direction,
             sourceKind: d.sourceKind,
             connectorId: d.connectorId ?? null,

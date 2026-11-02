@@ -1,13 +1,25 @@
 import "server-only";
 import type { IsoDate } from "@/lib/dates";
-import { type Granularity, DATE_HEADERS, metricValueProblem, normalizeHeader, parseMetricNumber, parsePeriodInput, periodStart } from "@/lib/metrics";
+import {
+  type Granularity,
+  DATE_HEADERS,
+  formatPeriod,
+  hasTimePart,
+  metricValueProblem,
+  normalizeHeader,
+  parseDateCell,
+  parseMetricInput,
+  parsePeriodInput,
+  periodProblem,
+  periodStart,
+} from "@/lib/metrics";
 import type { Db } from "@/server/db/connect";
 import type { ParsedTable } from "@/server/import/parse-table";
 import { today, type ServiceContext } from "./context";
 import { assertSameFile } from "./import-common";
 import { lockTransaction } from "./locks";
 import { ServiceError } from "./errors";
-import { currentValues, listMetricDefinitions, writeMetricValueTx, type MetricView } from "./metrics";
+import { byMetricThenPeriod, currentValues, listMetricDefinitions, writeMetricValueTx, type MetricView } from "./metrics";
 
 /**
  * Upload of numbers for ONE company (`/companies/[slug]/numbers/import`).
@@ -17,6 +29,17 @@ import { currentValues, listMetricDefinitions, writeMetricValueTx, type MetricVi
  * English; factory metrics need the factory in the header, e.g. "Выпуск ХБК"), so a file
  * can never write numbers into another company. Each date is turned into the metric's
  * period (a date in October → October for a monthly metric).
+ *
+ * Refused instead of guessed (numbers founders decide on):
+ * - a month label ("Oct 2026", "2026-10", a date cell formatted "mmm yyyy") in a daily or
+ *   weekly column: which day / week is it?
+ * - two rows that land in the same period of one metric (e.g. a daily file in a monthly
+ *   column): ALL of those cells are errors, also the first, so a day is never taken as
+ *   the month's total;
+ * - the current (unfinished) week / month, and future periods;
+ * - ambiguous text numbers ("85.000", "12,345"), "%" in a non-% column, more than 4
+ *   decimals or 15 digits. .xlsx numbers are read from the stored value (never rounded):
+ *   a percent-formatted cell 95.5 % (stored 0.955) is 95.5.
  *
  * Flow like the people import: parse (parse-table.ts) → `planMetricsImport` (preview:
  * create / update / unchanged / error per cell) → `applyMetricsImport` (re-plans in a
@@ -132,52 +155,83 @@ async function buildPlan(ctx: ServiceContext, companyId: string, table: ParsedTa
   const current = await currentValues(ctx.db, mapped.map((c) => c.metricId!));
 
   const cells: MetricImportCell[] = [];
-  const seen = new Map<string, number>();
+  const byPeriod = new Map<string, MetricImportCell[]>();
   table.rows.forEach((r, i) => {
     const rowNo = table.rowNumbers[i] ?? i + 2;
     const rawDate = (r[dateIdx] ?? "").trim();
     const filled = mapped.filter((c) => (r[c.index] ?? "").trim() !== "");
     if (filled.length === 0) return;
     const base = { row: rowNo, column: table.headers[dateIdx] ?? "Date", metricId: null, metricLabel: "—", period: null, value: null, current: null, unit: null, granularity: null };
-    if (!parsePeriodInput(rawDate, "day") && !parsePeriodInput(rawDate, "month")) {
-      cells.push({ ...base, action: "error", error: rawDate ? `Date not recognised: “${rawDate}”` : "Date is empty" });
+    const date = parseDateCell(rawDate);
+    if (!date) {
+      const error = !rawDate
+        ? "Date is empty"
+        : hasTimePart(rawDate)
+          ? `Give the date without a time: “${rawDate}”`
+          : `Date not recognised: “${rawDate}”`;
+      cells.push({ ...base, action: "error", error });
       return;
     }
     for (const c of filled) {
       const def = defById.get(c.metricId!)!;
-      const period = parsePeriodInput(rawDate, def.granularity)!;
+      const period = periodStart(date.date, def.granularity);
       const raw = (r[c.index] ?? "").trim();
-      const value = parseMetricNumber(raw);
       const cell: MetricImportCell = {
         row: rowNo,
         column: c.header,
         metricId: def.id,
         metricLabel: def.label,
         period,
-        value: Number.isFinite(value) ? value : null,
+        value: null,
         current: current.get(`${def.id}|${period}`) ?? null,
         unit: def.unit,
         granularity: def.granularity,
         action: "create",
       };
-      const problem = metricValueProblem(value, def.unit);
-      const key = `${def.id}|${period}`;
-      if (problem) {
-        cell.action = "error";
-        cell.error = Number.isFinite(value) ? problem : `Not a number: “${raw}”`;
-      } else if (period > periodStart(t, def.granularity)) {
-        cell.action = "error";
-        cell.error = "Period is in the future";
-      } else if (seen.has(key)) {
-        cell.action = "error";
-        cell.error = `Same period as row ${seen.get(key)}`;
-      } else {
-        seen.set(key, rowNo);
-        cell.action = cell.current === null ? "create" : Math.abs(cell.current - value) < 1e-9 ? "unchanged" : "update";
-      }
       cells.push(cell);
+      // The number: an .xlsx number exactly as stored, else the text.
+      const numeric = table.numbers?.[i]?.[c.index] ?? null;
+      let error: string | null = null;
+      if (numeric) {
+        if (numeric.percent && def.unit !== "%") error = `“${raw}” is a percentage, but ${def.label} is in ${def.unit}`;
+        else {
+          cell.value = numeric.shown;
+          error = metricValueProblem(numeric.shown, def.unit);
+        }
+      } else {
+        const parsed = parseMetricInput(raw, def.unit);
+        if ("error" in parsed) error = parsed.error;
+        else cell.value = parsed.value;
+      }
+      if (!error && date.precision === "month" && def.granularity !== "month") {
+        error = `“${rawDate}” is a whole month, but ${def.label} is a ${def.granularity === "day" ? "daily" : "weekly"} number — give the date`;
+      }
+      if (!error) error = periodProblem(period, def.granularity, t);
+      if (error) {
+        cell.action = "error";
+        cell.error = error;
+        continue;
+      }
+      const key = `${def.id}|${period}`;
+      byPeriod.set(key, [...(byPeriod.get(key) ?? []), cell]);
+      cell.action = cell.current === null ? "create" : Math.abs(cell.current - cell.value!) < 1e-9 ? "unchanged" : "update";
     }
   });
+  // Several rows in one period of one metric: refuse all of them (never keep the first).
+  for (const group of byPeriod.values()) {
+    if (group.length < 2) continue;
+    const g = group[0]!.granularity!;
+    const rows = group.map((c) => c.row);
+    const where = formatPeriod(group[0]!.period!, g);
+    const hint =
+      g === "day"
+        ? "the same day twice"
+        : `all in ${where} — ${group[0]!.metricLabel} is a ${g === "week" ? "weekly" : "monthly"} number: one row per ${g} with its total`;
+    for (const c of group) {
+      c.action = "error";
+      c.error = `Rows ${rows.join(", ")} are ${hint}`;
+    }
+  }
   if (cells.length === 0) throw new ServiceError("validation", "The file has no numbers in the metric columns.");
   const counts: Record<CellAction, number> = { create: 0, update: 0, unchanged: 0, error: 0 };
   for (const c of cells) counts[c.action]++;
@@ -202,14 +256,17 @@ export async function applyMetricsImport(
     await lockTransaction(tx.db, `metrics-import:${companyId}`);
     const plan = await buildPlan(tx, companyId, table);
     let applied = 0;
-    for (const c of plan.cells) {
-      if ((c.action !== "create" && c.action !== "update") || !c.metricId || !c.period || c.value === null) continue;
-      const r = await writeMetricValueTx(tx.db, c.metricId, c.period, c.value, {
+    const writes = plan.cells
+      .filter((c) => (c.action === "create" || c.action === "update") && c.metricId && c.period && c.value !== null)
+      .map((c) => ({ metricId: c.metricId!, period: c.period!, value: c.value! }))
+      .sort(byMetricThenPeriod);
+    for (const w of writes) {
+      const r = await writeMetricValueTx(tx.db, w.metricId, w.period, w.value, {
         source: "upload",
         enteredBy: ctx.user.id,
         now: ctx.now,
       });
-      if (r.action !== "unchanged") applied++;
+      if (r.action === "created" || r.action === "updated") applied++;
     }
     return { ...plan, applied };
   });

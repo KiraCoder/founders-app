@@ -17,6 +17,11 @@ export interface MetricSeed {
   aliases: string[];
   unit: MetricUnit;
   granularity: "day" | "week" | "month";
+  /**
+   * How a connector's finer points (days) become one week/month value. Default: "avg" for
+   * percentages, "last" for people counts, otherwise "sum" (see `seedAggregation`).
+   */
+  aggregation?: "sum" | "avg" | "last";
   direction: "higher_is_better" | "lower_is_better" | "neutral";
   sourceKind: "manual" | "upload" | "connector";
   connectorId?: string;
@@ -54,10 +59,18 @@ export const METRIC_SEED: Record<string, MetricSeed[]> = {
     { key: "wb_returns", name: "Returns", aliases: ["Возвраты", "Возвраты WB", "WB returns"], unit: "pcs", granularity: "day", direction: "lower_is_better", sourceKind: "connector", connectorId: "wildberries" },
   ],
   "asqa-zou-holding": [
-    { key: "intercompany_debt", name: "Intercompany debt total", aliases: ["Долги между компаниями", "Взаимные долги", "Intercompany debt"], unit: "KGS", granularity: "month", direction: "lower_is_better", sourceKind: "manual" },
+    { key: "intercompany_debt", name: "Intercompany debt total", aliases: ["Долги между компаниями", "Взаимные долги", "Intercompany debt"], unit: "KGS", granularity: "month", aggregation: "last", direction: "lower_is_better", sourceKind: "manual" },
   ],
   // Marketing is planned: no numbers yet.
 };
+
+/** Aggregation of a seeded metric: explicit, else avg for %, last for people, else sum. */
+export function seedAggregation(d: Pick<MetricSeed, "aggregation" | "unit">): "sum" | "avg" | "last" {
+  if (d.aggregation) return d.aggregation;
+  if (d.unit === "%") return "avg";
+  if (d.unit === "people") return "last";
+  return "sum";
+}
 
 export function metricSeedFor(slug: string): MetricSeed[] {
   return METRIC_SEED[slug] ?? [];

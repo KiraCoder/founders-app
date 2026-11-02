@@ -1,6 +1,7 @@
 import "server-only";
 import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
+import { decimalPlaces } from "@/lib/metrics";
 import {
   EMPLOYMENT_TYPE_VALUES,
   normalizeName,
@@ -392,9 +393,14 @@ async function buildPlan(
       const payType = payRaw ? PAY_WORDS[payRaw] : "monthly";
       if (payRaw && !payType) errors.push(`Pay type "${cell(r, "payType")}": use monthly, piecework or hourly`);
       if (salRaw) {
-        const amount = parseAmount(salRaw);
+        // An .xlsx number is taken exactly as stored (never via its display text); amounts
+        // are kept to the tiyin: more than 2 decimals is refused, never rounded.
+        const salIdx = mapping.salary;
+        const numeric = salIdx === undefined || salIdx === null ? null : (table.numbers?.[i]?.[salIdx] ?? null);
+        const amount = numeric ? (numeric.percent ? Number.NaN : numeric.value) : parseAmount(salRaw);
         if (!Number.isFinite(amount) || amount < 0 || amount > 1_000_000_000) errors.push(`Salary "${salRaw}" is not an amount`);
-        else salary = { amount: Math.round(amount * 100) / 100, currency: "KGS", payType: payType ?? "monthly" };
+        else if (decimalPlaces(amount) > 2) errors.push(`Salary "${salRaw}" has more than 2 decimals`);
+        else salary = { amount, currency: "KGS", payType: payType ?? "monthly" };
       }
       plan.salary = salary ?? null;
     }

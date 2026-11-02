@@ -212,6 +212,53 @@ describe("0008 people fixes on existing data", () => {
   });
 });
 
+describe("0009 metrics fixes on existing data", () => {
+  it("sets the aggregation per unit, drops dangling run ids, adds the run FK and the 'running' status", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0009") });
+    const C = "33333333-3333-4333-8333-333333333333";
+    await client.exec(`
+      insert into companies (id, slug, name) values ('${C}', 'kiwi-go', 'Kiwi Go');
+      insert into metric_definitions (id, company_id, key, name, unit, granularity) values
+        ('a0000000-0000-4000-8000-000000000001', '${C}', 'orders_day', 'Orders', 'orders', 'day'),
+        ('a0000000-0000-4000-8000-000000000002', '${C}', 'on_time_pct', 'On time', '%', 'day'),
+        ('a0000000-0000-4000-8000-000000000003', '${C}', 'couriers_active', 'Couriers', 'people', 'day'),
+        ('a0000000-0000-4000-8000-000000000004', '${C}', 'intercompany_debt', 'Debt', 'KGS', 'month');
+      insert into connector_runs (id, connector_id, company_id, status, range_from, range_to)
+        values ('b0000000-0000-4000-8000-000000000001', 'kiwigo-app', '${C}', 'ok', '2026-10-01', '2026-10-31');
+      insert into metric_values (metric_id, period_start, value, source, connector_run_id) values
+        ('a0000000-0000-4000-8000-000000000001', '2026-10-30', 5, 'connector', 'b0000000-0000-4000-8000-000000000001'),
+        ('a0000000-0000-4000-8000-000000000001', '2026-10-31', 6, 'connector', 'c0000000-0000-4000-8000-00000000dead');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const agg = await client.query<{ key: string; aggregation: string }>("select key, aggregation from metric_definitions order by id");
+    expect(agg.rows).toEqual([
+      { key: "orders_day", aggregation: "sum" },
+      { key: "on_time_pct", aggregation: "avg" },
+      { key: "couriers_active", aggregation: "last" },
+      { key: "intercompany_debt", aggregation: "last" },
+    ]);
+    const runs = await client.query<{ period_start: string; connector_run_id: string | null }>(
+      "select period_start::text, connector_run_id from metric_values order by period_start",
+    );
+    expect(runs.rows).toEqual([
+      { period_start: "2026-10-30", connector_run_id: "b0000000-0000-4000-8000-000000000001" },
+      { period_start: "2026-10-31", connector_run_id: null },
+    ]);
+    await expect(
+      client.exec(
+        `insert into metric_values (metric_id, period_start, value, source, connector_run_id) values ('a0000000-0000-4000-8000-000000000001', '2026-10-29', 1, 'connector', 'c0000000-0000-4000-8000-00000000beef')`,
+      ),
+    ).rejects.toThrow(/foreign key/);
+    await client.exec(
+      `insert into connector_runs (connector_id, company_id, status, range_from, range_to, details) values ('kiwigo-app', '${C}', 'running', '2026-10-01', '2026-10-31', '{"conflicts":[]}')`,
+    );
+    // Deleting a run keeps the values (the link is cleared).
+    await client.exec(`delete from connector_runs where id = 'b0000000-0000-4000-8000-000000000001'`);
+    expect((await client.query("select 1 from metric_values")).rows).toHaveLength(2);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();

@@ -78,30 +78,76 @@ export function formatPeriodShort(start: IsoDate, g: Granularity): string {
   return `${d} ${mon}`;
 }
 
+/** How precise a typed date is: a calendar day, or only a month ("2026-10", "Oct 2026"). */
+export type DatePrecision = "day" | "month";
+
 /**
- * Parses a period typed in a form or a spreadsheet cell and returns the start of the
- * period containing it: "2026-10-31", "31.10.2026", "31/10/2026", "2026-10", "10.2026",
- * "Oct 2026", or an Excel serial day number. Null when it is not a date.
+ * Parses a date typed in a form or a spreadsheet cell: "2026-10-31", "31.10.2026",
+ * "31/10/2026", "2026-10", "10.2026", "Oct 2026", or an Excel serial day number.
+ * A time is accepted only when it is exactly midnight without a time zone
+ * ("2026-10-31 00:00", "31.10.2026 0:00:00": how spreadsheets export plain dates);
+ * any other time, "T…" or a zone is refused (null): which day it means depends on the
+ * time zone, and we never guess.
  */
-export function parsePeriodInput(raw: string, g: Granularity): IsoDate | null {
-  const s = raw.trim();
+export function parseDateCell(raw: string): { date: IsoDate; precision: DatePrecision } | null {
+  let s = raw.trim();
   if (!s) return null;
+  const midnight = /\s+0?0:00(:00(\.0+)?)?$/;
+  if (midnight.test(s)) s = s.replace(midnight, "");
   let iso: string | null = null;
+  let precision: DatePrecision = "day";
   let m: RegExpExecArray | null;
-  if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ].*)?$/.exec(s))) iso = `${m[1]}-${m[2]!.padStart(2, "0")}-${m[3]!.padStart(2, "0")}`;
+  if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s))) iso = `${m[1]}-${m[2]!.padStart(2, "0")}-${m[3]!.padStart(2, "0")}`;
   else if ((m = /^(\d{1,2})[./](\d{1,2})[./](\d{4})$/.exec(s))) iso = `${m[3]}-${m[2]!.padStart(2, "0")}-${m[1]!.padStart(2, "0")}`;
-  else if ((m = /^(\d{4})-(\d{1,2})$/.exec(s))) iso = `${m[1]}-${m[2]!.padStart(2, "0")}-01`;
-  else if ((m = /^(\d{1,2})[./](\d{4})$/.exec(s))) iso = `${m[2]}-${m[1]!.padStart(2, "0")}-01`;
-  else if ((m = /^([A-Za-z]{3})[a-z]*\.?\s+(\d{4})$/.exec(s))) {
+  else if ((m = /^(\d{4})-(\d{1,2})$/.exec(s))) {
+    iso = `${m[1]}-${m[2]!.padStart(2, "0")}-01`;
+    precision = "month";
+  } else if ((m = /^(\d{1,2})[./](\d{4})$/.exec(s))) {
+    iso = `${m[2]}-${m[1]!.padStart(2, "0")}-01`;
+    precision = "month";
+  } else if ((m = /^([A-Za-z]{3})[a-z]*\.?\s+(\d{4})$/.exec(s))) {
     const idx = MONTHS.findIndex((x) => x.toLowerCase() === m![1]!.toLowerCase());
     if (idx >= 0) iso = `${m[2]}-${String(idx + 1).padStart(2, "0")}-01`;
+    precision = "month";
   } else if (/^\d{5}$/.test(s)) {
     const serial = Number(s);
     // Excel day numbers (1900 system) between 1990 and 2100.
     if (serial > 32_000 && serial < 73_000) iso = addDays("1899-12-30", serial);
   }
   if (!iso || !isIsoDate(iso)) return null;
-  return periodStart(iso, g);
+  return { date: iso, precision };
+}
+
+/** True when the text carries a time of day (other than plain midnight) or a time zone. */
+export function hasTimePart(raw: string): boolean {
+  return /^\d{4}-\d{1,2}-\d{1,2}[T ]/.test(raw.trim()) && parseDateCell(raw) === null;
+}
+
+/** Start of the period containing a typed date (see `parseDateCell`). Null when it is not a date. */
+export function parsePeriodInput(raw: string, g: Granularity): IsoDate | null {
+  const d = parseDateCell(raw);
+  return d ? periodStart(d.date, g) : null;
+}
+
+/**
+ * Latest period a value may be entered for at `today`: today for daily numbers, the last
+ * COMPLETED week / month otherwise (a month-to-date total is not the month's number).
+ */
+export function lastEnterablePeriod(today: IsoDate, g: Granularity): IsoDate {
+  return g === "day" ? today : prevPeriod(periodStart(today, g), g);
+}
+
+/** Why a value can't be entered for this period at `today` (null = fine). */
+export function periodProblem(start: IsoDate, g: Granularity, today: IsoDate): string | null {
+  const current = periodStart(today, g);
+  if (start > current) return "That period is in the future";
+  if (g !== "day" && start === current) return g === "week" ? "This week isn't finished yet" : "This month isn't finished yet";
+  return null;
+}
+
+/** A period is complete once its last day is before `today`. */
+export function isPeriodComplete(start: IsoDate, g: Granularity, today: IsoDate): boolean {
+  return periodEnd(start, g) < today;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,11 +156,21 @@ export function parsePeriodInput(raw: string, g: Granularity): IsoDate | null {
 
 export type FreshnessStatus = "fresh" | "stale" | "very_stale" | "missing";
 
+/**
+ * How many recent periods are checked for gaps: 7 days, 4 weeks, 3 months. A missing
+ * value inside this window is chased even when a later period already has a value.
+ */
+export const GAP_WINDOW: Record<Granularity, number> = { day: 7, week: 4, month: 3 };
+
 export interface Freshness {
   status: FreshnessStatus;
-  /** Periods whose data is overdue (capped at 3; 3 means "3 or more"). */
+  /** Number of due periods without a value inside the gap window (0 when fresh). */
   overduePeriods: number;
-  /** First period we are waiting for (null when fresh). */
+  /** Those periods, oldest first. */
+  missingPeriods: IsoDate[];
+  /** True when the latest value is older than the whole window (more may be missing). */
+  moreBeforeWindow: boolean;
+  /** Oldest period we are waiting for (null when fresh). */
   waitingFor: IsoDate | null;
   /** Day the data for `waitingFor` was due. */
   dueOn: IsoDate | null;
@@ -139,33 +195,76 @@ export function expectedPeriod(today: IsoDate, g: Granularity, dueDays?: number 
 }
 
 /**
- * Fresh: we have the latest period that is due. Stale (warn): one period overdue.
- * Very stale (risk): two or more overdue. Missing (risk): no value at all.
+ * Fresh: every due period in the gap window (GAP_WINDOW) has a value. Stale (warn): one
+ * is missing. Very stale (risk): two or more are missing. Missing (risk): no value at all.
+ * Periods before the metric's first value are not gaps (it was not tracked yet).
+ *
+ * `periods` are the periods that have a current value (at least those inside the window);
+ * when omitted, every period up to `latestPeriod` counts as present (only trailing gaps).
  * All dates are Asia/Bishkek calendar days, so "after the 10th" switches at local midnight.
  */
 export function metricFreshness(
-  input: { granularity: Granularity; dueDays?: number | null; latestPeriod: IsoDate | null },
+  input: {
+    granularity: Granularity;
+    dueDays?: number | null;
+    latestPeriod: IsoDate | null;
+    firstPeriod?: IsoDate | null;
+    periods?: Iterable<IsoDate>;
+  },
   today: IsoDate,
 ): Freshness {
   const g = input.granularity;
   const expected = expectedPeriod(today, g, input.dueDays);
   if (!input.latestPeriod) {
-    return { status: "missing", overduePeriods: 3, waitingFor: expected, dueOn: periodDueDate(expected, g, input.dueDays), expectedPeriod: expected };
+    return {
+      status: "missing",
+      overduePeriods: GAP_WINDOW[g],
+      missingPeriods: [],
+      moreBeforeWindow: false,
+      waitingFor: expected,
+      dueOn: periodDueDate(expected, g, input.dueDays),
+      expectedPeriod: expected,
+    };
   }
   const latest = periodStart(input.latestPeriod, g);
-  if (latest >= expected) {
-    return { status: "fresh", overduePeriods: 0, waitingFor: null, dueOn: null, expectedPeriod: expected };
-  }
-  const waitingFor = nextPeriod(latest, g);
-  let overdue = 0;
-  for (let p = waitingFor; p <= expected && overdue < 3; p = nextPeriod(p, g)) overdue++;
+  const first = input.firstPeriod ? periodStart(input.firstPeriod, g) : null;
+  const have = input.periods ? new Set([...input.periods].map((p) => periodStart(p, g))) : null;
+  const window = lastPeriods(expected, g, GAP_WINDOW[g]);
+  const missing = window.filter((p) => {
+    if (first && p < first) return false;
+    if (have) return !have.has(p);
+    return p > latest;
+  });
+  const waitingFor = missing[0] ?? null;
   return {
-    status: overdue >= 2 ? "very_stale" : "stale",
-    overduePeriods: overdue,
+    status: missing.length === 0 ? "fresh" : missing.length === 1 ? "stale" : "very_stale",
+    overduePeriods: missing.length,
+    missingPeriods: missing,
+    moreBeforeWindow: latest < window[0]!,
     waitingFor,
-    dueOn: periodDueDate(waitingFor, g, input.dueDays),
+    dueOn: waitingFor ? periodDueDate(waitingFor, g, input.dueDays) : null,
     expectedPeriod: expected,
   };
+}
+
+/**
+ * Period the "Enter value" form opens with: the oldest missing period in the gap window;
+ * otherwise the period after the latest value (when it may be entered already); otherwise
+ * the latest enterable period.
+ */
+export function defaultEntryPeriod(
+  m: { granularity: Granularity; freshness: Freshness; latestPeriod: IsoDate | null },
+  today: IsoDate,
+): IsoDate {
+  const g = m.granularity;
+  const max = lastEnterablePeriod(today, g);
+  if (m.freshness.status === "missing") return m.freshness.expectedPeriod <= max ? m.freshness.expectedPeriod : max;
+  if (m.freshness.waitingFor) return m.freshness.waitingFor;
+  if (m.latestPeriod) {
+    const next = nextPeriod(periodStart(m.latestPeriod, g), g);
+    return next <= max ? next : max;
+  }
+  return max;
 }
 
 export type FreshnessTone = "ok" | "warn" | "risk";
@@ -228,19 +327,89 @@ export function changeVsPrevious(values: readonly PeriodValue[], g: Granularity,
 // ---------------------------------------------------------------------------
 
 export const MAX_METRIC_ABS = 1_000_000_000_000;
+/** A double keeps 15 significant digits exactly; longer numbers would be changed silently. */
+export const MAX_SIGNIFICANT_DIGITS = 15;
+export const MAX_DECIMALS = 4;
 
 /**
- * Parses "1 234,5", "1,234.5", "85 000 сом", "12.5%", "-300". NaN when not a number.
+ * Removes binary floating-point noise from a number that came from a spreadsheet or a
+ * calculation (0.955 * 100 = 95.49999999999999 → 95.5). Keeps 15 significant digits,
+ * which is exactly what Excel stores and shows; it never rounds a typed value.
  */
+export function cleanFloat(n: number): number {
+  return Number.isFinite(n) ? Number(n.toPrecision(15)) : n;
+}
+
+/** Digits after the decimal point, from the number's shortest exact text (not by multiplying). */
+export function decimalPlaces(n: number): number {
+  const s = String(Math.abs(n));
+  const m = /^(\d+)(?:\.(\d+))?(?:e([+-]\d+))?$/i.exec(s);
+  if (!m) return Number.POSITIVE_INFINITY;
+  const frac = m[2]?.length ?? 0;
+  const exp = m[3] ? Number(m[3]) : 0;
+  return Math.max(0, frac - exp);
+}
+
+function significantDigits(digits: string): number {
+  return digits.replace(/[^0-9]/g, "").replace(/^0+/, "").length;
+}
+
+/**
+ * Parses a number typed in a form, a grid cell or a CSV: "1 234,5", "1,234.5",
+ * "85 000 сом", "12.5%", "-300". Refuses (with a message) what could mean two things:
+ * "85.000" / "12,345" (thousands or decimals?), a "%" for a number that is not a
+ * percentage, more than 15 significant digits.
+ */
+export function parseMetricInput(raw: unknown, unit: string): { value: number } | { error: string } {
+  if (typeof raw === "number") {
+    const problem = metricValueProblem(raw, unit);
+    return problem ? { error: problem } : { value: raw };
+  }
+  if (typeof raw !== "string") return { error: "Not a number" };
+  const shown = raw.trim();
+  let s = shown.replace(/[\s\u00a0\u202f]/g, "");
+  const percent = /%$/.test(s);
+  s = s.replace(/(сом|kgs|som|шт|pcs|%)\.?$/i, "");
+  if (s === "" || s === "-") return { error: `Not a number: “${shown}”` };
+  if (percent && unit !== "%") return { error: `“${shown}” is a percentage, but this number is in ${unit}` };
+  if (/^-?[1-9]\d{0,2}[.,]\d{3}$/.test(s)) {
+    const neg = s.startsWith("-") ? "-" : "";
+    const [a, b] = s.replace(/^-/, "").split(/[.,]/);
+    const asDecimal = `${neg}${String(Number(`${a}.${b}`))}`;
+    const asThousands = `${neg}${a}${b}`;
+    const decimalHint = Number(b) === 0 ? asDecimal : `${neg}${a}.${b}0`;
+    return {
+      error: `“${shown}” is ambiguous: ${asDecimal} or ${asThousands}? Write ${asThousands} if you mean thousands, or ${decimalHint} for a decimal`,
+    };
+  }
+  if (/^-?[1-9]\d{0,2}(,\d{3})+(\.\d+)?$/.test(s)) s = s.replace(/,/g, "");
+  else if (/^-?\d+,\d+$/.test(s)) s = s.replace(",", ".");
+  if (!/^-?\d+(\.\d+)?$/.test(s)) return { error: `Not a number: “${shown}”` };
+  if (significantDigits(s) > MAX_SIGNIFICANT_DIGITS) return { error: `Too many digits (at most ${MAX_SIGNIFICANT_DIGITS})` };
+  const frac = s.split(".")[1]?.length ?? 0;
+  if (frac > MAX_DECIMALS) return { error: `At most ${MAX_DECIMALS} decimals` };
+  const value = Number(s);
+  const problem = metricValueProblem(value, unit);
+  return problem ? { error: problem } : { value };
+}
+
+/** Number or NaN (no unit checks). Prefer `parseMetricInput`, which explains refusals. */
 export function parseMetricNumber(v: unknown): number {
   if (typeof v === "number") return v;
-  if (typeof v !== "string") return Number.NaN;
-  let s = v.replace(/[\s  ]/g, "").replace(/(сом|kgs|som|шт|pcs|%)\.?$/i, "");
-  if (s === "" || s === "-") return Number.NaN;
-  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) s = s.replace(/,/g, "");
-  else if (/^-?\d+,\d+$/.test(s)) s = s.replace(",", ".");
-  if (!/^-?\d+(\.\d+)?$/.test(s)) return Number.NaN;
-  return Number(s);
+  const r = parseMetricInput(v, "%");
+  if ("value" in r) return r.value;
+  // Range problems of "%" still mean "a number": re-parse as money (negatives allowed).
+  const n = parseMetricInput(v, "KGS");
+  return "value" in n ? n.value : Number.NaN;
+}
+
+/**
+ * A stored number as text for an input (grid prefill) that `parseMetricInput` reads back
+ * as the same number: "85.125" would be ambiguous, so it becomes "85.1250".
+ */
+export function formatMetricInput(n: number): string {
+  const s = String(n);
+  return /^-?[1-9]\d{0,2}\.\d{3}$/.test(s) ? `${s}0` : s;
 }
 
 /** User-facing validation message, or null when the value is fine for this unit. */
@@ -249,8 +418,26 @@ export function metricValueProblem(value: number, unit: string): string | null {
   if (Math.abs(value) >= MAX_METRIC_ABS) return "Number is too large";
   if (unit === "%" && (value < 0 || value > 100)) return "A percentage must be between 0 and 100";
   if (unit !== "KGS" && value < 0) return "Can't be negative";
-  if (Math.abs(Math.round(value * 10_000) - value * 10_000) > 1e-6) return "At most 4 decimals";
+  if (decimalPlaces(value) > MAX_DECIMALS) return `At most ${MAX_DECIMALS} decimals`;
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Aggregation (connector points finer than the metric's period)
+// ---------------------------------------------------------------------------
+
+export type Aggregation = "sum" | "avg" | "last";
+
+/**
+ * One value for a week/month from its daily points: sum (orders, money), avg
+ * (percentages; rounded to 4 decimals, the stored precision) or last (the latest day).
+ */
+export function aggregateValues(points: readonly { day: IsoDate; value: number }[], how: Aggregation): number {
+  if (points.length === 0) return Number.NaN;
+  if (how === "last") return [...points].sort((a, b) => (a.day < b.day ? -1 : 1)).at(-1)!.value;
+  const sum = points.reduce((n, p) => n + p.value, 0);
+  if (how === "sum") return cleanFloat(sum);
+  return Math.round((sum / points.length) * 10_000) / 10_000;
 }
 
 /** "12 345 KGS", "96.5%", "120 orders". */

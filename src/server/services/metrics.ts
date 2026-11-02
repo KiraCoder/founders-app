@@ -1,16 +1,21 @@
 import "server-only";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
 import { todayInTimeZone, type IsoDate } from "@/lib/dates";
 import { metricGridInputSchema, metricValueInputSchema, type MetricValueInput } from "@/lib/metric-schemas";
 import {
   changeVsPrevious,
   dueDaysFor,
+  expectedPeriod,
+  GAP_WINDOW,
+  hasTimePart,
+  isPeriodComplete,
   lastPeriods,
   metricFreshness,
-  metricValueProblem,
-  parseMetricNumber,
+  parseMetricInput,
   parsePeriodInput,
+  periodProblem,
   periodStart,
+  type Aggregation,
   type Change,
   type Direction,
   type Freshness,
@@ -18,13 +23,16 @@ import {
   type Granularity,
   type PeriodValue,
 } from "@/lib/metrics";
+import { defaultRegistry, type ConnectorRegistry } from "@/server/connectors/registry";
 import type { Db } from "@/server/db/connect";
 import {
   companies,
   companyUnits,
+  connectorRuns,
   metricDefinitions,
   metricValues,
   users,
+  type ConnectorRunConflict,
   type MetricSource,
 } from "@/server/db/schema";
 import { assertCompanyAccess, assertMetricAccess, visibleMetricsWhere } from "./access";
@@ -56,6 +64,8 @@ export interface MetricView {
   aliases: string[];
   unit: string;
   granularity: Granularity;
+  /** How a connector's daily points are combined into one week / month value. */
+  aggregation: Aggregation;
   direction: Direction;
   /** Effective "due N days after the period" (default per granularity when not set). */
   dueDays: number;
@@ -74,14 +84,29 @@ export interface MetricLatest {
   enteredDay: IsoDate;
   enteredByName: string | null;
   note: string | null;
+  /** The period is not over yet (a daily number entered for today): "so far". */
+  inProgress: boolean;
+}
+
+/** A data source reported another number than the one a founder entered / uploaded (kept). */
+export interface MetricDisagreement {
+  period: IsoDate;
+  kept: number;
+  keptSource: "manual" | "upload";
+  reported: number;
+  connectorId: string;
+  at: string;
 }
 
 export interface MetricCard extends MetricView {
   latest: MetricLatest | null;
   /** Current values of the last 12 periods (null = no value), oldest first. */
   series: { period: IsoDate; value: number | null }[];
+  /** Latest COMPLETE period vs the one before it (in-progress periods are never compared). */
   change: Change | null;
   freshness: Freshness;
+  /** Unresolved "source disagrees" from the latest run of the metric's connector. */
+  disagreements: MetricDisagreement[];
 }
 
 const num = (v: string | number | null): number | null => (v === null ? null : Number(v));
@@ -116,6 +141,7 @@ async function loadDefinitions(ctx: ServiceContext, extra?: ReturnType<typeof eq
     aliases: d.aliases ?? [],
     unit: d.unit,
     granularity: d.granularity,
+    aggregation: d.aggregation,
     direction: d.direction,
     dueDays: dueDaysFor(d.granularity, d.dueDays),
     target: num(d.target),
@@ -137,15 +163,85 @@ export async function getMetric(ctx: ServiceContext, metricId: string): Promise<
   return m;
 }
 
-/** Latest current value period per metric (for freshness). */
-async function latestPeriods(db: Db, metricIds: string[]): Promise<Map<string, IsoDate>> {
+interface FreshnessInputs {
+  first: IsoDate;
+  latest: IsoDate;
+  /** Periods with a current value inside (at least) the gap window. */
+  periods: Set<IsoDate>;
+}
+
+/** First / latest period and the recent periods with a value, per metric (for freshness). */
+async function freshnessInputs(db: Db, metricIds: string[], todayIso: IsoDate): Promise<Map<string, FreshnessInputs>> {
   if (metricIds.length === 0) return new Map();
-  const rows = await db
-    .select({ metricId: metricValues.metricId, period: sql<string>`max(${metricValues.periodStart})::text` })
+  const bounds = await db
+    .select({
+      metricId: metricValues.metricId,
+      first: sql<string>`min(${metricValues.periodStart})::text`,
+      latest: sql<string>`max(${metricValues.periodStart})::text`,
+    })
     .from(metricValues)
     .where(and(inArray(metricValues.metricId, metricIds), eq(metricValues.isCurrent, true)))
     .groupBy(metricValues.metricId);
-  return new Map(rows.map((r) => [r.metricId, r.period]));
+  // Oldest period any gap window can reach (monthly: 3 months before the expected month).
+  const since = (["day", "week", "month"] as const)
+    .map((g) => lastPeriods(expectedPeriod(todayIso, g), g, GAP_WINDOW[g])[0]!)
+    .sort()[0]!;
+  const recent = await db
+    .select({ metricId: metricValues.metricId, period: metricValues.periodStart })
+    .from(metricValues)
+    .where(and(inArray(metricValues.metricId, metricIds), eq(metricValues.isCurrent, true), gte(metricValues.periodStart, since)));
+  const out = new Map<string, FreshnessInputs>();
+  for (const b of bounds) out.set(b.metricId, { first: b.first, latest: b.latest, periods: new Set() });
+  for (const r of recent) out.get(r.metricId)?.periods.add(r.period);
+  return out;
+}
+
+function freshnessOf(def: MetricView, inputs: FreshnessInputs | undefined, todayIso: IsoDate): Freshness {
+  return metricFreshness(
+    {
+      granularity: def.granularity,
+      dueDays: def.dueDays,
+      latestPeriod: inputs?.latest ?? null,
+      firstPeriod: inputs?.first ?? null,
+      periods: inputs?.periods ?? [],
+    },
+    todayIso,
+  );
+}
+
+/**
+ * Unresolved disagreements: conflicts recorded by the LATEST finished run of each
+ * connector, whose kept (founder's) value is still the current one.
+ */
+async function loadDisagreements(db: Db, defs: MetricView[]): Promise<Map<string, MetricDisagreement[]>> {
+  const out = new Map<string, MetricDisagreement[]>();
+  if (defs.length === 0) return out;
+  const companyIds = [...new Set(defs.map((d) => d.companyId))];
+  // Any source of the metric's company counts (the metric may be fed by another source than expected).
+  const runs = await db
+    .select({ connectorId: connectorRuns.connectorId, companyId: connectorRuns.companyId, details: connectorRuns.details, at: connectorRuns.startedAt })
+    .from(connectorRuns)
+    .where(and(inArray(connectorRuns.companyId, companyIds), eq(connectorRuns.status, "ok"), isNotNull(connectorRuns.finishedAt)))
+    .orderBy(desc(connectorRuns.startedAt))
+    .limit(200);
+  const latestRun = new Map<string, (typeof runs)[number]>();
+  for (const r of runs) if (!latestRun.has(`${r.connectorId}|${r.companyId}`)) latestRun.set(`${r.connectorId}|${r.companyId}`, r);
+  const defIds = new Set(defs.map((d) => d.id));
+  const conflicts: (ConnectorRunConflict & { connectorId: string; at: Date })[] = [];
+  for (const r of latestRun.values()) {
+    for (const c of r.details?.conflicts ?? []) if (defIds.has(c.metricId)) conflicts.push({ ...c, connectorId: r.connectorId, at: r.at });
+  }
+  if (conflicts.length === 0) return out;
+  const current = await currentValues(db, [...new Set(conflicts.map((c) => c.metricId))]);
+  for (const c of conflicts) {
+    const now = current.get(`${c.metricId}|${c.period}`);
+    if (now === undefined || !sameNumber(now, c.kept) || sameNumber(now, c.reported)) continue;
+    const list = out.get(c.metricId) ?? [];
+    list.push({ period: c.period, kept: c.kept, keptSource: c.keptSource, reported: c.reported, connectorId: c.connectorId, at: c.at.toISOString() });
+    out.set(c.metricId, list);
+  }
+  for (const list of out.values()) list.sort((a, b) => (a.period < b.period ? 1 : -1));
+  return out;
 }
 
 /** Definitions + latest value, sparkline series, change and freshness. */
@@ -175,6 +271,7 @@ export async function buildMetricCards(ctx: ServiceContext, defs: MetricView[]):
     byMetric.set(r.metricId, list);
   }
   const t = today(ctx);
+  const [inputs, disagreements] = await Promise.all([freshnessInputs(ctx.db, ids, t), loadDisagreements(ctx.db, defs)]);
   return defs.map((d) => {
     const vals = (byMetric.get(d.id) ?? []).sort((a, b) => (a.period < b.period ? 1 : -1));
     const top = vals[0];
@@ -190,14 +287,18 @@ export async function buildMetricCards(ctx: ServiceContext, defs: MetricView[]):
           enteredDay: todayInTimeZone(top.createdAt, ctx.timeZone),
           enteredByName: top.enteredByName ?? null,
           note: top.note,
+          inProgress: !isPeriodComplete(top.period, d.granularity, t),
         }
       : null;
+    // A period that is not over (today's daily number) is never compared: partial vs full.
+    const complete = points.filter((p) => isPeriodComplete(p.period, d.granularity, t));
     return {
       ...d,
       latest,
       series: lastPeriods(end, d.granularity, SPARK_PERIODS).map((p) => ({ period: p, value: byPeriod.get(p) ?? null })),
-      change: changeVsPrevious(points, d.granularity, d.direction),
-      freshness: metricFreshness({ granularity: d.granularity, dueDays: d.dueDays, latestPeriod: top?.period ?? null }, t),
+      change: latest && !latest.inProgress ? changeVsPrevious(complete, d.granularity, d.direction) : null,
+      freshness: freshnessOf(d, inputs.get(d.id), t),
+      disagreements: disagreements.get(d.id) ?? [],
     };
   });
 }
@@ -251,11 +352,15 @@ export async function listMetricValues(
 // Writes
 // ---------------------------------------------------------------------------
 
-export type WriteAction = "created" | "updated" | "unchanged";
+export type WriteAction = "created" | "updated" | "unchanged" | "conflict";
 
 export interface WriteMeta {
   source: MetricSource;
   enteredBy: string | null;
+  /**
+   * undefined = leave the note as it is; null or "" = no note (clears an existing one when
+   * the value is the same); text = this note.
+   */
   note?: string | null;
   connectorRunId?: string | null;
   now: Date;
@@ -265,8 +370,13 @@ const sameNumber = (a: number, b: number) => Math.abs(a - b) < 1e-9;
 
 /**
  * Writes one value. MUST run inside a transaction (`db` is the transaction): the metric
- * row is locked so two writers for the same metric never both become "current".
- * Same value (and no new note) → unchanged, nothing written.
+ * row is locked so two writers for the same metric never both become "current". Callers
+ * writing several metrics lock them in metric-id order (see `byMetricThenPeriod`), so two
+ * transactions never wait on each other in a cycle.
+ *
+ * Same value and same note → unchanged, nothing written. A connector never replaces a
+ * value a founder entered or uploaded: when the numbers differ the result is "conflict"
+ * (nothing written; the runner records it so the card shows "source disagrees").
  */
 export async function writeMetricValueTx(
   tx: Db,
@@ -274,17 +384,24 @@ export async function writeMetricValueTx(
   period: IsoDate,
   value: number,
   meta: WriteMeta,
-): Promise<{ action: WriteAction; id: string | null; previous: number | null }> {
+): Promise<{ action: WriteAction; id: string | null; previous: number | null; previousSource: MetricSource | null }> {
   await tx.select({ id: metricDefinitions.id }).from(metricDefinitions).where(eq(metricDefinitions.id, metricId)).for("update");
   const [current] = await tx
-    .select({ id: metricValues.id, value: metricValues.value, note: metricValues.note })
+    .select({ id: metricValues.id, value: metricValues.value, note: metricValues.note, source: metricValues.source })
     .from(metricValues)
     .where(and(eq(metricValues.metricId, metricId), eq(metricValues.periodStart, period), eq(metricValues.isCurrent, true)));
   const previous = current ? Number(current.value) : null;
-  const note = meta.note?.trim() || null;
-  if (current && previous !== null && sameNumber(previous, value) && (note === null || note === current.note)) {
-    return { action: "unchanged", id: current.id, previous };
+  const previousSource = current?.source ?? null;
+  const keepNote = meta.note === undefined;
+  const note = keepNote ? (current?.note ?? null) : meta.note?.trim() || null;
+  if (current && previous !== null && sameNumber(previous, value) && (keepNote || note === current.note)) {
+    return { action: "unchanged", id: current.id, previous, previousSource };
   }
+  if (current && meta.source === "connector" && current.source !== "connector") {
+    return { action: sameNumber(previous!, value) ? "unchanged" : "conflict", id: current.id, previous, previousSource };
+  }
+  // A changed value starts without the old note (it was about the old number) unless one is given.
+  const newNote = keepNote ? null : note;
   if (current) await tx.update(metricValues).set({ isCurrent: false }).where(eq(metricValues.id, current.id));
   const [row] = await tx
     .insert(metricValues)
@@ -296,27 +413,39 @@ export async function writeMetricValueTx(
       isCurrent: true,
       enteredBy: meta.enteredBy,
       connectorRunId: meta.connectorRunId ?? null,
-      note,
+      note: newNote,
       createdAt: meta.now,
     })
     .returning({ id: metricValues.id });
-  return { action: current ? "updated" : "created", id: row!.id, previous };
+  return { action: current ? "updated" : "created", id: row!.id, previous, previousSource };
 }
 
-/** Validates a period for a metric: parsed, normalized to its start, not in the future. */
+/** Sort order for multi-metric writes: metric id, then period (fixed lock order, no deadlocks). */
+export function byMetricThenPeriod<T extends { metricId: string; period: string }>(a: T, b: T): number {
+  return a.metricId < b.metricId ? -1 : a.metricId > b.metricId ? 1 : a.period < b.period ? -1 : a.period > b.period ? 1 : 0;
+}
+
+/**
+ * Validates a period for a metric: parsed, normalized to its start, not in the future and,
+ * for weekly / monthly numbers, not the current unfinished week / month (a month-to-date
+ * total is not the month's number). Daily numbers may be entered for today.
+ */
 export function resolvePeriod(raw: string, g: Granularity, todayIso: IsoDate): IsoDate {
+  if (hasTimePart(raw)) {
+    throw new ServiceError("validation", "Give the date without a time (YYYY-MM-DD)", { period: ["Date only, no time"] });
+  }
   const p = parsePeriodInput(raw, g);
   if (!p) throw new ServiceError("validation", "Period not recognised (use e.g. 2026-10-31 or 2026-10)", { period: ["Not a date"] });
-  if (p > periodStart(todayIso, g)) throw new ServiceError("validation", "That period is in the future", { period: ["In the future"] });
+  const problem = periodProblem(p, g, todayIso);
+  if (problem) throw new ServiceError("validation", problem, { period: [problem] });
   if (p < "2000-01-01") throw new ServiceError("validation", "That period is too far back", { period: ["Too old"] });
   return p;
 }
 
 export function resolveValue(raw: unknown, unit: string): number {
-  const n = parseMetricNumber(raw);
-  const problem = metricValueProblem(n, unit);
-  if (problem) throw new ServiceError("validation", problem, { value: [problem] });
-  return n;
+  const r = parseMetricInput(raw, unit);
+  if ("error" in r) throw new ServiceError("validation", r.error, { value: [r.error] });
+  return r.value;
 }
 
 /** Manual entry (Overview "Enter value", REST POST). */
@@ -334,10 +463,12 @@ export async function recordMetricValue(
     writeMetricValueTx(tx as unknown as Db, metric.id, period, value, {
       source,
       enteredBy: ctx.user.id,
-      note: data.note ?? null,
+      // Omitted = keep the note; null or "" = remove it.
+      note: data.note === undefined ? undefined : data.note,
       now: ctx.now,
     }),
   );
+  if (res.action === "conflict") throw new ServiceError("conflict", "Could not save the value");
   return { action: res.action, period, value };
 }
 
@@ -373,6 +504,7 @@ export async function saveMetricGrid(ctx: ServiceContext, companyId: string, raw
       result.errors.push({ metricId: c.metricId, period: c.period, message: `${def.label}: ${err.message}` });
     }
   }
+  valid.sort(byMetricThenPeriod);
   await ctx.db.transaction(async (tx) => {
     for (const v of valid) {
       const r = await writeMetricValueTx(tx as unknown as Db, v.metricId, v.period, v.value, {
@@ -380,7 +512,7 @@ export async function saveMetricGrid(ctx: ServiceContext, companyId: string, raw
         enteredBy: ctx.user.id,
         now: ctx.now,
       });
-      result[r.action]++;
+      if (r.action !== "conflict") result[r.action]++;
     }
   });
   return result;
@@ -416,14 +548,11 @@ export interface CompanyFreshness {
   missing: number;
 }
 
-async function freshnessOfAll(ctx: ServiceContext): Promise<{ def: MetricView; freshness: Freshness }[]> {
+async function freshnessOfAll(ctx: ServiceContext): Promise<{ def: MetricView; freshness: Freshness; hasData: boolean }[]> {
   const defs = await loadDefinitions(ctx);
-  const latest = await latestPeriods(ctx.db, defs.map((d) => d.id));
   const t = today(ctx);
-  return defs.map((def) => ({
-    def,
-    freshness: metricFreshness({ granularity: def.granularity, dueDays: def.dueDays, latestPeriod: latest.get(def.id) ?? null }, t),
-  }));
+  const inputs = await freshnessInputs(ctx.db, defs.map((d) => d.id), t);
+  return defs.map((def) => ({ def, freshness: freshnessOf(def, inputs.get(def.id), t), hasData: inputs.has(def.id) }));
 }
 
 /** One row per company with metrics: how many numbers are fresh, stale (overdue) or missing. */
@@ -456,17 +585,30 @@ export interface StaleMetric {
   waitingFor: IsoDate;
   dueOn: IsoDate;
   overduePeriods: number;
+  /** The metric has at least one value (it is late, not just never started). */
+  hasData: boolean;
+  /**
+   * Expected from a data source that is not set up yet (e.g. "Edil's APIs", "WB token"):
+   * the short reason; null when the metric is entered by hand or its source is set up.
+   */
+  awaitingSource: string | null;
 }
 
 /**
  * Hook for the notification planner: metrics whose data is overdue for this user at
  * `ctx.now` (company data is shared, so both founders get the same list). Ordered by
- * company, then metric. Pure read; it never queues anything itself.
+ * company, then metric. Pure read; it never queues anything itself and never calls a
+ * data source (whether a source is set up is read from its static setup, no network).
  */
-export async function staleMetricsFor(ctx: ServiceContext): Promise<StaleMetric[]> {
+export async function staleMetricsFor(ctx: ServiceContext, opts: { registry?: ConnectorRegistry } = {}): Promise<StaleMetric[]> {
+  const registry = opts.registry ?? defaultRegistry();
   const out: StaleMetric[] = [];
-  for (const { def, freshness } of await freshnessOfAll(ctx)) {
+  for (const { def, freshness, hasData } of await freshnessOfAll(ctx)) {
     if (freshness.status === "fresh" || !freshness.waitingFor || !freshness.dueOn) continue;
+    const connector = def.sourceKind === "connector" && def.connectorId ? registry.get(def.connectorId) : undefined;
+    const setup = connector?.setup();
+    const awaitingSource =
+      def.sourceKind === "connector" && (!setup || !setup.configured) ? (setup?.shortReason ?? "a data source") : null;
     out.push({
       metricId: def.id,
       companyId: def.companyId,
@@ -481,6 +623,8 @@ export async function staleMetricsFor(ctx: ServiceContext): Promise<StaleMetric[
       waitingFor: freshness.waitingFor,
       dueOn: freshness.dueOn,
       overduePeriods: freshness.overduePeriods,
+      hasData,
+      awaitingSource,
     });
   }
   return out;

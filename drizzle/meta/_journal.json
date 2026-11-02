@@ -64,6 +64,13 @@
       "when": 1793658281830,
       "tag": "0008_people_fixes",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793659343314,
+      "tag": "0009_metrics_fixes",
+      "breakpoints": true
     }
   ]
 }

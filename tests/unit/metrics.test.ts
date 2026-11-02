@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { todayInTimeZone } from "@/lib/dates";
 import {
+  aggregateValues,
+  decimalPlaces,
+  defaultEntryPeriod,
+  formatMetricInput,
+  GAP_WINDOW,
+  hasTimePart,
+  lastEnterablePeriod,
+  parseDateCell,
+  parseMetricInput,
+  periodProblem,
   agoText,
   changeVsPrevious,
   expectedPeriod,
@@ -58,7 +68,7 @@ describe("freshness rules", () => {
     const stale = f("2026-10-30", "2026-11-02"); // 3 days old
     expect(stale).toMatchObject({ status: "stale", waitingFor: "2026-10-31", dueOn: "2026-11-01", overduePeriods: 1 });
     expect(f("2026-10-29", "2026-11-02")).toMatchObject({ status: "very_stale", overduePeriods: 2 });
-    expect(f("2026-01-01", "2026-11-02")).toMatchObject({ status: "very_stale", overduePeriods: 3 });
+    expect(f("2026-01-01", "2026-11-02")).toMatchObject({ status: "very_stale", overduePeriods: 7, moreBeforeWindow: true });
     expect(f(null, "2026-11-02")).toMatchObject({ status: "missing", waitingFor: "2026-10-31" });
   });
 
@@ -191,5 +201,101 @@ describe("morning summary: numbers waiting", () => {
     // Few companies: one line each, no overflow line.
     expect(numbersWaitingSection(items.slice(0, 6)).length).toBe(3);
     expect(numbersWaitingSection([])).toEqual([]);
+  });
+});
+
+describe("C4 fixes: exact numbers, periods, aggregation, summary back-off", () => {
+  it("decimal check is string-based: every 2-decimal value from 1M to 10M passes", () => {
+    let rejected = 0;
+    for (let cents = 100_000_000; cents < 1_000_000_000; cents += 7_919) {
+      const v = Number((cents / 100).toFixed(2));
+      if (metricValueProblem(v, "KGS") !== null) rejected++;
+    }
+    expect(rejected).toBe(0);
+    expect(metricValueProblem(1234567.89, "KGS")).toBeNull();
+    expect(decimalPlaces(1234567.89)).toBe(2);
+    expect(decimalPlaces(1e-7)).toBe(7);
+    expect(metricValueProblem(1.23456, "KGS")).toMatch(/4 decimals/);
+  });
+
+  it("parseMetricInput refuses what could mean two things", () => {
+    expect(parseMetricInput("85.000", "orders")).toEqual({ error: expect.stringMatching(/ambiguous: 85 or 85000/) });
+    expect(parseMetricInput("12,345", "KGS")).toEqual({ error: expect.stringMatching(/ambiguous: 12.345 or 12345/) });
+    expect(parseMetricInput("0,125", "%")).toEqual({ value: 0.125 });
+    expect(parseMetricInput("1,234,567", "KGS")).toEqual({ value: 1234567 });
+    expect(parseMetricInput("1 234 567,89", "KGS")).toEqual({ value: 1234567.89 });
+    expect(parseMetricInput("1.2340", "%")).toEqual({ value: 1.234 });
+    expect(parseMetricInput("12.5%", "%")).toEqual({ value: 12.5 });
+    expect(parseMetricInput("12.5%", "KGS")).toEqual({ error: expect.stringMatching(/is a percentage/) });
+    expect(parseMetricInput("1234567890123456", "KGS")).toEqual({ error: expect.stringMatching(/Too many digits|too large/) });
+    expect(formatMetricInput(85.125)).toBe("85.1250");
+    expect(parseMetricInput(formatMetricInput(85.125), "KGS")).toEqual({ value: 85.125 });
+  });
+
+  it("dates: midnight exports are dates, other times are refused; month labels keep month precision", () => {
+    expect(parseDateCell("31.10.2026 0:00:00")).toEqual({ date: "2026-10-31", precision: "day" });
+    expect(parseDateCell("2026-10-31 00:00")).toEqual({ date: "2026-10-31", precision: "day" });
+    expect(parseDateCell("2026-10-31T00:00:00Z")).toBeNull();
+    expect(parseDateCell("2026-10-31 14:00")).toBeNull();
+    expect(hasTimePart("2026-10-31T00:00:00Z")).toBe(true);
+    expect(parseDateCell("Oct 2026")).toEqual({ date: "2026-10-01", precision: "month" });
+    expect(parseDateCell("2026-10")).toEqual({ date: "2026-10-01", precision: "month" });
+  });
+
+  it("week / month numbers only for finished periods; daily may take today", () => {
+    expect(periodProblem("2026-11-01", "month", "2026-11-02")).toBe("This month isn't finished yet");
+    expect(periodProblem("2026-11-02", "week", "2026-11-02")).toBe("This week isn't finished yet");
+    expect(periodProblem("2026-11-02", "day", "2026-11-02")).toBeNull();
+    expect(periodProblem("2026-11-03", "day", "2026-11-02")).toBe("That period is in the future");
+    expect(lastEnterablePeriod("2026-11-02", "month")).toBe("2026-10-01");
+    expect(lastEnterablePeriod("2026-11-02", "week")).toBe("2026-10-26");
+    expect(lastEnterablePeriod("2026-11-02", "day")).toBe("2026-11-02");
+  });
+
+  it("gap window: 7 days / 4 weeks / 3 months; periods before the first value are not gaps", () => {
+    const f = metricFreshness(
+      { granularity: "month", latestPeriod: "2026-09-01", firstPeriod: "2026-07-01", periods: ["2026-07-01", "2026-09-01"] },
+      "2026-11-02",
+    );
+    expect(f).toMatchObject({ status: "stale", missingPeriods: ["2026-08-01"], waitingFor: "2026-08-01" });
+    const young = metricFreshness(
+      { granularity: "day", latestPeriod: "2026-10-31", firstPeriod: "2026-10-30", periods: ["2026-10-30", "2026-10-31"] },
+      "2026-11-02",
+    );
+    expect(young.status).toBe("fresh");
+    expect(GAP_WINDOW).toEqual({ day: 7, week: 4, month: 3 });
+    expect(
+      defaultEntryPeriod({ granularity: "month", freshness: metricFreshness({ granularity: "month", latestPeriod: "2026-10-01" }, "2026-11-02"), latestPeriod: "2026-10-01" }, "2026-11-02"),
+    ).toBe("2026-10-01");
+  });
+
+  it("aggregation: sum, avg (4 decimals), last", () => {
+    const pts = [
+      { day: "2026-10-02", value: 2 },
+      { day: "2026-10-01", value: 1 },
+      { day: "2026-10-03", value: 2 },
+    ];
+    expect(aggregateValues(pts, "sum")).toBe(5);
+    expect(aggregateValues(pts, "avg")).toBe(1.6667);
+    expect(aggregateValues(pts, "last")).toBe(2);
+    expect(aggregateValues([{ day: "2026-10-01", value: 0.1 }, { day: "2026-10-02", value: 0.2 }], "sum")).toBe(0.3);
+  });
+
+  it("morning summary: late numbers daily; never-entered and waiting-for-source only on Mondays, one line each", () => {
+    const items = [
+      { companyName: "Kiwi Go", label: "Revenue", hasData: true, awaitingSource: null },
+      { companyName: "Alura Brand", label: "Sales", hasData: false, awaitingSource: null },
+      ...Array.from({ length: 18 }, (_, i) => ({ companyName: "Kiwi Go", label: `C${i}`, hasData: false, awaitingSource: i < 15 ? "Edil's APIs" : "WB token" })),
+    ];
+    const monday = numbersWaitingSection(items, "2026-11-02").map((l) => l.text);
+    expect(monday).toEqual([
+      "Numbers waiting (20)",
+      "Kiwi Go: Revenue",
+      "Never entered yet: Sales (Alura Brand)",
+      "18 numbers wait for data sources (Edil's APIs, WB token)",
+    ]);
+    const tuesday = numbersWaitingSection(items, "2026-11-03").map((l) => l.text);
+    expect(tuesday).toEqual(["Numbers waiting (1)", "Kiwi Go: Revenue"]);
+    expect(numbersWaitingSection(items.slice(1), "2026-11-03")).toEqual([]);
   });
 });

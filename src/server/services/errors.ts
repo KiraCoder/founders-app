@@ -25,9 +25,26 @@ export class ServiceError extends Error {
   }
 }
 
-/** Converts Zod errors into ServiceError("validation"); passes ServiceErrors through. */
+/** Postgres error code of an error or of its cause (drivers / Drizzle wrap them). */
+function pgCode(err: unknown): string | null {
+  for (let e: unknown = err, i = 0; e && typeof e === "object" && i < 4; e = (e as { cause?: unknown }).cause, i++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)) return code;
+  }
+  return null;
+}
+
+/**
+ * Converts Zod errors into ServiceError("validation"); passes ServiceErrors through.
+ * A deadlock (40P01) or serialization failure (40001) between two saves at the same
+ * moment becomes a "conflict" with a retry hint (nothing of that save was written).
+ */
 export function toServiceError(err: unknown): ServiceError | null {
   if (err instanceof ServiceError) return err;
+  const code = pgCode(err);
+  if (code === "40P01" || code === "40001") {
+    return new ServiceError("conflict", "Someone else saved at the same moment, so nothing was saved. Please try again.");
+  }
   if (err instanceof ZodError) {
     const fields: Record<string, string[]> = {};
     for (const issue of err.issues) {

@@ -2,7 +2,7 @@
  * Builds channel-neutral messages from service-layer data. Pure (no DB, no clock).
  * Everything here is plain text; renderers escape it.
  */
-import { daysBetween, formatDueDate, type IsoDate } from "@/lib/dates";
+import { daysBetween, formatDueDate, isoWeekday, type IsoDate } from "@/lib/dates";
 import type { TaskView, TodaySummary } from "@/server/services/tasks";
 import {
   TASK_ACTION_LABELS,
@@ -43,34 +43,64 @@ function parkedSection(parked: string[]): MessageLine[] {
   ];
 }
 
-/** Max item lines of the "Numbers waiting" section (anti-spam: a short hint, not a list). */
+/** Max item lines for late numbers in the "Numbers waiting" section (anti-spam: a short hint, not a list). */
 export const NUMBERS_WAITING_MAX_LINES = 3;
 
 export interface WaitingNumber {
   companyName: string;
   label: string;
+  /** Had at least one value (it is late). Default true. */
+  hasData?: boolean;
+  /** Expected from a data source that is not set up yet: its short reason ("Edil's APIs"). */
+  awaitingSource?: string | null;
 }
 
 /**
- * "Numbers waiting": metrics whose data is overdue, grouped per company, at most
- * NUMBERS_WAITING_MAX_LINES item lines. Company data is shared, so both founders see it.
+ * "Numbers waiting" in the morning summary (company data is shared, so both founders see it):
+ * - numbers that had data and are late: every day, grouped per company, at most
+ *   NUMBERS_WAITING_MAX_LINES item lines;
+ * - on Mondays only (Asia/Bishkek): ONE line for numbers that never had a value, and ONE
+ *   line for numbers that wait for a data source that is not set up yet
+ *   ("18 numbers wait for data sources (Edil's APIs, WB token)"). Nagging about those
+ *   every day would only teach the founders to ignore the section.
  */
-export function numbersWaitingSection(items: readonly WaitingNumber[]): MessageLine[] {
-  if (!items.length) return [];
-  const byCompany = new Map<string, string[]>();
-  for (const it of items) byCompany.set(it.companyName, [...(byCompany.get(it.companyName) ?? []), it.label]);
-  const groups = [...byCompany.entries()];
-  const max = NUMBERS_WAITING_MAX_LINES;
-  const shown = groups.length > max ? groups.slice(0, max - 1) : groups;
-  const lines: MessageLine[] = [{ text: `Numbers waiting (${items.length})`, style: "heading" }];
-  for (const [company, labels] of shown) {
-    const names = labels.slice(0, 2).join(", ");
-    lines.push({ text: `${company}: ${names}${labels.length > 2 ? ` +${labels.length - 2} more` : ""}`, style: "item" });
+export function numbersWaitingSection(items: readonly WaitingNumber[], today?: IsoDate): MessageLine[] {
+  const monday = today ? isoWeekday(today) === 1 : true;
+  const late = items.filter((i) => !i.awaitingSource && i.hasData !== false);
+  const never = monday ? items.filter((i) => !i.awaitingSource && i.hasData === false) : [];
+  const awaiting = monday ? items.filter((i) => i.awaitingSource) : [];
+  if (!late.length && !never.length && !awaiting.length) return [];
+
+  const lines: MessageLine[] = [{ text: `Numbers waiting (${late.length + never.length + awaiting.length})`, style: "heading" }];
+  if (late.length) {
+    const byCompany = new Map<string, string[]>();
+    for (const it of late) byCompany.set(it.companyName, [...(byCompany.get(it.companyName) ?? []), it.label]);
+    const groups = [...byCompany.entries()];
+    const max = NUMBERS_WAITING_MAX_LINES;
+    const shown = groups.length > max ? groups.slice(0, max - 1) : groups;
+    for (const [company, labels] of shown) {
+      const names = labels.slice(0, 2).join(", ");
+      lines.push({ text: `${company}: ${names}${labels.length > 2 ? ` +${labels.length - 2} more` : ""}`, style: "item" });
+    }
+    if (groups.length > shown.length) {
+      const rest = groups.slice(shown.length);
+      const count = rest.reduce((n, [, l]) => n + l.length, 0);
+      lines.push({ text: `+${count} more in ${rest.length} other companies — enter or upload them in the app`, style: "muted" });
+    }
   }
-  if (groups.length > shown.length) {
-    const rest = groups.slice(shown.length);
-    const count = rest.reduce((n, [, l]) => n + l.length, 0);
-    lines.push({ text: `+${count} more in ${rest.length} other companies — enter or upload them in the app`, style: "muted" });
+  if (never.length) {
+    const names = never.slice(0, 2).map((i) => `${i.label} (${i.companyName})`).join(", ");
+    lines.push({
+      text: `Never entered yet: ${names}${never.length > 2 ? ` +${never.length - 2} more` : ""}`,
+      style: "muted",
+    });
+  }
+  if (awaiting.length) {
+    const reasons = [...new Set(awaiting.map((i) => i.awaitingSource!))].join(", ");
+    lines.push({
+      text: `${awaiting.length} number${awaiting.length === 1 ? "" : "s"} wait${awaiting.length === 1 ? "s" : ""} for data sources (${reasons})`,
+      style: "muted",
+    });
   }
   return lines;
 }
@@ -96,7 +126,7 @@ export function buildMorningSummary(
     ...parkedSection(parked),
   ];
   if (lines.length === 1) lines.push({ text: "Nothing on your plate today.", style: "muted" });
-  lines.push(...numbersWaitingSection(numbersWaiting));
+  lines.push(...numbersWaitingSection(numbersWaiting, s.today));
   return { title: `Good morning, ${firstName}`, lines };
 }
 
