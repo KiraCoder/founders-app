@@ -1,24 +1,32 @@
 import "server-only";
-import { and, asc, count, eq, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, count, eq, gt, gte, inArray, isNull, lt, lte, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { todayInTimeZone, addDays, isWithinWindow, windowEndAfter, zonedTimeToUtc } from "@/lib/dates";
-import type { SessionUser } from "@/server/auth/types";
 import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, reminderSnoozes, type OutboxItem } from "@/server/db/schema";
 import { makeContext, type ServiceContext } from "@/server/services/context";
 import { getTask, getTodaySummary, type TaskView } from "@/server/services/tasks";
 import { mintActionTokens } from "./action-tokens";
 import { createChannelRegistry, type ChannelRegistry } from "./channels";
-import { getFounder } from "./founders";
+import { getFounder, listFounders } from "./founders";
 import { getLinkForUser } from "./linking";
-import { buildEveningCheck, buildMorningSummary, buildTaskMessage } from "./messages";
+import { buildEveningCheck, buildMorningSummary, buildTaskMessage, parkedLine } from "./messages";
 import { loadPreferences, type Preferences } from "./preferences";
 import { isSummaryKind, SUMMARY_KINDS, type NeutralMessage, type NotificationKind } from "./types";
 
 export const MAX_ATTEMPTS = 5;
 /** Retry delays after the 1st, 2nd, 3rd, 4th failure. */
 export const BACKOFF_MINUTES = [1, 5, 15, 60];
-/** A claimed item is invisible to other ticks for this long (simple lease against double sends). */
-const LEASE_MS = 2 * 60_000;
+/**
+ * A claimed ("sending") item is invisible to other runs. Only when its claim is older than
+ * this (wall clock) is the run that claimed it presumed dead; the item is then taken again
+ * and that counts as an attempt. Generous on purpose: a Telegram call times out after 10 s.
+ */
+export const STALE_CLAIM_MS = 10 * 60_000;
+/**
+ * Pushes about tasks with priority "urgent" have their own small daily cap (they do not use
+ * the normal budget). Beyond it they are parked like everything else.
+ */
+export const URGENT_TASK_PUSHES_PER_DAY = 2;
 
 export interface DispatchReport {
   sent: number;
@@ -27,23 +35,46 @@ export interface DispatchReport {
   cancelled: number;
   retrying: number;
   failed: number;
+  /** Held because Telegram is configured but the founder has not linked a chat. */
+  notLinked: number;
 }
 
 export interface DispatchOptions {
   registry?: ChannelRegistry;
   limit?: number;
   timeZone?: string;
+  /** Only these founders (the dev tick dispatches for the signed-in founder only). */
+  userIds?: readonly string[];
+  /** Wall clock for claims. Defaults to the real clock; tests inject one. */
+  clock?: () => Date;
 }
 
 const PRIORITY_RANK = sql<number>`case ${notificationsOutbox.priority} when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end`;
+const NOT_TASK_PUSH_KINDS = [...SUMMARY_KINDS, "urgent"];
 
 export function backoffMs(attempts: number): number {
   const i = Math.min(Math.max(attempts, 1), BACKOFF_MINUTES.length) - 1;
   return BACKOFF_MINUTES[i]! * 60_000;
 }
 
+/** May pass quiet hours when the founder turned on "urgent at night". */
 export function isUrgentItem(item: Pick<OutboxItem, "kind" | "priority">): boolean {
   return item.kind === "urgent" || item.priority === "urgent";
+}
+
+/**
+ * Which daily allowance an item uses:
+ * - "summary": morning summary / evening check, one each per day;
+ * - "urgent": an explicit `urgent` notification, outside any budget;
+ * - "urgent_task": a push about a task with priority urgent, URGENT_TASK_PUSHES_PER_DAY;
+ * - "normal": everything else, the founder's "max other pushes per day".
+ */
+export type BudgetClass = "summary" | "urgent" | "urgent_task" | "normal";
+
+export function budgetClass(item: Pick<OutboxItem, "kind" | "priority">): BudgetClass {
+  if (isSummaryKind(item.kind)) return "summary";
+  if (item.kind === "urgent") return "urgent";
+  return item.priority === "urgent" ? "urgent_task" : "normal";
 }
 
 /** Local-day bounds [start, end) for budget counting. */
@@ -52,30 +83,43 @@ function dayBounds(now: Date, tz: string): { start: Date; end: Date } {
   return { start: zonedTimeToUtc(today, "00:00", tz), end: zonedTimeToUtc(addDays(today, 1), "00:00", tz) };
 }
 
-async function sentTodayCount(db: Db, userId: string, now: Date, tz: string, kinds: { summary: boolean; kind?: string }) {
+/**
+ * Pushes already used today by this item's founder that match `filter`: sent today, or
+ * being sent right now by another run (so overlapping runs cannot both spend the last slot).
+ */
+async function usedToday(db: Db, item: OutboxItem, now: Date, tz: string, filter: SQL): Promise<number> {
   const { start, end } = dayBounds(now, tz);
-  const kindFilter = kinds.kind
-    ? eq(notificationsOutbox.kind, kinds.kind)
-    : kinds.summary
-      ? inArray(notificationsOutbox.kind, [...SUMMARY_KINDS])
-      : notInArray(notificationsOutbox.kind, [...SUMMARY_KINDS]);
   const [row] = await db
     .select({ n: count() })
     .from(notificationsOutbox)
     .where(
       and(
-        eq(notificationsOutbox.userId, userId),
-        eq(notificationsOutbox.status, "sent"),
-        kindFilter,
-        gte(notificationsOutbox.sentAt, start),
-        lt(notificationsOutbox.sentAt, end),
+        eq(notificationsOutbox.userId, item.userId),
+        ne(notificationsOutbox.id, item.id),
+        filter,
+        or(
+          and(eq(notificationsOutbox.status, "sent"), gte(notificationsOutbox.sentAt, start), lt(notificationsOutbox.sentAt, end)),
+          eq(notificationsOutbox.status, "sending"),
+        ),
       ),
     );
   return row?.n ?? 0;
 }
 
-/** Parked items not yet included in a summary, as summary lines (closed tasks dropped). */
-async function openParkedLines(ctx: ServiceContext): Promise<{ ids: string[]; lines: string[] }> {
+function budgetFilter(cls: Exclude<BudgetClass, "urgent">, item: OutboxItem): SQL {
+  if (cls === "summary") return eq(notificationsOutbox.kind, item.kind);
+  return and(
+    notInArray(notificationsOutbox.kind, NOT_TASK_PUSH_KINDS),
+    cls === "urgent_task" ? eq(notificationsOutbox.priority, "urgent") : ne(notificationsOutbox.priority, "urgent"),
+  )!;
+}
+
+/**
+ * Parked items not yet listed in a summary, re-checked and re-rendered from the tasks'
+ * CURRENT state. Items whose task is closed, gone, or no longer due/overdue (deadline
+ * moved) are dropped; one line per task.
+ */
+async function collectParked(ctx: ServiceContext): Promise<{ keep: string[]; drop: string[]; lines: string[] }> {
   const rows = await ctx.db
     .select()
     .from(notificationsOutbox)
@@ -87,32 +131,39 @@ async function openParkedLines(ctx: ServiceContext): Promise<{ ids: string[]; li
       ),
     )
     .orderBy(asc(notificationsOutbox.parkedAt));
-  const ids: string[] = [];
+  const today = todayInTimeZone(ctx.now, ctx.timeZone);
+  const keep: string[] = [];
+  const drop: string[] = [];
   const lines: string[] = [];
+  const seen = new Set<string>();
   for (const r of rows) {
-    ids.push(r.id);
-    if (r.taskId) {
-      const task = await getTask(ctx, r.taskId).catch(() => null);
-      if (!task || task.status === "done" || task.status === "cancelled") continue;
+    const task = r.taskId ? await getTask(ctx, r.taskId).catch(() => null) : null;
+    const open = task && task.status !== "done" && task.status !== "cancelled";
+    const relevant = open && (r.kind === "task_reminder" || task.isOverdue || task.dueDate === today);
+    if (!task || !relevant) {
+      drop.push(r.id);
+      continue;
     }
-    const line = (r.payload as { summaryLine?: unknown }).summaryLine;
-    if (typeof line === "string" && !lines.includes(line)) lines.push(line);
+    keep.push(r.id);
+    if (seen.has(task.id)) continue;
+    seen.add(task.id);
+    lines.push(parkedLine(task, today));
   }
-  return { ids, lines };
+  return { keep, drop, lines };
 }
 
-type Built = { message: NeutralMessage; bundle?: string[] } | { skip: string };
+type Built = { message: NeutralMessage; bundle?: string[]; dropParked?: string[] } | { skip: string };
 
 async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
   const kind = item.kind as NotificationKind;
   if (kind === "morning_summary" || kind === "evening_check") {
     const summary = await getTodaySummary(ctx);
-    const parked = await openParkedLines(ctx);
+    const parked = await collectParked(ctx);
     const message =
       kind === "morning_summary"
         ? buildMorningSummary(summary, parked.lines, ctx.user.shortName)
         : buildEveningCheck(summary, parked.lines);
-    return message ? { message, bundle: parked.ids } : { skip: "nothing_to_send" };
+    return message ? { message, bundle: parked.keep, dropParked: parked.drop } : { skip: "nothing_to_send" };
   }
   if (!item.taskId) return { skip: "no_task" };
   // getTask enforces visibility as the recipient: another founder's private task is "not found".
@@ -139,139 +190,224 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
 }
 
 /**
+ * Atomically claims the next due item: status "sending" + claimed_at (wall clock) in one
+ * UPDATE over a `FOR UPDATE SKIP LOCKED` pick, so two overlapping runs can never take the
+ * same row (on Postgres; PGlite runs one statement at a time, which is just as safe).
+ * A "sending" row whose claim is older than STALE_CLAIM_MS is taken again, as one attempt.
+ */
+async function claimNext(db: Db, now: Date, wall: Date, userIds?: readonly string[]): Promise<OutboxItem | null> {
+  const o = notificationsOutbox;
+  const staleBefore = new Date(wall.getTime() - STALE_CLAIM_MS);
+  const claimable = or(
+    and(eq(o.status, "pending"), lte(o.scheduledFor, now), or(isNull(o.nextAttemptAt), lte(o.nextAttemptAt, now))),
+    and(eq(o.status, "sending"), lt(o.claimedAt, staleBefore)),
+  )!;
+  const userFilter = userIds ? inArray(o.userId, [...userIds]) : undefined;
+  const pick = db
+    .select({ id: o.id })
+    .from(o)
+    .where(and(claimable, userFilter))
+    .orderBy(asc(PRIORITY_RANK), asc(o.scheduledFor), asc(o.createdAt))
+    .limit(1)
+    .for("update", { skipLocked: true });
+  const [row] = await db
+    .update(o)
+    .set({
+      status: "sending",
+      claimedAt: wall,
+      // SET sees the old row: a stale claim (crashed run) counts as one attempt.
+      attempts: sql`${o.attempts} + case when ${o.status} = 'sending' then 1 else 0 end`,
+      lastError: sql`case when ${o.status} = 'sending' then 'stale_claim' else ${o.lastError} end`,
+    })
+    // "= (scalar subquery)" runs the pick once (InitPlan). "IN (subquery)" may be planned as
+    // a join that claims more than one row.
+    .where(and(eq(o.id, sql`(${pick})`), claimable))
+    .returning();
+  return row ?? null;
+}
+
+/** Items held as "not_linked" go back to the queue once their founder is reachable. */
+async function releaseReachable(db: Db, registry: ChannelRegistry, userIds?: readonly string[]): Promise<void> {
+  for (const founder of await listFounders(db)) {
+    if (userIds && !userIds.includes(founder.id)) continue;
+    const chatId = (await getLinkForUser(db, founder.id))?.chatId ?? null;
+    if (!registry.resolve({ userId: founder.id, telegramChatId: chatId })) continue;
+    await db
+      .update(notificationsOutbox)
+      .set({ status: "pending", nextAttemptAt: null, lastError: null })
+      .where(and(eq(notificationsOutbox.userId, founder.id), eq(notificationsOutbox.status, "not_linked")));
+  }
+}
+
+/**
  * Sends every due outbox item, respecting each founder's preferences:
+ * - at most one push per task per local day, whatever its kind;
  * - quiet hours hold items (urgent ones too, unless "urgent at night" is on);
- * - summaries have their own daily slots; other pushes share a daily budget and the
- *   overflow is PARKED and listed in the next summary instead of being sent;
- * - channel errors retry with backoff up to MAX_ATTEMPTS.
+ * - summaries have their own daily slots; other pushes share a daily budget (urgent-priority
+ *   tasks have their own cap of URGENT_TASK_PUSHES_PER_DAY) and the overflow is PARKED and
+ *   listed in the next summary instead of being sent;
+ * - with Telegram configured, a founder without a linked chat gets nothing: items are held
+ *   as "not_linked" and flow once they link (if still valid);
+ * - channel errors retry with backoff up to MAX_ATTEMPTS; an unexpected error affects only
+ *   its own item.
  */
 export async function dispatch(db: Db, now: Date, opts: DispatchOptions = {}): Promise<DispatchReport> {
   const registry = opts.registry ?? createChannelRegistry();
   const tz = opts.timeZone ?? (process.env.APP_TIMEZONE || "Asia/Bishkek");
-  const report: DispatchReport = { sent: 0, held: 0, parked: 0, cancelled: 0, retrying: 0, failed: 0 };
+  const clock = opts.clock ?? (() => new Date());
+  const limit = opts.limit ?? 200;
+  const report: DispatchReport = { sent: 0, held: 0, parked: 0, cancelled: 0, retrying: 0, failed: 0, notLinked: 0 };
+  const prefsCache = new Map<string, Preferences>();
 
-  const due = await db
-    .select()
-    .from(notificationsOutbox)
-    .where(
-      and(
-        eq(notificationsOutbox.status, "pending"),
-        lte(notificationsOutbox.scheduledFor, now),
-        or(isNull(notificationsOutbox.nextAttemptAt), lte(notificationsOutbox.nextAttemptAt, now)),
-      ),
-    )
-    .orderBy(asc(PRIORITY_RANK), asc(notificationsOutbox.scheduledFor), asc(notificationsOutbox.createdAt))
-    .limit(opts.limit ?? 200);
+  await releaseReachable(db, registry, opts.userIds);
 
-  const users = new Map<string, { user: SessionUser | null; prefs: Preferences; chatId: string | null }>();
-
-  for (const item of due) {
-    // Lease: claim the row so a concurrent tick cannot send it too.
-    const [claimed] = await db
-      .update(notificationsOutbox)
-      .set({ nextAttemptAt: new Date(now.getTime() + LEASE_MS) })
-      .where(
-        and(
-          eq(notificationsOutbox.id, item.id),
-          eq(notificationsOutbox.status, "pending"),
-          or(isNull(notificationsOutbox.nextAttemptAt), lte(notificationsOutbox.nextAttemptAt, now)),
-        ),
-      )
-      .returning({ id: notificationsOutbox.id });
-    if (!claimed) continue;
-
+  for (let n = 0; n < limit; n++) {
+    const item = await claimNext(db, now, clock(), opts.userIds);
+    if (!item) break;
     const finish = (set: Partial<typeof notificationsOutbox.$inferInsert>) =>
-      db.update(notificationsOutbox).set(set).where(eq(notificationsOutbox.id, item.id));
-    const cancel = async (reason: string) => {
-      await finish({ status: "cancelled", lastError: reason, nextAttemptAt: null });
-      report.cancelled++;
-    };
-
-    if (!users.has(item.userId)) {
-      const user = await getFounder(db, item.userId);
-      users.set(item.userId, {
-        user,
-        prefs: await loadPreferences(db, item.userId),
-        chatId: (await getLinkForUser(db, item.userId))?.chatId ?? null,
-      });
-    }
-    const { user, prefs, chatId } = users.get(item.userId)!;
-    if (!user) {
-      await cancel("not_a_founder");
-      continue;
-    }
-    if (item.expiresAt && item.expiresAt.getTime() <= now.getTime()) {
-      await cancel("expired");
-      continue;
-    }
-
-    // Quiet hours: hold until they end.
-    if (isWithinWindow(now, prefs.quietStart, prefs.quietEnd, tz) && !(isUrgentItem(item) && prefs.urgentAtNight)) {
-      await finish({ nextAttemptAt: windowEndAfter(now, prefs.quietStart, prefs.quietEnd, tz) });
-      report.held++;
-      continue;
-    }
-
-    // Budget.
-    if (isSummaryKind(item.kind)) {
-      if ((await sentTodayCount(db, user.id, now, tz, { summary: true, kind: item.kind })) >= 1) {
-        await cancel("already_sent_today");
-        continue;
-      }
-    } else if (!isUrgentItem(item)) {
-      const used = await sentTodayCount(db, user.id, now, tz, { summary: false });
-      if (used >= prefs.maxOtherPerDay) {
-        await finish({ status: "parked", parkedAt: now, nextAttemptAt: null, lastError: "daily_budget_full" });
-        report.parked++;
-        continue;
-      }
-    }
-
-    const ctx = { ...makeContext(db, user, now), timeZone: tz };
-    const built = await buildFor(ctx, item);
-    if ("skip" in built) {
-      await cancel(built.skip);
-      continue;
-    }
-
-    const recipient = { userId: user.id, telegramChatId: chatId };
-    const channel = registry.resolve(recipient);
-    const callbacks = built.message.actions?.length
-      ? await mintActionTokens(db, { userId: user.id, outboxId: item.id, actions: built.message.actions, now })
-      : undefined;
-    const result = await channel.send(recipient, built.message, callbacks);
-    const attempts = item.attempts + 1;
-
-    if (result.ok) {
+      db
+        .update(notificationsOutbox)
+        .set({ claimedAt: null, ...set })
+        .where(and(eq(notificationsOutbox.id, item.id), eq(notificationsOutbox.status, "sending")));
+    try {
+      await processItem(db, item, now, tz, registry, prefsCache, finish, report);
+    } catch (err) {
+      // One broken item must not stop the run for everyone else.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[notifications] item ${item.id} failed: ${message}`);
+      const attempts = item.attempts + 1;
+      const failed = attempts >= MAX_ATTEMPTS;
       await finish({
-        status: "sent",
-        sentAt: now,
-        channel: channel.name,
-        providerMessageId: result.providerMessageId ?? null,
-        message: built.message,
+        status: failed ? "failed" : "pending",
         attempts,
-        lastError: null,
-        nextAttemptAt: null,
-      });
-      if (built.bundle?.length) {
-        await db
-          .update(notificationsOutbox)
-          .set({ bundledIntoId: item.id })
-          .where(and(inArray(notificationsOutbox.id, built.bundle), isNull(notificationsOutbox.bundledIntoId)));
-      }
-      report.sent++;
-    } else if (result.permanent || attempts >= MAX_ATTEMPTS) {
-      await finish({ status: "failed", attempts, lastError: result.error ?? "error", channel: channel.name, nextAttemptAt: null });
-      report.failed++;
-    } else {
-      await finish({
-        attempts,
-        lastError: result.error ?? "error",
-        channel: channel.name,
-        nextAttemptAt: new Date(now.getTime() + backoffMs(attempts)),
-      });
-      report.retrying++;
+        lastError: `internal: ${message}`.slice(0, 300),
+        nextAttemptAt: failed ? null : new Date(now.getTime() + backoffMs(attempts)),
+      }).catch((e: unknown) => console.error("[notifications] could not record failure", e));
+      if (failed) report.failed++;
+      else report.retrying++;
     }
   }
   return report;
+}
+
+async function processItem(
+  db: Db,
+  item: OutboxItem,
+  now: Date,
+  tz: string,
+  registry: ChannelRegistry,
+  prefsCache: Map<string, Preferences>,
+  finish: (set: Partial<typeof notificationsOutbox.$inferInsert>) => Promise<unknown>,
+  report: DispatchReport,
+): Promise<void> {
+  const cancel = async (reason: string) => {
+    await finish({ status: "cancelled", lastError: reason, nextAttemptAt: null });
+    report.cancelled++;
+  };
+
+  if (item.attempts >= MAX_ATTEMPTS) {
+    await finish({ status: "failed", nextAttemptAt: null });
+    report.failed++;
+    return;
+  }
+  const user = await getFounder(db, item.userId);
+  if (!user) return cancel("not_a_founder");
+  if (item.expiresAt && item.expiresAt.getTime() <= now.getTime()) return cancel("expired");
+
+  // Re-read the link for every item: an unlink (or relink) takes effect immediately.
+  const chatId = (await getLinkForUser(db, user.id))?.chatId ?? null;
+  const recipient = { userId: user.id, telegramChatId: chatId };
+  const channel = registry.resolve(recipient);
+  if (!channel) {
+    // Not delivered, so no budget used and no parked items bundled.
+    await finish({ status: "not_linked", lastError: "not_linked", nextAttemptAt: null });
+    report.notLinked++;
+    return;
+  }
+
+  let prefs = prefsCache.get(user.id);
+  if (!prefs) {
+    prefs = await loadPreferences(db, user.id);
+    prefsCache.set(user.id, prefs);
+  }
+
+  // Quiet hours: hold until they end.
+  if (isWithinWindow(now, prefs.quietStart, prefs.quietEnd, tz) && !(isUrgentItem(item) && prefs.urgentAtNight)) {
+    await finish({ status: "pending", nextAttemptAt: windowEndAfter(now, prefs.quietStart, prefs.quietEnd, tz) });
+    report.held++;
+    return;
+  }
+
+  // One push per task per local day, whatever the kind (backs up the planner's shared key).
+  if (item.taskId && !isSummaryKind(item.kind)) {
+    if ((await usedToday(db, item, now, tz, eq(notificationsOutbox.taskId, item.taskId))) > 0) {
+      return cancel("already_pushed_today");
+    }
+  }
+
+  // Budget.
+  const cls = budgetClass(item);
+  if (cls === "summary") {
+    if ((await usedToday(db, item, now, tz, budgetFilter(cls, item))) >= 1) return cancel("already_sent_today");
+  } else if (cls !== "urgent") {
+    const cap = cls === "urgent_task" ? URGENT_TASK_PUSHES_PER_DAY : prefs.maxOtherPerDay;
+    if ((await usedToday(db, item, now, tz, budgetFilter(cls, item))) >= cap) {
+      await finish({
+        status: "parked",
+        parkedAt: now,
+        nextAttemptAt: null,
+        lastError: cls === "urgent_task" ? "urgent_cap_full" : "daily_budget_full",
+      });
+      report.parked++;
+      return;
+    }
+  }
+
+  const ctx = { ...makeContext(db, user, now), timeZone: tz };
+  const built = await buildFor(ctx, item);
+  if ("skip" in built) return cancel(built.skip);
+  if (built.dropParked?.length) {
+    await db
+      .update(notificationsOutbox)
+      .set({ status: "cancelled", lastError: "no_longer_relevant" })
+      .where(and(inArray(notificationsOutbox.id, built.dropParked), eq(notificationsOutbox.status, "parked")));
+  }
+
+  const callbacks = built.message.actions?.length
+    ? await mintActionTokens(db, { userId: user.id, outboxId: item.id, actions: built.message.actions, now })
+    : undefined;
+  const result = await channel.send(recipient, built.message, callbacks);
+  const attempts = item.attempts + 1;
+
+  if (result.ok) {
+    await finish({
+      status: "sent",
+      sentAt: now,
+      channel: channel.name,
+      providerMessageId: result.providerMessageId ?? null,
+      message: built.message,
+      attempts,
+      lastError: null,
+      nextAttemptAt: null,
+    });
+    if (built.bundle?.length) {
+      await db
+        .update(notificationsOutbox)
+        .set({ bundledIntoId: item.id })
+        .where(and(inArray(notificationsOutbox.id, built.bundle), isNull(notificationsOutbox.bundledIntoId)));
+    }
+    report.sent++;
+  } else if (result.permanent || attempts >= MAX_ATTEMPTS) {
+    await finish({ status: "failed", attempts, lastError: result.error ?? "error", channel: channel.name, nextAttemptAt: null });
+    report.failed++;
+  } else {
+    await finish({
+      status: "pending",
+      attempts,
+      lastError: result.error ?? "error",
+      channel: channel.name,
+      nextAttemptAt: new Date(now.getTime() + backoffMs(attempts)),
+    });
+    report.retrying++;
+  }
 }

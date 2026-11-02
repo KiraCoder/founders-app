@@ -273,7 +273,7 @@ describe("privacy between founders", () => {
 });
 
 describe("channel selection", () => {
-  it("sends to Telegram only for linked founders; unlinked ones get the dev inbox", async () => {
+  it("sends to Telegram only for linked founders; with a token, unlinked ones are held until they link", async () => {
     const db = t.handle.db;
     process.env.TELEGRAM_BOT_TOKEN = "123456:TEST-TOKEN";
     const calls: { url: string; body: Record<string, unknown> }[] = [];
@@ -290,11 +290,23 @@ describe("channel selection", () => {
     const nMorning = (await outbox(t.userIds.nuraaly)).find((r) => r.kind === "morning_summary")!;
     const tMorning = (await outbox(t.userIds.talant)).find((r) => r.kind === "morning_summary")!;
     expect(nMorning).toMatchObject({ status: "sent", channel: "telegram", providerMessageId: "42" });
-    expect(tMorning).toMatchObject({ status: "sent", channel: "dev" });
+    // Talant has no chat: nothing is "delivered" to the dev inbox, nothing counts as sent.
+    expect(tMorning).toMatchObject({ status: "not_linked", sentAt: null });
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toMatch(/\/bot123456:TEST-TOKEN\/sendMessage$/);
     expect(calls[0]!.body).toMatchObject({ chat_id: "1001", parse_mode: "HTML" });
     expect(String(calls[0]!.body.text)).toContain("Good morning, Nuraaly");
+
+    // Talant links later the same morning: the held summary is still valid and flows.
+    const tc = await createLinkCode(db, t.userIds.talant, FIXED_NOW);
+    await consumeLinkCode(db, tc.code, { chatId: "2002", telegramUserId: "2002" }, FIXED_NOW);
+    await dispatch(db, at("2026-11-02T06:10:00Z"));
+    expect((await outbox(t.userIds.talant)).find((r) => r.kind === "morning_summary")).toMatchObject({
+      status: "sent",
+      channel: "telegram",
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.body).toMatchObject({ chat_id: "2002" });
   });
 
   it("uses the dev channel automatically when no token is set", async () => {

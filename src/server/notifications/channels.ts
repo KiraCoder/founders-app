@@ -27,9 +27,9 @@ export class TelegramChannel implements NotificationChannel {
 }
 
 /**
- * Used when no TELEGRAM_BOT_TOKEN is set (local dev, tests, e2e) or the founder has not
- * linked Telegram yet. "Delivers" by keeping the message in the outbox row, which the
- * dev inbox (/dev/notifications) shows. Never leaves the server.
+ * Used when no TELEGRAM_BOT_TOKEN is set (local dev, tests, e2e) and by the dev tools.
+ * "Delivers" by keeping the message in the outbox row, which the dev inbox
+ * (/dev/notifications) shows. Never leaves the server.
  */
 export class DevChannel implements NotificationChannel {
   readonly name = "dev" as const;
@@ -45,22 +45,31 @@ export interface PushChannel extends NotificationChannel {
 
 export interface ChannelRegistry {
   get(name: ChannelName): NotificationChannel | undefined;
-  /** Which channel a recipient gets right now. */
-  resolve(recipient: Recipient): NotificationChannel;
+  /**
+   * Which channel a recipient gets right now, or null when they cannot be reached yet
+   * (Telegram is configured but they have not linked a chat). The dispatcher then holds
+   * the item as "not_linked" instead of pretending it was delivered.
+   */
+  resolve(recipient: Recipient): NotificationChannel | null;
 }
 
 /**
- * Default registry: Telegram when a token is configured AND the founder linked a chat,
- * otherwise the dev inbox. Push will slot in here (e.g. prefer push when a device token exists).
+ * Default registry. With a bot token: Telegram for founders who linked a chat, nobody
+ * else (null = hold until linked). Without a token: the dev inbox for everyone.
+ * Push will slot in here (e.g. prefer push when a device token exists).
  */
 export function createChannelRegistry(opts: { telegramToken?: string | null } = {}): ChannelRegistry {
   const token = opts.telegramToken === undefined ? telegramBotToken() : opts.telegramToken;
-  const dev = new DevChannel();
-  const telegram = token ? new TelegramChannel(new TelegramApi(token)) : null;
-  const channels = new Map<ChannelName, NotificationChannel>([["dev", dev]]);
-  if (telegram) channels.set("telegram", telegram);
+  if (!token) return createDevRegistry();
+  const telegram = new TelegramChannel(new TelegramApi(token));
   return {
-    get: (name) => channels.get(name),
-    resolve: (r) => (telegram && r.telegramChatId ? telegram : dev),
+    get: (name) => (name === "telegram" ? telegram : undefined),
+    resolve: (r) => (r.telegramChatId ? telegram : null),
   };
+}
+
+/** Dev inbox only (no token, or the dev tools' simulated ticks). Never reaches Telegram. */
+export function createDevRegistry(): ChannelRegistry {
+  const dev = new DevChannel();
+  return { get: (name) => (name === "dev" ? dev : undefined), resolve: () => dev };
 }

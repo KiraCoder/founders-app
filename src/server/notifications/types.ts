@@ -91,3 +91,12 @@ export interface NotificationChannel {
 export function actionKey(a: Pick<MessageAction, "action" | "taskId">): string {
   return `${a.action}:${a.taskId}`;
 }
+
+/**
+ * One push per task per founder per local day (YYYY-MM-DD in APP_TIMEZONE), whatever its
+ * kind (due-today nudge, overdue chase, snooze reminder). Every task push uses this as its
+ * dedupe key, so the unique (user_id, dedupe_key) index refuses a second one that day.
+ */
+export function taskTouchKey(taskId: string, localDay: string): string {
+  return `touch:${taskId}:${localDay}`;
+}

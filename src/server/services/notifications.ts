@@ -1,6 +1,6 @@
 import "server-only";
 import { desc, eq } from "drizzle-orm";
-import { addDays, formatDueDate } from "@/lib/dates";
+import { addDays, formatDueDate, todayInTimeZone } from "@/lib/dates";
 import { notificationPrefsSchema, type NotificationPrefsInput } from "@/lib/schemas";
 import {
   notificationPreferences,
@@ -11,9 +11,9 @@ import {
   type TelegramLink,
 } from "@/server/db/schema";
 import { createLinkCode, getLinkForUser } from "@/server/notifications/linking";
-import { cancelPendingForTask, enqueue } from "@/server/notifications/outbox";
+import { cancelPendingForTask, scheduleTaskReminder } from "@/server/notifications/outbox";
 import { loadPreferences, type Preferences } from "@/server/notifications/preferences";
-import { TASK_ACTIONS, type TaskAction } from "@/server/notifications/types";
+import { TASK_ACTIONS, taskTouchKey, type TaskAction } from "@/server/notifications/types";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { changeTaskDeadline, changeTaskStatus, getTask } from "./tasks";
@@ -45,6 +45,7 @@ export async function createMyTelegramLinkCode(ctx: ServiceContext) {
   return createLinkCode(ctx.db, ctx.user.id, ctx.now);
 }
 
+/** Unlinking stops Telegram delivery at once (the dispatcher re-reads the link before each send). */
 export async function unlinkMyTelegram(ctx: ServiceContext): Promise<void> {
   await ctx.db.delete(telegramLinks).where(eq(telegramLinks.userId, ctx.user.id));
 }
@@ -68,12 +69,13 @@ export async function snoozeTaskReminder(ctx: ServiceContext, taskId: string): P
     .values({ userId: ctx.user.id, taskId, snoozedUntil: until })
     .onConflictDoUpdate({ target: [reminderSnoozes.userId, reminderSnoozes.taskId], set: { snoozedUntil: until } });
   await cancelPendingForTask(ctx.db, ctx.user.id, taskId, "snoozed");
-  await enqueue(ctx.db, {
+  // The reminder takes that day's only push slot for this task: no chase or due-today
+  // nudge for it on the day the reminder fires.
+  await scheduleTaskReminder(ctx.db, {
     userId: ctx.user.id,
-    kind: "task_reminder",
     taskId,
     scheduledFor: until,
-    dedupeKey: `snooze:${taskId}:${ctx.now.toISOString().slice(0, 16)}`,
+    dedupeKey: taskTouchKey(taskId, todayInTimeZone(until, ctx.timeZone)),
   });
   return until;
 }

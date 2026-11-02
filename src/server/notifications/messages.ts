@@ -100,9 +100,15 @@ export function buildTaskMessage(kind: NotificationKind, task: TaskView, today: 
   };
 }
 
-/** One line used when an item is parked and later listed inside a summary. */
-export function parkedLine(kind: NotificationKind, task: Pick<TaskView, "title" | "dueDate" | "company" | "priority" | "visibility">, today: IsoDate): string {
-  const prefix = kind === "overdue_chase" ? "Chase" : kind === "task_due_today" ? "Due today" : "Reminder";
+/**
+ * One line for a parked item inside a summary, rendered at bundle time from the task's
+ * CURRENT state (so "3d overdue" is never stale and a moved deadline shows its new date).
+ */
+export function parkedLine(
+  task: Pick<TaskView, "title" | "dueDate" | "company" | "priority" | "visibility">,
+  today: IsoDate,
+): string {
+  const prefix = task.dueDate && task.dueDate < today ? "Overdue" : task.dueDate === today ? "Due today" : "Reminder";
   return `${prefix}: ${taskLine(task, today)}`;
 }
 

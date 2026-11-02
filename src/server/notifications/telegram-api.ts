@@ -12,18 +12,27 @@ export interface TelegramResult<T = unknown> {
   parameters?: { retry_after?: number };
 }
 
+/** A Bot API call that has not answered after this long is abandoned (and retried later). */
+export const TELEGRAM_TIMEOUT_MS = 10_000;
+
 export class TelegramApi {
   constructor(
     private readonly token: string,
     private readonly baseUrl = "https://api.telegram.org",
   ) {}
 
-  async call<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<TelegramResult<T>> {
+  async call<T = unknown>(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs = TELEGRAM_TIMEOUT_MS,
+  ): Promise<TelegramResult<T>> {
     try {
       const res = await fetch(`${this.baseUrl}/bot${this.token}/${method}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(params),
+        // Never let a hung request keep a dispatch run (and its claimed items) waiting.
+        signal: AbortSignal.timeout(timeoutMs),
       });
       const body = (await res.json().catch(() => null)) as TelegramResult<T> | null;
       if (body && typeof body.ok === "boolean") return body;
@@ -43,7 +52,9 @@ export class TelegramApi {
     return this.call("answerCallbackQuery", params);
   }
   getUpdates(params: Record<string, unknown>) {
-    return this.call<TelegramUpdate[]>("getUpdates", params);
+    // Long polling: allow the server-side wait plus the normal timeout.
+    const wait = typeof params.timeout === "number" ? params.timeout * 1000 : 0;
+    return this.call<TelegramUpdate[]>("getUpdates", params, wait + TELEGRAM_TIMEOUT_MS);
   }
 }
 

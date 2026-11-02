@@ -11,6 +11,7 @@ import { reminderSnoozes, type NotificationPriority, type TaskPriority } from "@
 import { makeContext } from "@/server/services/context";
 import { getTodaySummary } from "@/server/services/tasks";
 import { listFounders } from "./founders";
+import { taskTouchKey } from "./types";
 import { enqueue, type EnqueueInput } from "./outbox";
 import { loadPreferences, type Preferences } from "./preferences";
 
@@ -51,13 +52,6 @@ function priorityFor(task: PlanTask): NotificationPriority {
   return task.priority === "urgent" ? "urgent" : task.priority === "high" ? "high" : "normal";
 }
 
-function summaryLine(prefix: string, t: PlanTask, today: IsoDate): string {
-  const where = t.company?.name ?? (t.visibility === "private" ? "personal" : null);
-  const d = t.dueDate ? daysBetween(t.dueDate, today) : 0;
-  const when = d > 0 ? `${d}d overdue` : "today";
-  return `${prefix}: ${t.title}${where ? ` — ${where}` : ""} · ${when}`;
-}
-
 export function planForUser(input: PlanInput): EnqueueInput[] {
   const { userId, now, timeZone: tz, prefs } = input;
   const today = todayInTimeZone(now, tz);
@@ -91,11 +85,10 @@ export function planForUser(input: PlanInput): EnqueueInput[] {
       userId,
       kind: "task_due_today",
       taskId: t.id,
-      dedupeKey: `due:${t.id}:${today}`,
+      dedupeKey: taskTouchKey(t.id, today),
       scheduledFor: zonedTimeToUtc(today, DUE_TODAY_TIME, tz),
       expiresAt: endOfDay,
       priority: priorityFor(t),
-      payload: { summaryLine: summaryLine("Due today", t, today) },
     });
   }
 
@@ -107,12 +100,12 @@ export function planForUser(input: PlanInput): EnqueueInput[] {
       userId,
       kind: "overdue_chase",
       taskId: t.id,
-      // One chase per task per day, whatever happens.
-      dedupeKey: `chase:${t.id}:${today}`,
+      // Shared with the due-today nudge and the snooze reminder: one push per task per day.
+      dedupeKey: taskTouchKey(t.id, today),
       scheduledFor: zonedTimeToUtc(today, CHASE_TIME, tz),
       expiresAt: endOfDay,
       priority: priorityFor(t),
-      payload: { summaryLine: summaryLine("Chase", t, today), daysOverdue: days },
+      payload: { daysOverdue: days },
     });
   }
   return out;
@@ -123,10 +116,18 @@ export interface PlanReport {
   created: number;
 }
 
-/** Plans and enqueues for every founder. */
-export async function planTick(db: Db, now: Date, timeZone = process.env.APP_TIMEZONE || "Asia/Bishkek"): Promise<PlanReport> {
+export interface PlanOptions {
+  timeZone?: string;
+  /** Only these founders (the dev tick plans for the signed-in founder only). */
+  userIds?: readonly string[];
+}
+
+/** Plans and enqueues for every founder (or the given ones). */
+export async function planTick(db: Db, now: Date, opts: PlanOptions = {}): Promise<PlanReport> {
+  const timeZone = opts.timeZone ?? (process.env.APP_TIMEZONE || "Asia/Bishkek");
   const report: PlanReport = { planned: 0, created: 0 };
   for (const user of await listFounders(db)) {
+    if (opts.userIds && !opts.userIds.includes(user.id)) continue;
     const ctx = { ...makeContext(db, user, now), timeZone };
     const [prefs, summary, snoozes] = await Promise.all([
       loadPreferences(db, user.id),

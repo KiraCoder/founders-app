@@ -81,6 +81,21 @@ describe("middleware", () => {
     expect(new URL(home.headers.get("location")!).search).toBe("");
   });
 
+  it("only the login page and the two secret-checked endpoints are public", async () => {
+    const pass = (r: Response) => r.headers.get("x-middleware-next") === "1";
+    for (const p of ["/login", "/api/telegram/webhook", "/api/cron/tick"]) {
+      expect(pass(await middleware(new NextRequest(`${base}${p}`, { method: "POST" })))).toBe(true);
+    }
+    // Look-alike paths are not public.
+    for (const p of ["/api/telegram/webhookx", "/api/cron/ticks", "/api/telegram", "/api/cron"]) {
+      const res = await middleware(new NextRequest(`${base}${p}`, { method: "POST" }));
+      expect(res.status).toBe(401);
+    }
+    const page = await middleware(new NextRequest(`${base}/loginx`));
+    expect(page.status).toBe(307);
+    expect(pass(await middleware(new NextRequest(`${base}/dev/notifications`)))).toBe(false);
+  });
+
   it("public paths and tampered cookies", async () => {
     expect((await middleware(new NextRequest(`${base}/login`))).headers.get("x-middleware-next")).toBe("1");
     const bad = await middleware(new NextRequest(`${base}/api/v1/tasks`, { headers: { cookie: `${SESSION_COOKIE}=nope` } }));
