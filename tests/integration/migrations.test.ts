@@ -259,6 +259,68 @@ describe("0009 metrics fixes on existing data", () => {
   });
 });
 
+describe("0010 holding on existing data", () => {
+  it("adds the holding tables with RLS, keeps task buttons, allows holding buttons and derived values", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0010") });
+    const C1 = "33333333-3333-4333-8333-333333333331";
+    const C2 = "33333333-3333-4333-8333-333333333332";
+    const TASK = "44444444-4444-4444-8444-444444444444";
+    await client.exec(`
+      insert into users (id, email, name, short_name) values ('${NURAALY}', 'n@x', 'Nuraaly', 'Nuraaly');
+      insert into companies (id, slug, name) values ('${C1}', 'alura-style', 'Alura Style'), ('${C2}', 'alura-brand', 'Alura Brand');
+      insert into tasks (id, title, owner_user_id, company_id) values ('${TASK}', 'T', '${NURAALY}', '${C1}');
+      insert into notification_action_tokens (token_hash, user_id, task_id, action, expires_at)
+        values ('h1', '${NURAALY}', '${TASK}', 'done', now() + interval '1 day');
+      insert into metric_definitions (id, company_id, key, name, unit, granularity) values
+        ('a0000000-0000-4000-8000-000000000004', '${C1}', 'intercompany_debt', 'Debt', 'KGS', 'month');
+      insert into metric_values (metric_id, period_start, value, source) values ('a0000000-0000-4000-8000-000000000004', '2026-09-01', 5, 'manual');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+
+    const tokens = await client.query<{ task_id: string; holding_ask_id: string | null }>("select task_id, holding_ask_id from notification_action_tokens");
+    expect(tokens.rows).toEqual([{ task_id: TASK, holding_ask_id: null }]);
+    expect((await client.query("select 1 from metric_values")).rows).toHaveLength(1);
+    const rls = await client.query<{ relname: string; relrowsecurity: boolean }>(
+      `select relname, relrowsecurity from pg_class where relname in ('holding_files','intercompany_flows','intercompany_contracts','intercompany_acts','intercompany_ledger_entries','holding_ask_items') order by relname`,
+    );
+    expect(rls.rows).toHaveLength(6);
+    expect(rls.rows.every((r) => r.relrowsecurity)).toBe(true);
+
+    // New rows work; the rules hold.
+    await client.exec(`
+      insert into metric_values (metric_id, period_start, value, source) values ('a0000000-0000-4000-8000-000000000004', '2026-10-01', 7, 'derived');
+      insert into intercompany_flows (id, from_company_id, to_company_id, service, since) values
+        ('55555555-5555-4555-8555-555555555555', '${C1}', '${C2}', 'пошив', '2026-01-01');
+      insert into intercompany_acts (flow_id, period, status) values ('55555555-5555-4555-8555-555555555555', '2026-10-01', 'requested');
+      insert into holding_ask_items (id, user_id, kind, round_key, cells) values
+        ('66666666-6666-4666-8666-666666666666', '${NURAALY}', 'ask', '2026-11', '[]');
+      insert into notification_action_tokens (token_hash, user_id, holding_ask_id, action, expires_at)
+        values ('h2', '${NURAALY}', '66666666-6666-4666-8666-666666666666', 'holding_asked', now() + interval '1 day');
+    `);
+    await expect(
+      client.exec(`insert into notification_action_tokens (token_hash, user_id, action, expires_at) values ('h3', '${NURAALY}', 'done', now())`),
+    ).rejects.toThrow(/notification_action_tokens_subject/);
+    await expect(
+      client.exec(`insert into intercompany_flows (from_company_id, to_company_id, service) values ('${C1}', '${C2}', 'ПОШИВ')`),
+    ).rejects.toThrow(/intercompany_flows_live_uq/);
+    await expect(
+      client.exec(`insert into intercompany_flows (from_company_id, to_company_id, service) values ('${C1}', '${C1}', 'x')`),
+    ).rejects.toThrow(/intercompany_flows_two_companies/);
+    await expect(
+      client.exec(`insert into intercompany_acts (flow_id, period) values ('55555555-5555-4555-8555-555555555555', '2026-10-15')`),
+    ).rejects.toThrow(/intercompany_acts_period_first/);
+    await expect(
+      client.exec(`insert into intercompany_acts (flow_id, period) values ('55555555-5555-4555-8555-555555555555', '2026-10-01')`),
+    ).rejects.toThrow(/intercompany_acts_flow_period_uq/);
+    await expect(
+      client.exec(`insert into holding_files (storage, storage_key, original_name, content_type, size_bytes, sha256) values ('local', 'k', 'a.html', 'text/html', 5, 'x')`),
+    ).rejects.toThrow(/holding_files_type/);
+    // Flows with акты cannot be deleted (archive instead).
+    await expect(client.exec(`delete from intercompany_flows where id = '55555555-5555-4555-8555-555555555555'`)).rejects.toThrow(/foreign key/);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();

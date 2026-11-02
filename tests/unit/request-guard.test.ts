@@ -122,3 +122,23 @@ describe("middleware", () => {
     expect(form.status).toBe(415);
   });
 });
+
+describe("multipart uploads (holding documents)", () => {
+  const UP = "https://cockpit.example.com/api/v1/holding/files";
+  const mp = { "content-type": "multipart/form-data; boundary=x" };
+
+  it("allowed only on the upload path, only with proof of same-site", () => {
+    expect(checkMutatingApiRequest(req("POST", { ...mp, origin: "https://cockpit.example.com" }, UP))).toEqual({ ok: true });
+    expect(checkMutatingApiRequest(req("POST", { ...mp, "sec-fetch-site": "same-origin" }, UP))).toEqual({ ok: true });
+    // A cross-site form, or a request with neither header, is refused.
+    expect(checkMutatingApiRequest(req("POST", { ...mp, origin: "https://evil.example" }, UP))).toMatchObject({ ok: false, status: 403 });
+    expect(checkMutatingApiRequest(req("POST", mp, UP))).toMatchObject({ ok: false, status: 403 });
+    expect(checkMutatingApiRequest(req("POST", { ...mp, "sec-fetch-site": "cross-site" }, UP))).toMatchObject({ ok: false, status: 403 });
+    // Other endpoints still need JSON.
+    expect(checkMutatingApiRequest(req("POST", { ...mp, origin: "https://cockpit.example.com" }, "https://cockpit.example.com/api/v1/holding/acts"))).toMatchObject({
+      ok: false,
+      status: 415,
+    });
+    expect(checkMutatingApiRequest(req("PATCH", { ...mp, origin: "https://cockpit.example.com" }, UP))).toMatchObject({ ok: false, status: 415 });
+  });
+});

@@ -50,6 +50,12 @@ describe("row level security after migrate", () => {
         "metric_definitions",
         "metric_values",
         "connector_runs",
+        "holding_files",
+        "intercompany_flows",
+        "intercompany_contracts",
+        "intercompany_acts",
+        "intercompany_ledger_entries",
+        "holding_ask_items",
       ]),
     );
     expect(tables.filter((t) => !t.rls).map((t) => t.name)).toEqual([]);
