@@ -590,7 +590,14 @@ export async function patchAct(ctx: ServiceContext, input: ActPatchInput): Promi
     if (cur) {
       await tx.update(intercompanyActs).set(next).where(eq(intercompanyActs.id, cur.id));
     } else {
-      await tx.insert(intercompanyActs).values({ flowId: flow.id, period: data.period, ...next, createdAt: ctx.now });
+      const ins = await tx
+        .insert(intercompanyActs)
+        .values({ flowId: flow.id, period: data.period, ...next, createdAt: ctx.now })
+        .onConflictDoNothing({ target: [intercompanyActs.flowId, intercompanyActs.period] })
+        .returning({ id: intercompanyActs.id });
+      if (!ins.length) {
+        throw new ServiceError("conflict", "Someone else changed this акт at the same moment, so nothing was saved. Please try again.");
+      }
     }
   });
   const grid = await loadActsGrid(ctx.db, todayIso, { months: [data.period] });
@@ -653,8 +660,17 @@ export async function markCellsAsked(
         continue;
       }
       const set = { status: "requested" as const, requestedOn: todayIso, requestedBy: ctx.user.id, updatedBy: ctx.user.id, updatedAt: ctx.now };
-      if (cur) await tx.update(intercompanyActs).set(set).where(eq(intercompanyActs.id, cur.id));
-      else await tx.insert(intercompanyActs).values({ flowId: flow.id, period, ...set, createdAt: ctx.now });
+      if (cur) {
+        await tx.update(intercompanyActs).set(set).where(eq(intercompanyActs.id, cur.id));
+      } else {
+        // The other founder may have created this cell at the same moment: then it is done.
+        const ins = await tx
+          .insert(intercompanyActs)
+          .values({ flowId: flow.id, period, ...set, createdAt: ctx.now })
+          .onConflictDoNothing({ target: [intercompanyActs.flowId, intercompanyActs.period] })
+          .returning({ id: intercompanyActs.id });
+        if (!ins.length) continue;
+      }
       changed.push({ flowId: flow.id, period });
     }
   });

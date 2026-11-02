@@ -59,13 +59,25 @@ export async function planHoldingAsks(
   const todayIso = todayInTimeZone(now, timeZone);
   const founders = (await listFounders(db)).filter((f) => !opts.userIds || opts.userIds.includes(f.id));
   if (!founders.length) return { created: 0 };
-  const grid = await loadActsGrid(db, todayIso);
+  const grace = graceDays();
+  const due: { kind: "ask" | "reminder"; roundKey: string }[] = [];
+  if (Number(todayIso.slice(8, 10)) >= askDayOfMonth(grace)) due.push({ kind: "ask", roundKey: todayIso.slice(0, 7) });
+  if (isoWeekday(todayIso) === 1) due.push({ kind: "reminder", roundKey: todayIso });
+  if (!due.length) return { created: 0 };
+  // Cheap exit for the many ticks after a round was planned: no grid needed.
+  const existing = await db
+    .select({ userId: holdingAskItems.userId, kind: holdingAskItems.kind, roundKey: holdingAskItems.roundKey })
+    .from(holdingAskItems)
+    .where(inArray(holdingAskItems.roundKey, due.map((d) => d.roundKey)));
+  const have = new Set(existing.map((e) => `${e.userId}|${e.kind}|${e.roundKey}`));
+  if (due.every((d) => founders.every((f) => have.has(`${f.id}|${d.kind}|${d.roundKey}`)))) return { created: 0 };
+  const grid = await loadActsGrid(db, todayIso, { grace });
   const rounds: { kind: "ask" | "reminder"; roundKey: string; cells: Cell[] }[] = [];
-  if (Number(todayIso.slice(8, 10)) >= askDayOfMonth(grid.graceDays)) {
+  if (due.some((d) => d.kind === "ask")) {
     const { cells } = groupCells(grid, (c) => c.state === "missing");
     if (cells.length) rounds.push({ kind: "ask", roundKey: todayIso.slice(0, 7), cells });
   }
-  if (isoWeekday(todayIso) === 1) {
+  if (due.some((d) => d.kind === "reminder")) {
     const { cells } = groupCells(grid, staleRequested(grid, REMINDER_AFTER_DAYS));
     if (cells.length) rounds.push({ kind: "reminder", roundKey: todayIso, cells });
   }

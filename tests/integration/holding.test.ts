@@ -14,6 +14,7 @@ import {
   getHoldingSummary,
   listContracts,
   listFlows,
+  markCellsAsked,
   patchAct,
   restoreFlow,
   syncDebtMetric,
@@ -248,6 +249,17 @@ describe("debts", () => {
     } finally {
       await fresh.handle.close();
     }
+  });
+});
+
+describe("both founders at the same moment", () => {
+  it("“I asked Elmurat” twice at once: each cell is marked once, nobody gets an error", async () => {
+    const f = flowOf("Jobutify → Alura Style");
+    const cells = ["2026-06", "2026-07"].map((p) => ({ flowId: f.id, period: `${p}-01` }));
+    const [a, b] = await Promise.all([markCellsAsked(at("nuraaly"), cells, "missing"), markCellsAsked(at("talant"), cells, "missing")]);
+    expect(a.length + b.length).toBe(2);
+    const rows = await t.handle.db.select().from(intercompanyActs).where(eq(intercompanyActs.flowId, f.id));
+    expect(rows.filter((r) => r.status === "requested")).toHaveLength(2);
   });
 });
 

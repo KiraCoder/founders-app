@@ -30,7 +30,6 @@ export function detectFileType(bytes: Uint8Array): AllowedType | null {
 /** Keeps a readable name without paths, control characters or quotes (used in Content-Disposition). */
 export function cleanFileName(name: string, type: AllowedType): string {
   const base = (name.split(/[\\/]/).pop() ?? "")
-    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f"<>|*?:]/g, "")
     .trim()
     .slice(0, 120);
