@@ -47,6 +47,9 @@ describe("row level security after migrate", () => {
         "salaries",
         "salary_viewers",
         "salary_access_log",
+        "metric_definitions",
+        "metric_values",
+        "connector_runs",
       ]),
     );
     expect(tables.filter((t) => !t.rls).map((t) => t.name)).toEqual([]);

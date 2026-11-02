@@ -4,6 +4,7 @@ import { todayInTimeZone, addDays, isWithinWindow, windowEndAfter, zonedTimeToUt
 import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, reminderSnoozes, type OutboxItem } from "@/server/db/schema";
 import { makeContext, type ServiceContext } from "@/server/services/context";
+import { staleMetricsFor } from "@/server/services/metrics";
 import { getTask, getTodaySummary, type TaskView } from "@/server/services/tasks";
 import { mintActionTokens } from "./action-tokens";
 import { createChannelRegistry, type ChannelRegistry } from "./channels";
@@ -159,9 +160,14 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
   if (kind === "morning_summary" || kind === "evening_check") {
     const summary = await getTodaySummary(ctx);
     const parked = await collectParked(ctx);
+    // Numbers waiting: a short section inside the morning summary only (no separate pushes).
+    const waiting = kind === "morning_summary" ? await staleMetricsFor(ctx).catch((err: unknown) => {
+            console.error("[dispatcher] numbers waiting failed", err);
+            return [];
+          }) : [];
     const message =
       kind === "morning_summary"
-        ? buildMorningSummary(summary, parked.lines, ctx.user.shortName)
+        ? buildMorningSummary(summary, parked.lines, ctx.user.shortName, waiting)
         : buildEveningCheck(summary, parked.lines);
     return message ? { message, bundle: parked.keep, dropParked: parked.drop } : { skip: "nothing_to_send" };
   }

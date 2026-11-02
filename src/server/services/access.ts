@@ -2,7 +2,7 @@ import "server-only";
 import { and, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { companies, people, personCompanies, salaryViewers, taskEvents, tasks } from "@/server/db/schema";
+import { companies, metricDefinitions, people, personCompanies, salaryViewers, taskEvents, tasks } from "@/server/db/schema";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 
@@ -108,4 +108,34 @@ export async function assertSalaryViewer(ctx: ServiceContext): Promise<void> {
 /** Person-company links the user may see (links of accessible companies). */
 export function visibleLinksWhere(ctx: ServiceContext): SQL | undefined {
   return inAccessibleCompany(ctx, personCompanies.companyId);
+}
+
+// ---------------------------------------------------------------------------
+// Numbers (metric definitions and values)
+// ---------------------------------------------------------------------------
+
+/**
+ * Metric rule: company data is shared between the founders, so a metric (and its values
+ * and connector runs) is visible to whoever can access its company, and only there.
+ * Archived metrics and metrics of archived companies are hidden. Values are always read
+ * through a visible metric (`metric_values` has no company column of its own).
+ */
+export function visibleMetricsWhere(ctx: ServiceContext): SQL {
+  const companyFilter = inAccessibleCompany(ctx, metricDefinitions.companyId);
+  const live = and(
+    isNull(metricDefinitions.archivedAt),
+    inArray(metricDefinitions.companyId, ctx.db.select({ id: companies.id }).from(companies).where(isNull(companies.archivedAt))),
+  )!;
+  return companyFilter ? and(live, companyFilter)! : live;
+}
+
+/** Throws not_found unless the metric exists and is visible. Returns its company id. */
+export async function assertMetricAccess(ctx: ServiceContext, metricId: unknown): Promise<string> {
+  assertValidId(metricId, "Metric");
+  const [row] = await ctx.db
+    .select({ companyId: metricDefinitions.companyId })
+    .from(metricDefinitions)
+    .where(and(eq(metricDefinitions.id, metricId), visibleMetricsWhere(ctx)));
+  if (!row) throw new ServiceError("not_found", "Metric not found");
+  return row.companyId;
 }

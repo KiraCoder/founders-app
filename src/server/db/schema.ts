@@ -25,6 +25,7 @@ import {
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -515,6 +516,114 @@ export const reminderSnoozes = pgTable(
   },
   (t) => [uniqueIndex("reminder_snoozes_user_task_uq").on(t.userId, t.taskId)],
 );
+
+// ---------------------------------------------------------------------------
+// Numbers layer: metric definitions, values (with history) and connector runs.
+// Company-owned (company_id); read and written only through services/metrics.ts and
+// server/connectors/, which compose the access rules in access.ts.
+// ---------------------------------------------------------------------------
+export const metricGranularityEnum = pgEnum("metric_granularity", ["day", "week", "month"]);
+export const metricDirectionEnum = pgEnum("metric_direction", ["higher_is_better", "lower_is_better", "neutral"]);
+export const metricSourceEnum = pgEnum("metric_source", ["manual", "upload", "connector"]);
+export const connectorRunStatusEnum = pgEnum("connector_run_status", ["ok", "not_configured", "error"]);
+
+/**
+ * What a company tracks (seeded from src/lib/kpis.ts, editable later). One row per
+ * company + optional unit (e.g. Alura Style ХБК vs Ош Район) + key.
+ */
+export const metricDefinitions = pgTable(
+  "metric_definitions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    /** Company unit (factory) this metric is tracked for; null = whole company. */
+    companyUnitId: uuid("company_unit_id").references(() => companyUnits.id, { onDelete: "restrict" }),
+    key: text("key").notNull(),
+    /** English UI name. */
+    name: text("name").notNull(),
+    /** Other header names accepted by the upload (Russian, short forms). */
+    aliases: jsonb("aliases").$type<string[]>().notNull().default([]),
+    /** Measurement unit: KGS, pcs, orders, %, people, count. */
+    unit: text("unit").notNull(),
+    granularity: metricGranularityEnum("granularity").notNull(),
+    direction: metricDirectionEnum("direction").notNull().default("higher_is_better"),
+    /**
+     * Data for a period is due this many days after the period ends (null = default per
+     * granularity: day 1, week 3, month 10). After that the card turns "stale".
+     */
+    dueDays: integer("due_days"),
+    target: numeric("target", { precision: 18, scale: 4 }),
+    /** Where values are expected to come from. */
+    sourceKind: metricSourceEnum("source_kind").notNull().default("manual"),
+    /** Connector id (src/server/connectors) when sourceKind = connector. */
+    connectorId: text("connector_id"),
+    sort: integer("sort").notNull().default(100),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    unique("metric_definitions_company_unit_key_uq").on(t.companyId, t.companyUnitId, t.key).nullsNotDistinct(),
+    check("metric_definitions_due_days_range", sql`${t.dueDays} is null or ${t.dueDays} between 0 and 60`),
+  ],
+);
+
+/**
+ * Metric values. Append-only history: a correction inserts a new row and clears
+ * `is_current` on the old one, so exactly one current value per metric + period
+ * (partial unique index) and every earlier value is kept.
+ */
+export const metricValues = pgTable(
+  "metric_values",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    metricId: uuid("metric_id")
+      .notNull()
+      .references(() => metricDefinitions.id, { onDelete: "restrict" }),
+    /** First day of the period (day itself, Monday of the week, 1st of the month). */
+    periodStart: date("period_start", { mode: "string" }).notNull(),
+    value: numeric("value", { precision: 18, scale: 4 }).notNull(),
+    source: metricSourceEnum("source").notNull(),
+    isCurrent: boolean("is_current").notNull().default(true),
+    enteredBy: uuid("entered_by").references(() => users.id, { onDelete: "set null" }),
+    connectorRunId: uuid("connector_run_id"),
+    note: text("note"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("metric_values_current_uq").on(t.metricId, t.periodStart).where(sql`${t.isCurrent}`),
+    index("metric_values_metric_period_idx").on(t.metricId, t.periodStart),
+  ],
+);
+
+/** Every connector attempt (also "not configured"), for the data sources status. */
+export const connectorRuns = pgTable(
+  "connector_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectorId: text("connector_id").notNull(),
+    companyId: uuid("company_id").references(() => companies.id, { onDelete: "set null" }),
+    status: connectorRunStatusEnum("status").notNull(),
+    rangeFrom: date("range_from", { mode: "string" }).notNull(),
+    rangeTo: date("range_to", { mode: "string" }).notNull(),
+    pointsReceived: integer("points_received").notNull().default(0),
+    valuesWritten: integer("values_written").notNull().default(0),
+    message: text("message"),
+    triggeredBy: uuid("triggered_by").references(() => users.id, { onDelete: "set null" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [index("connector_runs_connector_idx").on(t.connectorId, t.startedAt)],
+);
+
+export type MetricDefinition = typeof metricDefinitions.$inferSelect;
+export type MetricValue = typeof metricValues.$inferSelect;
+export type ConnectorRun = typeof connectorRuns.$inferSelect;
+export type MetricGranularity = (typeof metricGranularityEnum.enumValues)[number];
+export type MetricDirection = (typeof metricDirectionEnum.enumValues)[number];
+export type MetricSource = (typeof metricSourceEnum.enumValues)[number];
 
 export type User = typeof users.$inferSelect;
 export type Company = typeof companies.$inferSelect;

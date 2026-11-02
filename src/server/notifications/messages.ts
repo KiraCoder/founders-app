@@ -43,8 +43,45 @@ function parkedSection(parked: string[]): MessageLine[] {
   ];
 }
 
-/** Morning summary: overdue, due today, this week, personal todos, plus parked items. */
-export function buildMorningSummary(s: TodaySummary, parked: string[], firstName: string): NeutralMessage {
+/** Max item lines of the "Numbers waiting" section (anti-spam: a short hint, not a list). */
+export const NUMBERS_WAITING_MAX_LINES = 3;
+
+export interface WaitingNumber {
+  companyName: string;
+  label: string;
+}
+
+/**
+ * "Numbers waiting": metrics whose data is overdue, grouped per company, at most
+ * NUMBERS_WAITING_MAX_LINES item lines. Company data is shared, so both founders see it.
+ */
+export function numbersWaitingSection(items: readonly WaitingNumber[]): MessageLine[] {
+  if (!items.length) return [];
+  const byCompany = new Map<string, string[]>();
+  for (const it of items) byCompany.set(it.companyName, [...(byCompany.get(it.companyName) ?? []), it.label]);
+  const groups = [...byCompany.entries()];
+  const max = NUMBERS_WAITING_MAX_LINES;
+  const shown = groups.length > max ? groups.slice(0, max - 1) : groups;
+  const lines: MessageLine[] = [{ text: `Numbers waiting (${items.length})`, style: "heading" }];
+  for (const [company, labels] of shown) {
+    const names = labels.slice(0, 2).join(", ");
+    lines.push({ text: `${company}: ${names}${labels.length > 2 ? ` +${labels.length - 2} more` : ""}`, style: "item" });
+  }
+  if (groups.length > shown.length) {
+    const rest = groups.slice(shown.length);
+    const count = rest.reduce((n, [, l]) => n + l.length, 0);
+    lines.push({ text: `+${count} more in ${rest.length} other companies — enter or upload them in the app`, style: "muted" });
+  }
+  return lines;
+}
+
+/** Morning summary: overdue, due today, this week, personal todos, parked items, numbers waiting. */
+export function buildMorningSummary(
+  s: TodaySummary,
+  parked: string[],
+  firstName: string,
+  numbersWaiting: readonly WaitingNumber[] = [],
+): NeutralMessage {
   const listed = new Set([...s.overdue, ...s.dueToday, ...s.thisWeek].map((t) => t.id));
   const personalRest = s.personal.filter((t) => !listed.has(t.id));
   const lines: MessageLine[] = [
@@ -59,6 +96,7 @@ export function buildMorningSummary(s: TodaySummary, parked: string[], firstName
     ...parkedSection(parked),
   ];
   if (lines.length === 1) lines.push({ text: "Nothing on your plate today.", style: "muted" });
+  lines.push(...numbersWaitingSection(numbersWaiting));
   return { title: `Good morning, ${firstName}`, lines };
 }
 

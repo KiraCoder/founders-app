@@ -15,6 +15,8 @@ const config = [
       "test-results/**",
       "playwright-report/**",
       "next-env.d.ts",
+      // Agent worktrees (other checkouts of this repo) are not part of this project.
+      ".claude/**",
     ],
   },
   ...compat.extends("next/core-web-vitals", "next/typescript"),

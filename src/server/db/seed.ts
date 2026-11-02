@@ -9,10 +9,12 @@
 import bcrypt from "bcryptjs";
 import { eq, like } from "drizzle-orm";
 import { addDays, todayInTimeZone } from "@/lib/dates";
+import { metricSeedFor } from "@/lib/kpis";
 import type { Db } from "./connect";
 import {
   companies,
   companyUnits,
+  metricDefinitions,
   people,
   personCompanies,
   projects,
@@ -188,6 +190,9 @@ export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResul
     }
   }
 
+  // --- Metric definitions (from src/lib/kpis.ts; only missing ones are added) ----
+  await seedMetricDefinitions(db, companyIds);
+
   // --- People ----------------------------------------------------------------
   const personIds: Record<string, string> = {};
   async function upsertPerson(
@@ -241,6 +246,40 @@ export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResul
   }
 
   return { userIds, companyIds, personIds };
+}
+
+/** Adds the default metric definitions that do not exist yet. Existing rows are never changed. */
+export async function seedMetricDefinitions(db: Db, companyIds: Record<string, string>): Promise<void> {
+  for (const [slug, companyId] of Object.entries(companyIds)) {
+    const defs = metricSeedFor(slug);
+    if (defs.length === 0) continue;
+    const units = await db.select().from(companyUnits).where(eq(companyUnits.companyId, companyId));
+    let sort = 10;
+    for (const d of defs) {
+      for (const [ui, unitSlug] of (d.units ?? [null]).entries()) {
+        const unit = unitSlug ? units.find((u) => u.slug === unitSlug) : null;
+        if (unitSlug && !unit) continue;
+        await db
+          .insert(metricDefinitions)
+          .values({
+            companyId,
+            companyUnitId: unit?.id ?? null,
+            key: d.key,
+            name: d.name,
+            aliases: d.aliases,
+            unit: d.unit,
+            granularity: d.granularity,
+            direction: d.direction,
+            sourceKind: d.sourceKind,
+            connectorId: d.connectorId ?? null,
+            target: d.target === undefined ? null : String(d.target),
+            sort: sort + ui,
+          })
+          .onConflictDoNothing();
+      }
+      sort += 10;
+    }
+  }
 }
 
 async function seedSamples(db: Db, ids: SeedResult, options: SeedOptions) {
