@@ -17,7 +17,6 @@ export const metadata = { title: "Project" };
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const ctx = await getPageContext();
-  if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const project = await getProject(ctx, id).catch((err: unknown) => {
     if (err instanceof ServiceError && err.code === "not_found") notFound();
     throw err;

@@ -95,6 +95,19 @@ describe("local auth", () => {
     expect(await verifySessionToken(res!.token)).not.toBeNull();
   });
 
+  it("an expired session resolves to no user", async () => {
+    const { sessions } = await import("@/server/db/schema");
+    const { eq } = await import("drizzle-orm");
+    const res = await localAuthProvider.signIn(t.handle.db, "nuraaly@founders.local", "test-password");
+    const claims = await verifySessionToken(res!.token);
+    expect(await localAuthProvider.getUser(t.handle.db, res!.token)).not.toBeNull();
+    await t.handle.db
+      .update(sessions)
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(sessions.id, claims!.sid));
+    expect(await localAuthProvider.getUser(t.handle.db, res!.token)).toBeNull();
+  });
+
   it("rejects wrong passwords, unknown users and tampered tokens", async () => {
     expect(await localAuthProvider.signIn(t.handle.db, "talant@founders.local", "nope")).toBeNull();
     expect(await localAuthProvider.signIn(t.handle.db, "ghost@founders.local", "test-password")).toBeNull();

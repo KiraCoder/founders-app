@@ -2,7 +2,7 @@ import "server-only";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { projectCreateSchema, type ProjectCreateInput } from "@/lib/schemas";
 import { companies, projects, tasks, users, type Project } from "@/server/db/schema";
-import { accessibleCompaniesWhere, assertCompanyAccess, visibleTasksWhere } from "./access";
+import { accessibleCompaniesWhere, assertCompanyAccess, assertValidId, visibleTasksWhere } from "./access";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 
@@ -63,6 +63,7 @@ export async function listProjects(ctx: ServiceContext, opts: { companyId?: stri
 }
 
 export async function getProject(ctx: ServiceContext, id: string): Promise<ProjectView> {
+  assertValidId(id, "Project");
   const [row] = await projectQuery(ctx).where(and(eq(projects.id, id), accessibleCompaniesWhere(ctx)));
   if (!row) throw new ServiceError("not_found", "Project not found");
   return toView(row);

@@ -1,7 +1,7 @@
 import "server-only";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { companies, people, personCompanies, users } from "@/server/db/schema";
-import { accessibleCompaniesWhere } from "./access";
+import { accessibleCompaniesWhere, inAccessibleCompany, visiblePeopleWhere } from "./access";
 import type { ServiceContext } from "./context";
 
 export interface PersonView {
@@ -38,7 +38,7 @@ export async function listPeople(ctx: ServiceContext, opts: { companyId?: string
   const rows = await ctx.db
     .select()
     .from(people)
-    .where(personIds ? inArray(people.id, personIds) : undefined)
+    .where(and(visiblePeopleWhere(ctx), personIds ? inArray(people.id, personIds) : undefined))
     .orderBy(asc(people.fullName));
 
   return rows.map((p) => ({
@@ -69,6 +69,7 @@ export async function assignablePeopleByCompany(ctx: ServiceContext): Promise<Re
     .select({ companyId: personCompanies.companyId, id: people.id, name: people.fullName, userId: people.userId })
     .from(personCompanies)
     .innerJoin(people, eq(people.id, personCompanies.personId))
+    .where(inAccessibleCompany(ctx, personCompanies.companyId))
     .orderBy(asc(people.fullName));
   const out: Record<string, { id: string; name: string }[]> = {};
   for (const r of rows) {

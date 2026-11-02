@@ -1,6 +1,8 @@
 import "server-only";
-import { and, eq, isNull, or, type SQL } from "drizzle-orm";
-import { companies, taskEvents, tasks } from "@/server/db/schema";
+import { and, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import { z } from "zod";
+import { companies, people, personCompanies, taskEvents, tasks } from "@/server/db/schema";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 
@@ -10,9 +12,13 @@ import { ServiceError } from "./errors";
  *
  * - Founders can see every company and every SHARED task.
  * - A PRIVATE task (personal todo) is visible only to its owner.
+ * - Staff (later) see only companies they belong to; until then, none.
  */
 export function visibleTasksWhere(ctx: ServiceContext): SQL {
-  return or(eq(tasks.visibility, "shared"), eq(tasks.ownerUserId, ctx.user.id))!;
+  const own = eq(tasks.ownerUserId, ctx.user.id);
+  const shared = eq(tasks.visibility, "shared");
+  const companyFilter = inAccessibleCompany(ctx, tasks.companyId);
+  return or(companyFilter ? and(shared, companyFilter)! : shared, own)!;
 }
 
 /**
@@ -21,7 +27,10 @@ export function visibleTasksWhere(ctx: ServiceContext): SQL {
  * todo, including deleted ones and tasks that were shared earlier, never leaks.
  */
 export function visibleEventsWhere(ctx: ServiceContext): SQL {
-  return or(eq(taskEvents.visibility, "shared"), eq(taskEvents.ownerUserId, ctx.user.id))!;
+  const own = eq(taskEvents.ownerUserId, ctx.user.id);
+  const shared = eq(taskEvents.visibility, "shared");
+  const companyFilter = inAccessibleCompany(ctx, taskEvents.companyId);
+  return or(companyFilter ? and(shared, companyFilter)! : shared, own)!;
 }
 
 /** SQL filter for companies the user may access. */
@@ -31,10 +40,40 @@ export function accessibleCompaniesWhere(ctx: ServiceContext): SQL | undefined {
   return eq(companies.id, "00000000-0000-0000-0000-000000000000");
 }
 
+/**
+ * For any table with a company id column (projects, person_companies, ...): rows of
+ * companies the user may access. `undefined` means "no restriction" (founders).
+ */
+export function inAccessibleCompany(ctx: ServiceContext, companyIdColumn: AnyPgColumn): SQL | undefined {
+  const where = accessibleCompaniesWhere(ctx);
+  if (!where) return undefined;
+  return inArray(companyIdColumn, ctx.db.select({ id: companies.id }).from(companies).where(where));
+}
+
+/** People the user may see: founders see everyone, others only people of their companies. */
+export function visiblePeopleWhere(ctx: ServiceContext): SQL | undefined {
+  const linkFilter = inAccessibleCompany(ctx, personCompanies.companyId);
+  if (!linkFilter) return undefined;
+  return inArray(
+    people.id,
+    ctx.db.select({ id: personCompanies.personId }).from(personCompanies).where(linkFilter),
+  );
+}
+
 export async function assertCompanyAccess(ctx: ServiceContext, companyId: string): Promise<void> {
   const [row] = await ctx.db
     .select({ id: companies.id })
     .from(companies)
     .where(and(eq(companies.id, companyId), isNull(companies.archivedAt), accessibleCompaniesWhere(ctx)));
   if (!row) throw new ServiceError("not_found", "Company not found");
+}
+
+const uuidSchema = z.uuid();
+
+/**
+ * Ids from URLs and forms are untrusted. A malformed id would make Postgres throw
+ * (a 500); treat it as "not found" instead.
+ */
+export function assertValidId(id: unknown, what: string): asserts id is string {
+  if (!uuidSchema.safeParse(id).success) throw new ServiceError("not_found", `${what} not found`);
 }

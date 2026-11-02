@@ -1,7 +1,7 @@
 import "server-only";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { companies, companyUnits, projects, type Company, type CompanyUnit } from "@/server/db/schema";
-import { accessibleCompaniesWhere } from "./access";
+import { accessibleCompaniesWhere, inAccessibleCompany } from "./access";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { taskCountsByCompany } from "./tasks";
@@ -32,6 +32,7 @@ export async function listCompanyCards(ctx: ServiceContext): Promise<CompanyCard
         active: sql<number>`count(*) filter (where ${projects.status} in ('planned','active','on_hold'))`.mapWith(Number),
       })
       .from(projects)
+      .where(inAccessibleCompany(ctx, projects.companyId))
       .groupBy(projects.companyId),
   ]);
   const projectCounts = new Map(projectRows.map((r) => [r.companyId, r.active]));

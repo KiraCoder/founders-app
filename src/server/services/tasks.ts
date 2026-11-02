@@ -39,7 +39,7 @@ import {
   type TaskStatus,
   type TaskVisibility,
 } from "@/server/db/schema";
-import { assertCompanyAccess, visibleEventsWhere, visibleTasksWhere } from "./access";
+import { assertCompanyAccess, assertValidId, visibleEventsWhere, visibleTasksWhere } from "./access";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { CLOSED_STATUSES, isOverdue, nextCompletedAt, thisWeekRange } from "./tasks-rules";
@@ -182,6 +182,7 @@ export async function listTasks(ctx: ServiceContext, rawFilters: TaskFilters = {
 
 /** Returns the task or throws not_found (also for private tasks of the other founder). */
 export async function getTask(ctx: ServiceContext, id: string): Promise<TaskView> {
+  assertValidId(id, "Task");
   const [row] = await baseSelect(ctx).where(and(eq(tasks.id, id), visibleTasksWhere(ctx)));
   if (!row) throw new ServiceError("not_found", "Task not found");
   return toView(row, today(ctx));
@@ -472,6 +473,7 @@ export async function deleteTask(ctx: ServiceContext, id: string): Promise<void>
 }
 
 async function loadRawVisibleTask(ctx: ServiceContext, id: string): Promise<Task> {
+  assertValidId(id, "Task");
   const [row] = await ctx.db.select().from(tasks).where(and(eq(tasks.id, id), visibleTasksWhere(ctx)));
   if (!row) throw new ServiceError("not_found", "Task not found");
   return row;
