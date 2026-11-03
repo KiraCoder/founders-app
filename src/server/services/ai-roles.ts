@@ -1140,47 +1140,56 @@ export async function hireRole(ctx: ServiceContext, input: HireCreateInput): Pro
 
 /** Tune (settings, notes) and/or pause / resume. Pausing closes the hire's data requests. */
 export async function updateHire(ctx: ServiceContext, id: unknown, input: HirePatchInput, opts: { revertedTo?: number } = {}): Promise<HireView> {
-  const current = await getHire(ctx, id);
+  const view = await getHire(ctx, id);
   const data = hirePatchSchema.parse(input);
-  const set: Partial<typeof aiRoleHires.$inferInsert> = { updatedAt: ctx.now };
-  const role = await resolveRole(ctx.db, current.templateKey);
-  const [stored] = await ctx.db.select({ settings: aiRoleHires.settings, notes: aiRoleHires.notes }).from(aiRoleHires).where(eq(aiRoleHires.id, current.id));
-  if (data.settings) {
-    // `null` in a patch clears an override (checks / profile → the role's again).
-    const merged: Record<string, unknown> = { ...current.settings, ...data.settings };
-    for (const k of ["checks", "profile"] as const) if (data.settings[k] === null) delete merged[k];
-    set.settings = await validateSettings(ctx, current.companyId, merged as HireSettings, role ?? undefined);
-  }
-  if (data.notes !== undefined) set.notes = data.notes;
-  if (data.status && data.status !== current.status) {
-    set.status = data.status;
-    set.pausedAt = data.status === "paused" ? ctx.now : null;
-  }
-  await ctx.db.update(aiRoleHires).set(set).where(eq(aiRoleHires.id, current.id));
-  const before = hireSnapshot(stored!.settings as HireSettings, stored!.notes);
-  const after = hireSnapshot((set.settings ?? stored!.settings) as HireSettings, set.notes !== undefined ? (set.notes ?? null) : stored!.notes);
-  if (JSON.stringify(before) !== JSON.stringify(after)) {
-    await logSettingsChange(ctx.db, {
-      scope: "hire",
-      roleKey: current.templateKey,
-      hireId: current.id,
-      action: opts.revertedTo ? "revert" : "edit",
-      revertedTo: opts.revertedTo,
-      before,
-      after,
-      userId: ctx.user.id,
-      now: ctx.now,
-    });
-  }
-  if (data.status === "paused") {
-    await ctx.db
-      .update(aiDataRequests)
-      .set({ status: "cancelled", reason: "paused", resolvedAt: ctx.now })
-      .where(and(eq(aiDataRequests.hireId, current.id), eq(aiDataRequests.status, "active")));
-  } else if (set.settings) {
-    await recheckOpenRuns(ctx.db, current.id, ctx.now, today(ctx));
-  }
-  return getHire(ctx, current.id);
+  const role = await resolveRole(ctx.db, view.templateKey);
+  // One transaction with the hire's row locked: the merge, the write and the version's
+  // `before` all see the same row, so two edits at once never lose one another's change or
+  // log a stale `before`.
+  const changed = await ctx.db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Db;
+    const tctx: ServiceContext = { ...ctx, db: tx };
+    const [stored] = await tx.select({ settings: aiRoleHires.settings, notes: aiRoleHires.notes }).from(aiRoleHires).where(eq(aiRoleHires.id, view.id)).for("update");
+    if (!stored) throw new ServiceError("not_found", "AI role not found");
+    const current = await getHire(tctx, view.id);
+    const set: Partial<typeof aiRoleHires.$inferInsert> = { updatedAt: ctx.now };
+    if (data.settings) {
+      // `null` in a patch clears an override (checks / profile → the role's again).
+      const merged: Record<string, unknown> = { ...current.settings, ...data.settings };
+      for (const k of ["checks", "profile"] as const) if (data.settings[k] === null) delete merged[k];
+      set.settings = await validateSettings(tctx, current.companyId, merged as HireSettings, role ?? undefined);
+    }
+    if (data.notes !== undefined) set.notes = data.notes;
+    if (data.status && data.status !== current.status) {
+      set.status = data.status;
+      set.pausedAt = data.status === "paused" ? ctx.now : null;
+    }
+    await tx.update(aiRoleHires).set(set).where(eq(aiRoleHires.id, current.id));
+    const before = hireSnapshot(stored.settings as HireSettings, stored.notes);
+    const after = hireSnapshot((set.settings ?? stored.settings) as HireSettings, set.notes !== undefined ? (set.notes ?? null) : stored.notes);
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      await logSettingsChange(tx, {
+        scope: "hire",
+        roleKey: current.templateKey,
+        hireId: current.id,
+        action: opts.revertedTo ? "revert" : "edit",
+        revertedTo: opts.revertedTo,
+        before,
+        after,
+        userId: ctx.user.id,
+        now: ctx.now,
+      });
+    }
+    if (data.status === "paused") {
+      await tx
+        .update(aiDataRequests)
+        .set({ status: "cancelled", reason: "paused", resolvedAt: ctx.now })
+        .where(and(eq(aiDataRequests.hireId, current.id), eq(aiDataRequests.status, "active")));
+    }
+    return { settings: !!set.settings, paused: data.status === "paused" };
+  });
+  if (!changed.paused && changed.settings) await recheckOpenRuns(ctx.db, view.id, ctx.now, today(ctx));
+  return getHire(ctx, view.id);
 }
 
 /**
