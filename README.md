@@ -497,7 +497,8 @@ it at once). A failure while re-analysing a run that already has a report keeps 
    Anti-spam: at most one line per role per founder per day, every day for 7 days, then
    **weekly**; at most 3 role lines per summary; a new month **supersedes** the older request
    (one line covers "September and October 2026"); pausing or no longer asking a founder closes
-   theirs. No separate pushes — so no budget use, and quiet hours / "not linked" work like the
+   theirs, and resuming / asking them again revives the same request with its original cadence
+   (no new 7 days of daily chasing). No separate pushes — so no budget use, and quiet hours / "not linked" work like the
    summary itself.
 3. Complete → the **rule-based analysis** (`src/server/ai/finance-rules.ts`, exact decimals,
    no AI): change vs the month before and vs the 3-month average beyond the thresholds; ratios

@@ -681,10 +681,12 @@ async function syncDataRequests(db: Db, hc: HireContext, todayIso: IsoDate, now:
       .insert(aiDataRequests)
       .values({ hireId: hc.hire.id, userId, roundKey, createdOn: todayIso, createdAt: now })
       // A request closed because the role was paused or the founder was no longer asked comes
-      // back (fresh cadence) once the role runs / asks them again; done or superseded ones don't.
+      // back once the role runs / asks them again — with its ORIGINAL cadence (createdOn,
+      // lastShownOn kept): pausing / toggling a founder never restarts 7 days of daily chasing.
+      // Done or superseded ones don't come back.
       .onConflictDoUpdate({
         target: [aiDataRequests.hireId, aiDataRequests.userId, aiDataRequests.roundKey],
-        set: { status: "active", reason: null, resolvedAt: null, createdOn: todayIso, lastShownOn: null },
+        set: { status: "active", reason: null, resolvedAt: null },
         setWhere: sql`${aiDataRequests.status} = 'cancelled' and ${aiDataRequests.reason} in ('paused', 'not_asked')`,
       })
       .returning({ id: aiDataRequests.id });

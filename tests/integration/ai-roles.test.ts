@@ -266,17 +266,27 @@ describe("run state machine, data requests and chasing", () => {
     }
   });
 
-  it("pause closes the requests; resume brings this month's request back (fresh cadence)", async () => {
+  it("pause closes the requests; resume (or asking a founder again) revives this month's request with its original cadence", async () => {
     const [hire] = await listHires(t.ctx("nuraaly"));
+    const all = async () => (await t.handle.db.select().from(aiDataRequests)).filter((r) => r.roundKey === "2026-10-01");
+    const before = (await all()).map((r) => [r.userId, r.createdOn, r.lastShownOn]).sort();
+    expect(before.every(([, created]) => created === "2026-11-10")).toBe(true);
     await updateHire(t.ctx("nuraaly", bishkek("2026-12-01", "13:00")), hire!.id, { status: "paused" });
-    const active = async () => (await t.handle.db.select().from(aiDataRequests)).filter((r) => r.status === "active");
-    expect(await active()).toHaveLength(0);
+    expect((await all()).filter((r) => r.status === "active")).toHaveLength(0);
     await updateHire(t.ctx("nuraaly", bishkek("2026-12-01", "13:05")), hire!.id, { status: "active" });
     await orchestrateTick(t.handle.db, bishkek("2026-12-01", "13:10"));
-    expect((await active()).map((r) => [r.roundKey, r.createdOn, r.lastShownOn])).toEqual([
-      ["2026-10-01", "2026-12-01", null],
-      ["2026-10-01", "2026-12-01", null],
-    ]);
+    const after = await all();
+    expect(after.every((r) => r.status === "active")).toBe(true);
+    expect(after.map((r) => [r.userId, r.createdOn, r.lastShownOn]).sort()).toEqual(before);
+    // Toggling Talant out of "asks" and back in: same request, same cadence (weekly by now).
+    const both = hire!.settings.askUserIds;
+    await updateHire(t.ctx("nuraaly", bishkek("2026-12-01", "13:20")), hire!.id, { settings: { askUserIds: [t.userIds.nuraaly] } });
+    expect((await all()).find((r) => r.userId === t.userIds.talant)).toMatchObject({ status: "cancelled", reason: "not_asked" });
+    await updateHire(t.ctx("nuraaly", bishkek("2026-12-01", "13:25")), hire!.id, { settings: { askUserIds: both } });
+    expect((await all()).map((r) => [r.userId, r.status, r.createdOn, r.lastShownOn]).sort()).toEqual(before.map(([u, c, l]) => [u, "active", c, l]).sort());
+    // Nuraaly was last chased on 30 Nov (weekly phase): not due again on 2 Dec (a fresh
+    // cadence would have chased him daily for another week).
+    expect((await collectAiRequests(t.ctx("nuraaly", bishkek("2026-12-02", "08:00"))))[0]!.dueToday).toBe(false);
   });
 
   it("superseded rounds: Talant (not linked) gets ONE line covering October and November when he links", async () => {
