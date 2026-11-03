@@ -8,6 +8,7 @@ import { renderedLineLength, renderTelegramTitleLength, TELEGRAM_MAX_TEXT } from
 import {
   TASK_ACTION_LABELS,
   TASK_ACTIONS,
+  taskRef,
   type MessageAction,
   type MessageLine,
   type NeutralMessage,
@@ -258,6 +259,44 @@ export function buildTaskMessage(kind: NotificationKind, task: TaskView, today: 
     title,
     lines,
     actions: TASK_ACTIONS.map((action) => ({ action, taskId: task.id, label: TASK_ACTION_LABELS[action] })),
+  };
+}
+
+/** At most this many tasks (3 buttons each) in one grouped overdue push; the rest is "+N more". */
+export const MAX_GROUPED_CHASE_TASKS = 10;
+
+/** Buttons per task in the grouped overdue push: Done / +1 day / +3 days (no snooze). */
+export const GROUPED_CHASE_ACTIONS = [
+  { action: "done", label: "Done" },
+  { action: "move_1d", label: "+1 day" },
+  { action: "move_3d", label: "+3 days" },
+] as const;
+
+/**
+ * The grouped overdue chase ("grouped" chase style): ONE push for every overdue task due a
+ * chase today. Each task is a numbered line (carrying taskRef, so fitTelegram drops its buttons
+ * if the line is cut) with its own keyboard row: "1 · Done", "1 · +1 day", "1 · +3 days".
+ * `listed` = the tasks that got a line (only those count as touched today).
+ */
+export function buildGroupedChase(
+  tasks: readonly (TaskLike & { project?: { name: string } | null })[],
+  today: IsoDate,
+): { message: NeutralMessage; listed: string[] } {
+  const shown = tasks.slice(0, MAX_GROUPED_CHASE_TASKS);
+  const n = tasks.length;
+  const lines: MessageLine[] = shown.map((t, i) => ({
+    text: `${i + 1}. ${taskLine(t, today)}`,
+    style: "text",
+    refs: [taskRef(t.id)],
+  }));
+  if (n > shown.length) lines.push({ text: MORE_IN_APP(n - shown.length), style: "muted" });
+  lines.push({ text: "Done closes a task; +1 day / +3 days moves its deadline.", style: "muted" });
+  const actions: MessageAction[] = shown.flatMap((t, i) =>
+    GROUPED_CHASE_ACTIONS.map((a) => ({ action: a.action, taskId: t.id, label: `${i + 1} · ${a.label}`, row: i })),
+  );
+  return {
+    message: { title: `${n} task${n === 1 ? " needs" : "s need"} a new deadline`, lines, actions },
+    listed: shown.map((t) => t.id),
   };
 }
 

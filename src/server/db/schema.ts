@@ -445,6 +445,12 @@ export const notificationPreferences = pgTable("notification_preferences", {
   maxOtherPerDay: integer("max_other_per_day").notNull().default(3),
   /** Let priority "urgent" items through during quiet hours. */
   urgentAtNight: boolean("urgent_at_night").notNull().default(false),
+  /**
+   * How overdue tasks are chased on chase days: "separate" (one push per task, the default),
+   * "grouped" (one 10:00 push listing them all) or "summary_only" (no chase pushes; the
+   * morning summary lists them).
+   */
+  overdueChaseStyle: text("overdue_chase_style").notNull().default("separate"),
   updatedAt: updatedAt(),
 }, (t) => [
   check("notification_preferences_morning_hm", sql`${t.morningSummaryTime} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
@@ -452,6 +458,10 @@ export const notificationPreferences = pgTable("notification_preferences", {
   check("notification_preferences_quiet_start_hm", sql`${t.quietStart} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
   check("notification_preferences_quiet_end_hm", sql`${t.quietEnd} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
   check("notification_preferences_max_other_range", sql`${t.maxOtherPerDay} between 0 and 10`),
+  check(
+    "notification_preferences_chase_style",
+    sql`${t.overdueChaseStyle} in ('separate', 'grouped', 'summary_only')`,
+  ),
 ]);
 
 /** A founder's linked Telegram private chat. One per user, one user per chat. */

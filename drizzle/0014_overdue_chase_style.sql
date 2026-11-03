@@ -1,0 +1,2 @@
+ALTER TABLE "notification_preferences" ADD COLUMN "overdue_chase_style" text DEFAULT 'separate' NOT NULL;--> statement-breakpoint
+ALTER TABLE "notification_preferences" ADD CONSTRAINT "notification_preferences_chase_style" CHECK ("notification_preferences"."overdue_chase_style" in ('separate', 'grouped', 'summary_only'));

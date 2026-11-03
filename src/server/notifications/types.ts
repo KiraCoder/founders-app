@@ -64,6 +64,8 @@ export interface MessageLine {
 export const parkedRef = (outboxId: string) => `p:${outboxId}`;
 export const holdingRef = (askItemId: string) => `h:${askItemId}`;
 export const aiRequestRef = (requestId: string) => `ai:${requestId}`;
+/** A task listed in a grouped overdue push (its buttons go when its line is cut). */
+export const taskRef = (taskId: string) => `t:${taskId}`;
 
 /** Actions on holding items: "I asked Elmurat" marks the item's months as requested. */
 export const HOLDING_ACTIONS = ["holding_asked"] as const;
@@ -71,8 +73,10 @@ export type HoldingAction = (typeof HOLDING_ACTIONS)[number];
 
 /** A button: on a task (taskId) or on a holding ask item (askId). */
 export type MessageAction =
-  | { label: string; action: TaskAction; taskId: string; askId?: undefined }
-  | { label: string; action: HoldingAction; askId: string; taskId?: undefined };
+  | { label: string; action: TaskAction; taskId: string; askId?: undefined; row?: number }
+  | { label: string; action: HoldingAction; askId: string; taskId?: undefined; row?: number };
+// `row`: buttons with the same row number share one keyboard row (the grouped overdue push puts
+// each task's buttons on its own row). Without it, buttons go two per row.
 
 /** What every channel receives. Plain text only: renderers do the escaping. */
 export interface NeutralMessage {

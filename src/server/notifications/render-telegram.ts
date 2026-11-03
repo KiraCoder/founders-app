@@ -2,7 +2,7 @@
  * Telegram renderer: NeutralMessage -> sendMessage params (HTML parse mode + inline keyboard).
  * Pure; every piece of user text is escaped.
  */
-import { actionKey, holdingRef, type ActionCallbacks, type MessageLine, type NeutralMessage } from "./types";
+import { actionKey, holdingRef, taskRef, type ActionCallbacks, type MessageLine, type NeutralMessage } from "./types";
 
 export const TELEGRAM_MAX_TEXT = 4096;
 
@@ -63,7 +63,8 @@ export interface FittedMessage {
  * tag or entity), and reports which line refs survived. The dispatcher marks holding asks,
  * AI requests and parked items as shown/bundled only when their line is in `keptRefs`, so
  * nothing is ever marked as delivered that the founder did not see.
- * Buttons of holding items whose line was left out are removed too.
+ * Buttons of holding items whose line was left out are removed too, and so are the buttons of
+ * a task whose line (taskRef) was left out.
  */
 export function fitTelegram(message: NeutralMessage): FittedMessage {
   const keptRefs = new Set<string>();
@@ -84,7 +85,9 @@ export function fitTelegram(message: NeutralMessage): FittedMessage {
   }
   if (!cut) return { message, keptRefs, droppedRefs };
   for (const r of keptRefs) droppedRefs.delete(r);
-  const actions = message.actions?.filter((a) => !a.askId || keptRefs.has(holdingRef(a.askId)));
+  const actions = message.actions?.filter((a) =>
+    a.askId ? keptRefs.has(holdingRef(a.askId)) : !(a.taskId && droppedRefs.has(taskRef(a.taskId))),
+  );
   return {
     message: { ...message, lines: [...kept, { text: "…", style: "text" }], ...(actions ? { actions } : {}) },
     keptRefs,
@@ -105,15 +108,27 @@ export function renderTelegramText(message: NeutralMessage): string {
   return text;
 }
 
-/** Buttons appear only when the dispatcher minted a callback token for them. Two per row. */
+/**
+ * Buttons appear only when the dispatcher minted a callback token for them. Two per row, or
+ * one row per `row` number when the actions carry one (the grouped overdue push: one row per task).
+ */
 export function renderTelegram(message: NeutralMessage, callbacks: ActionCallbacks = {}): TelegramRendered {
-  const buttons: InlineKeyboardButton[] = [];
+  const buttons: { button: InlineKeyboardButton; row?: number }[] = [];
   for (const a of message.actions ?? []) {
     const data = callbacks[actionKey(a)];
-    if (data) buttons.push({ text: a.label, callback_data: data });
+    if (data) buttons.push({ button: { text: a.label, callback_data: data }, row: a.row });
   }
   const rows: InlineKeyboardButton[][] = [];
-  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  if (buttons.some((b) => b.row !== undefined)) {
+    const byRow = new Map<number, InlineKeyboardButton[]>();
+    for (const b of buttons) {
+      const r = b.row ?? Number.MAX_SAFE_INTEGER;
+      byRow.set(r, [...(byRow.get(r) ?? []), b.button]);
+    }
+    for (const r of [...byRow.keys()].sort((x, y) => x - y)) rows.push(byRow.get(r)!);
+  } else {
+    for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2).map((b) => b.button));
+  }
   return {
     text: renderTelegramText(message),
     parse_mode: "HTML",

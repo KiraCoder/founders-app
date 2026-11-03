@@ -97,6 +97,16 @@ const hmTime = z.string().regex(/^([01]\d|2[0-3]):([0-5]\d)$/, "Use HH:MM (24h)"
 /** Checkboxes post "on" or nothing. */
 const formBool = z.preprocess((v) => v === true || v === "on" || v === "true" || v === "1", z.boolean());
 
+/**
+ * How overdue tasks are chased on chase days (Settings → Notifications):
+ * - "separate": one push per overdue task (within the daily budget) — the default;
+ * - "grouped": one 10:00 push listing every task due a chase that day, with buttons per task;
+ * - "summary_only": no chase pushes; overdue tasks are listed only in the morning summary.
+ */
+export const OVERDUE_CHASE_STYLES = ["separate", "grouped", "summary_only"] as const;
+export type OverdueChaseStyle = (typeof OVERDUE_CHASE_STYLES)[number];
+export const DEFAULT_OVERDUE_CHASE_STYLE: OverdueChaseStyle = "separate";
+
 export const notificationPrefsSchema = z
   .object({
     morningSummaryTime: hmTime,
@@ -106,6 +116,8 @@ export const notificationPrefsSchema = z
     quietEnd: hmTime,
     maxOtherPerDay: z.coerce.number().int().min(0, "0 or more").max(10, "At most 10"),
     urgentAtNight: formBool,
+    /** Optional: leaving it out keeps the saved style (new founders get "separate"). */
+    overdueChaseStyle: z.enum(OVERDUE_CHASE_STYLES, { message: "Pick how overdue tasks are chased" }).optional(),
   })
   .strict()
   .superRefine((p, ctx) => {

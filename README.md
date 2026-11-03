@@ -189,6 +189,20 @@ How it works (all in `src/server/notifications/`):
    - **Urgent tasks**: pushes about tasks with priority *urgent* do not use that budget but
      have their own cap of **2 per day**; beyond that they are parked too. Only a notification
      of kind `urgent` (none is created automatically today) skips the budget entirely.
+   - **Overdue tasks** (Settings → Notifications → *Overdue tasks*, per founder): how the
+     chase-day pushes go out. **One push per task** (`separate`, the default — the behaviour
+     described above). **One grouped push** (`grouped`): every overdue task due a chase that
+     day goes into ONE 10:00 push, "3 tasks need a new deadline", numbered, with a keyboard row
+     per task (*1 · Done*, *1 · +1 day*, *1 · +3 days*; at most 10 tasks, then "+N more — open
+     the app"). It counts as **one** push against the budget (or against the urgent cap of 2
+     when an urgent-priority task leads it), follows quiet hours, the fold-into-summary rule
+     and `not_linked` like any push, is shortened to 4096 characters by whole lines (a task
+     whose line is cut loses its buttons too), and is the day's one push for every task it
+     lists (a snooze reminder for such a task that day is cancelled). If the budget is full it
+     is parked like any push. **Morning summary only** (`summary_only`): no overdue chase
+     pushes at all; overdue tasks are listed only in the morning summary (due-today nudges,
+     snooze reminders and `urgent` notifications still push). Stored in
+     `notification_preferences.overdue_chase_style` (migration `0014`).
    - Channel errors are retried after 1, 5, 15, 60 minutes, then marked failed. A Telegram
      call that does not answer within 10 seconds counts as an error.
    - Each item is **claimed** before sending (`status = sending`, wall-clock `claimed_at`,

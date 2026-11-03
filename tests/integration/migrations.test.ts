@@ -402,6 +402,21 @@ describe("0013 AI roles fixes on existing data", () => {
   });
 });
 
+describe("0014 overdue chase style on existing data", () => {
+  it("gives every saved preference row the default 'separate' and refuses unknown styles", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0014") });
+    await client.exec(`
+      insert into users (id, email, name, short_name) values ('${NURAALY}', 'n@x', 'Nuraaly', 'Nuraaly');
+      insert into notification_preferences (user_id, max_other_per_day) values ('${NURAALY}', 2);
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rows = await client.query("select max_other_per_day, overdue_chase_style from notification_preferences");
+    expect(rows.rows).toEqual([{ max_other_per_day: 2, overdue_chase_style: "separate" }]);
+    await expect(client.exec("update notification_preferences set overdue_chase_style = 'loud'")).rejects.toBeTruthy();
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();

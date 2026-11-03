@@ -13,10 +13,21 @@ import { mintActionTokens } from "./action-tokens";
 import { createChannelRegistry, type ChannelRegistry } from "./channels";
 import { getFounder, listFounders } from "./founders";
 import { getLinkForUser } from "./linking";
-import { buildEveningCheck, buildMorningSummary, buildTaskMessage, parkedLine, type ParkedItem } from "./messages";
+import { buildEveningCheck, buildGroupedChase, buildMorningSummary, buildTaskMessage, parkedLine, type ParkedItem } from "./messages";
 import { loadPreferences, type Preferences } from "./preferences";
 import { fitTelegram } from "./render-telegram";
-import { aiRequestRef, holdingRef, isSummaryKind, parkedRef, SUMMARY_KINDS, type NeutralMessage, type NotificationKind } from "./types";
+import {
+  aiRequestRef,
+  holdingRef,
+  isSummaryKind,
+  parkedRef,
+  SUMMARY_KINDS,
+  taskRef,
+  type NeutralMessage,
+  type NotificationChannel,
+  type NotificationKind,
+  type Recipient,
+} from "./types";
 
 export const MAX_ATTEMPTS = 5;
 /** Retry delays after the 1st, 2nd, 3rd, 4th failure. */
@@ -115,6 +126,9 @@ function budgetFilter(cls: Exclude<BudgetClass, "urgent">, item: OutboxItem): SQ
   if (cls === "summary") return eq(notificationsOutbox.kind, item.kind);
   return and(
     notInArray(notificationsOutbox.kind, NOT_TASK_PUSH_KINDS),
+    // Tasks listed inside a grouped overdue push (sent rows bundled into it) do not count:
+    // the grouped push itself is the one push.
+    isNull(notificationsOutbox.bundledIntoId),
     cls === "urgent_task" ? eq(notificationsOutbox.priority, "urgent") : ne(notificationsOutbox.priority, "urgent"),
   )!;
 }
@@ -241,6 +255,14 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
     const message = runId ? await buildReportReadyMessage(ctx, runId) : null;
     return message ? { message } : { skip: "report_gone" };
   }
+  const loaded = await loadTaskForPush(ctx, item);
+  if ("skip" in loaded) return loaded;
+  return { message: buildTaskMessage(kind, loaded.task, todayInTimeZone(ctx.now, ctx.timeZone)) };
+}
+
+/** The task a task push is about, as the recipient, or why the push no longer makes sense. */
+async function loadTaskForPush(ctx: ServiceContext, item: OutboxItem): Promise<{ task: TaskView } | { skip: string }> {
+  const kind = item.kind as NotificationKind;
   if (!item.taskId) return { skip: "no_task" };
   // getTask enforces visibility as the recipient: another founder's private task is "not found".
   const task: TaskView | null = await getTask(ctx, item.taskId).catch(() => null);
@@ -262,7 +284,7 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
       );
     if (snooze) return { skip: "snoozed" };
   }
-  return { message: buildTaskMessage(kind, task, today) };
+  return { task };
 }
 
 /**
@@ -346,7 +368,7 @@ export async function dispatch(db: Db, now: Date, opts: DispatchOptions = {}): P
         .set({ claimedAt: null, ...set })
         .where(and(eq(notificationsOutbox.id, item.id), eq(notificationsOutbox.status, "sending")));
     try {
-      await processItem(db, item, now, tz, registry, prefsCache, finish, report);
+      await processItem(db, item, now, tz, registry, prefsCache, finish, report, clock);
     } catch (err) {
       // One broken item must not stop the run for everyone else.
       const message = err instanceof Error ? err.message : String(err);
@@ -375,6 +397,7 @@ async function processItem(
   prefsCache: Map<string, Preferences>,
   finish: (set: Partial<typeof notificationsOutbox.$inferInsert>) => Promise<unknown>,
   report: DispatchReport,
+  clock: () => Date,
 ): Promise<void> {
   const cancel = async (reason: string) => {
     await finish({ status: "cancelled", lastError: reason, nextAttemptAt: null });
@@ -406,6 +429,9 @@ async function processItem(
     prefs = await loadPreferences(db, user.id);
     prefsCache.set(user.id, prefs);
   }
+
+  // Chase style "summary_only": overdue tasks are only listed in the morning summary.
+  if (item.kind === "overdue_chase" && prefs.overdueChaseStyle === "summary_only") return cancel("chase_summary_only");
 
   // Quiet hours: hold until they end.
   if (isWithinWindow(now, prefs.quietStart, prefs.quietEnd, tz) && !(isUrgentItem(item) && prefs.urgentAtNight)) {
@@ -448,6 +474,9 @@ async function processItem(
   }
 
   const ctx = { ...makeContext(db, user, now), timeZone: tz };
+  if (item.kind === "overdue_chase" && prefs.overdueChaseStyle === "grouped") {
+    return sendGroupedChase(ctx, item, channel, recipient, finish, report, clock());
+  }
   const built = await buildFor(ctx, item);
   if (built.dropParked?.length) {
     await db
@@ -509,4 +538,134 @@ async function processItem(
     });
     report.retrying++;
   }
+}
+
+/**
+ * Chase style "grouped": the first overdue chase claimed for a founder (the highest priority,
+ * already past quiet hours, the fold-into-summary rule, the one-push-per-task check and the
+ * budget of its class) takes every other overdue chase of that founder due today and sends
+ * ONE message listing them, with Done / +1 day / +3 days per task. Rules:
+ * - it counts as one push against the budget (the tasks listed are stored as sent rows
+ *   bundled into it, which `budgetFilter` does not count);
+ * - it is the day's touch for every task listed (their own rows are sent), so a snooze
+ *   reminder or any other push for those tasks later that day is cancelled;
+ * - tasks that are no longer due a chase are dropped (same reasons as a single push); tasks
+ *   that did not fit (MAX_GROUPED_CHASE_TASKS, Telegram's limit) are cancelled as
+ *   `grouped_not_listed` and are not touched;
+ * - on a failed send the other rows wait with the same backoff and go out together again.
+ */
+async function sendGroupedChase(
+  ctx: ServiceContext,
+  leader: OutboxItem,
+  channel: NotificationChannel,
+  recipient: Recipient,
+  finish: (set: Partial<typeof notificationsOutbox.$inferInsert>) => Promise<unknown>,
+  report: DispatchReport,
+  wall: Date,
+): Promise<void> {
+  const db = ctx.db;
+  const now = ctx.now;
+  const o = notificationsOutbox;
+  const { start, end } = dayBounds(now, ctx.timeZone);
+  const followers = await db
+    .update(o)
+    .set({ status: "sending", claimedAt: wall })
+    .where(
+      and(
+        eq(o.userId, leader.userId),
+        eq(o.kind, "overdue_chase"),
+        eq(o.status, "pending"),
+        ne(o.id, leader.id),
+        lte(o.scheduledFor, now),
+        gte(o.scheduledFor, start),
+        lt(o.scheduledFor, end),
+        or(isNull(o.nextAttemptAt), lte(o.nextAttemptAt, now)),
+        or(isNull(o.expiresAt), gt(o.expiresAt, now)),
+      ),
+    )
+    .returning();
+  const setRow = (id: string, set: Partial<typeof o.$inferInsert>) =>
+    db
+      .update(o)
+      .set({ claimedAt: null, ...set })
+      .where(and(eq(o.id, id), eq(o.status, "sending")));
+
+  // Same checks as a single push, per task.
+  const valid: { row: OutboxItem; task: TaskView }[] = [];
+  let leaderSkip: string | null = null;
+  const seenTasks = new Set<string>();
+  for (const row of [leader, ...followers]) {
+    let skip: string | null = null;
+    if (row.taskId && seenTasks.has(row.taskId)) skip = "already_pushed_today";
+    else if (row.taskId && row.id !== leader.id && (await usedToday(db, row, now, ctx.timeZone, eq(o.taskId, row.taskId))) > 0) {
+      skip = "already_pushed_today";
+    }
+    const loaded = skip ? { skip } : await loadTaskForPush(ctx, row);
+    if ("skip" in loaded) {
+      if (row.id === leader.id) leaderSkip = loaded.skip;
+      else {
+        await setRow(row.id, { status: "cancelled", lastError: loaded.skip, nextAttemptAt: null });
+        report.cancelled++;
+      }
+      continue;
+    }
+    seenTasks.add(loaded.task.id);
+    valid.push({ row, task: loaded.task });
+  }
+  if (!valid.length) {
+    await finish({ status: "cancelled", lastError: leaderSkip ?? "nothing_to_send", nextAttemptAt: null });
+    report.cancelled++;
+    return;
+  }
+
+  // Highest priority first, then the longest overdue.
+  const rank: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+  valid.sort(
+    (x, y) =>
+      (rank[x.task.priority] ?? 9) - (rank[y.task.priority] ?? 9) || (x.task.dueDate ?? "").localeCompare(y.task.dueDate ?? ""),
+  );
+  const today = todayInTimeZone(now, ctx.timeZone);
+  const built = buildGroupedChase(valid.map((v) => v.task), today);
+  const { message, keptRefs } = fitTelegram(built.message);
+  const listed = new Set(built.listed.filter((id) => keptRefs.has(taskRef(id))));
+  // The leader row carries the message even if (in theory) its own line were cut.
+  const callbacks = message.actions?.length
+    ? await mintActionTokens(db, { userId: leader.userId, outboxId: leader.id, actions: message.actions, now })
+    : undefined;
+  const result = await channel.send(recipient, message, callbacks);
+  const attempts = leader.attempts + 1;
+  const others = valid.filter((v) => v.row.id !== leader.id);
+
+  if (result.ok) {
+    await finish({
+      status: "sent",
+      sentAt: now,
+      channel: channel.name,
+      providerMessageId: result.providerMessageId ?? null,
+      message,
+      attempts,
+      lastError: null,
+      nextAttemptAt: null,
+      payload: { ...(leader.payload as Record<string, unknown>), groupedTaskIds: [...listed] },
+    });
+    for (const v of others) {
+      if (listed.has(v.task.id)) {
+        await setRow(v.row.id, { status: "sent", sentAt: now, channel: channel.name, bundledIntoId: leader.id, lastError: null, nextAttemptAt: null });
+      } else {
+        await setRow(v.row.id, { status: "cancelled", lastError: "grouped_not_listed", nextAttemptAt: null });
+        report.cancelled++;
+      }
+    }
+    report.sent++;
+    return;
+  }
+  const failed = result.permanent || attempts >= MAX_ATTEMPTS;
+  const nextAttemptAt = failed ? null : new Date(now.getTime() + backoffMs(attempts));
+  await finish({ status: failed ? "failed" : "pending", attempts, lastError: result.error ?? "error", channel: channel.name, nextAttemptAt });
+  // The others wait with the same backoff (they were not attempted themselves).
+  for (const v of others) {
+    await setRow(v.row.id, failed ? { status: "failed", lastError: result.error ?? "error", nextAttemptAt: null } : { status: "pending", nextAttemptAt });
+  }
+  if (failed) report.failed++;
+  else report.retrying++;
 }

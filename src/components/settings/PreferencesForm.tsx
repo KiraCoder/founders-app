@@ -11,7 +11,26 @@ export interface PrefsValues {
   quietEnd: string;
   maxOtherPerDay: number;
   urgentAtNight: boolean;
+  overdueChaseStyle: "separate" | "grouped" | "summary_only";
 }
+
+const CHASE_STYLES: { value: PrefsValues["overdueChaseStyle"]; label: string; hint: string }[] = [
+  {
+    value: "separate",
+    label: "One push per task (default)",
+    hint: "On chase days (1, 3, 7 days overdue, then weekly) each overdue task gets its own push, within the daily limit.",
+  },
+  {
+    value: "grouped",
+    label: "One grouped push",
+    hint: "All overdue tasks due a chase that day come in one 10:00 push with Done / +1 day / +3 days per task. Counts as one push.",
+  },
+  {
+    value: "summary_only",
+    label: "Morning summary only",
+    hint: "No overdue pushes at all; overdue tasks are listed in the morning summary.",
+  },
+];
 
 function FieldError({ state, name }: { state: PrefsState; name: string }) {
   const msg = state.fieldErrors?.[name]?.[0];
@@ -78,6 +97,25 @@ export function PreferencesForm({ prefs, timeZone }: { prefs: PrefsValues; timeZ
           <span className="block text-muted">Let urgent items through during quiet hours. Off by default.</span>
         </span>
       </label>
+      <fieldset className="flex flex-col gap-2">
+        <legend className="label mb-1">Overdue tasks</legend>
+        {CHASE_STYLES.map((c) => (
+          <label key={c.value} className="flex items-start gap-2 text-[13px]">
+            <input
+              type="radio"
+              name="overdueChaseStyle"
+              value={c.value}
+              defaultChecked={prefs.overdueChaseStyle === c.value}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="font-medium">{c.label}</span>
+              <span className="block text-muted">{c.hint}</span>
+            </span>
+          </label>
+        ))}
+        <FieldError state={state} name="overdueChaseStyle" />
+      </fieldset>
       <div className="flex items-center gap-3">
         <button type="submit" className="btn btn-primary" disabled={pending}>
           Save preferences

@@ -93,7 +93,9 @@ export function planForUser(input: PlanInput): EnqueueInput[] {
     });
   }
 
-  for (const t of input.overdue) {
+  // Chase style "summary_only": no chase pushes; the morning summary lists overdue tasks.
+  // ("grouped" queues the same per-task rows; the dispatcher sends them as one push.)
+  for (const t of prefs.overdueChaseStyle === "summary_only" ? [] : input.overdue) {
     if (!t.dueDate || input.snoozedTaskIds.has(t.id)) continue;
     const days = daysBetween(t.dueDate, today);
     if (!isChaseDay(days)) continue;

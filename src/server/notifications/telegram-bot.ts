@@ -143,20 +143,20 @@ async function remainingKeyboard(
   userId: string,
   now: Date,
 ): Promise<Button[][]> {
-  const buttons = (message.reply_markup?.inline_keyboard ?? [])
-    .flat()
-    .filter((b): b is Button => typeof b.callback_data === "string" && b.callback_data !== pressed);
+  const isButton = (b: unknown): b is Button =>
+    !!b && typeof (b as Button).callback_data === "string" && (b as Button).callback_data !== pressed;
+  const original = (message.reply_markup?.inline_keyboard ?? []).map((row) => row.filter(isButton));
+  const buttons = original.flat();
   if (!buttons.length) return [];
   const live = await liveCallbacks(db, buttons.map((b) => b.callback_data), userId, now);
   const sameSubject = (s: { taskId: string | null; holdingAskId: string | null }) =>
     token?.kind === "task" ? s.taskId === token.taskId : token?.kind === "holding" ? s.holdingAskId === token.askId : false;
-  const keep = buttons.filter((b) => {
+  const keep = (b: Button) => {
     const s = live.get(b.callback_data);
     return !!s && !sameSubject(s);
-  });
-  const rows: Button[][] = [];
-  for (let i = 0; i < keep.length; i += 2) rows.push(keep.slice(i, i + 2));
-  return rows;
+  };
+  // Keep the original layout (the grouped overdue push has one row per task); empty rows go.
+  return original.map((row) => row.filter(keep)).filter((row) => row.length > 0);
 }
 
 /** Performs the calls through the Bot API. Errors are logged, never thrown (Telegram would retry). */

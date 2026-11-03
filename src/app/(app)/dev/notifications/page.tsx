@@ -116,6 +116,9 @@ export default async function DevNotificationsPage() {
                 ) : (
                   payload.summaryLine && <p className="mt-1 text-[13px]">{payload.summaryLine}</p>
                 )}
+                {item.status === "sent" && bundled && (
+                  <p className="mt-1 text-[12px] text-muted">Listed in the grouped overdue push (not sent on its own).</p>
+                )}
                 {item.status === "not_linked" && (
                   <p className="mt-1 text-[12px] text-warn">Held: Telegram is not linked yet. Sent once you link, if still valid.</p>
                 )}

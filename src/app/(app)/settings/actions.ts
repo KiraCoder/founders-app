@@ -25,6 +25,7 @@ const PREF_FIELDS = [
   "quietEnd",
   "maxOtherPerDay",
   "urgentAtNight",
+  "overdueChaseStyle",
 ] as const;
 
 export async function savePreferencesAction(_prev: PrefsState, fd: FormData): Promise<PrefsState> {
