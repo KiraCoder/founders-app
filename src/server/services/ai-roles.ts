@@ -590,7 +590,13 @@ async function syncDataRequests(db: Db, hc: HireContext, todayIso: IsoDate, now:
     const rows = await db
       .insert(aiDataRequests)
       .values({ hireId: hc.hire.id, userId, roundKey, createdOn: todayIso, createdAt: now })
-      .onConflictDoNothing({ target: [aiDataRequests.hireId, aiDataRequests.userId, aiDataRequests.roundKey] })
+      // A request closed because the role was paused or the founder was no longer asked comes
+      // back (fresh cadence) once the role runs / asks them again; done or superseded ones don't.
+      .onConflictDoUpdate({
+        target: [aiDataRequests.hireId, aiDataRequests.userId, aiDataRequests.roundKey],
+        set: { status: "active", reason: null, resolvedAt: null, createdOn: todayIso, lastShownOn: null },
+        setWhere: sql`${aiDataRequests.status} = 'cancelled' and ${aiDataRequests.reason} in ('paused', 'not_asked')`,
+      })
       .returning({ id: aiDataRequests.id });
     if (!rows[0]) continue;
     created++;

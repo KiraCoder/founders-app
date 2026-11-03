@@ -238,6 +238,19 @@ describe("run state machine, data requests and chasing", () => {
     expect(composeRequests([item], [], null).aiLines[1]!.text).toContain("Intercompany debt total");
   });
 
+  it("pause closes the requests; resume brings this month's request back (fresh cadence)", async () => {
+    const [hire] = await listHires(t.ctx("nuraaly"));
+    await updateHire(t.ctx("nuraaly", bishkek("2026-12-01", "13:00")), hire!.id, { status: "paused" });
+    const active = async () => (await t.handle.db.select().from(aiDataRequests)).filter((r) => r.status === "active");
+    expect(await active()).toHaveLength(0);
+    await updateHire(t.ctx("nuraaly", bishkek("2026-12-01", "13:05")), hire!.id, { status: "active" });
+    await orchestrateTick(t.handle.db, bishkek("2026-12-01", "13:10"));
+    expect((await active()).map((r) => [r.roundKey, r.createdOn, r.lastShownOn])).toEqual([
+      ["2026-10-01", "2026-12-01", null],
+      ["2026-10-01", "2026-12-01", null],
+    ]);
+  });
+
   it("superseded rounds: Talant (not linked) gets ONE line covering October and November when he links", async () => {
     await days("2026-12-02", "2026-12-10", ["08:30"]);
     const talant = (await t.handle.db.select().from(aiDataRequests)).filter((r) => r.userId === t.userIds.talant);
