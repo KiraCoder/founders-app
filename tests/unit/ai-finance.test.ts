@@ -227,7 +227,7 @@ describe("finance rules (fixed fixtures)", () => {
     const f = analyseFinance(
       input([
         series("revenue", [null, null, "1", "1"]),
-        { ...series("couriers_active", ["10", null, null, null], { label: "Active couriers", unit: "people" }) },
+        { ...series("couriers_active", ["10", null, null, null], { label: "Active couriers (end of month)", entryLabel: "Active couriers", unit: "people" }) },
         { ...series("on_time_pct", [null, null, null, null], { label: "On-time delivery" }), everHadData: false },
       ]),
     );

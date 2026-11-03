@@ -414,6 +414,7 @@ function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: rea
       key: d.key,
       name: mName,
       label: mLabel,
+      entryLabel: d.label,
       unitSlug: d.unitSlug,
       unit: d.unit,
       direction: d.direction,

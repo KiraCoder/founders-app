@@ -53,8 +53,10 @@ export interface MonthSeries {
   key: string;
   /** "Output per day" */
   name: string;
-  /** "Output per day · ХБК" */
+  /** The month value's label: "Output (month total) · ХБК" */
   label: string;
+  /** The number as founders enter it ("Output per day · ХБК"), for "missing" sentences. Default: label. */
+  entryLabel?: string;
   unitSlug: string | null;
   unit: string;
   direction: Direction;
@@ -314,10 +316,10 @@ function missingRules(input: FinanceInput): Finding[] {
       rule: "missing",
       severity: "warn",
       company: input.companyName,
-      metrics: [s.label],
+      metrics: [s.entryLabel ?? s.label],
       metricKeys: [s.key],
       numbers: [],
-      sentence: `${s.label} has no numbers for ${monthName(prevP)} and ${monthLabel(p)} (2+ months missing).`,
+      sentence: `${s.entryLabel ?? s.label} has no numbers for ${monthName(prevP)} and ${monthLabel(p)} (2+ months missing).`,
     });
   }
   if (never.length) {
@@ -326,10 +328,10 @@ function missingRules(input: FinanceInput): Finding[] {
       rule: "never_entered",
       severity: "info",
       company: input.companyName,
-      metrics: never.map((s) => s.label),
+      metrics: never.map((s) => s.entryLabel ?? s.label),
       metricKeys: never.map((s) => s.key),
       numbers: [],
-      sentence: `Never entered yet, so not analysed: ${never.map((s) => s.label).join(", ")}.`,
+      sentence: `Never entered yet, so not analysed: ${never.map((s) => s.entryLabel ?? s.label).join(", ")}.`,
     });
   }
   return out;
