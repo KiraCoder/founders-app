@@ -126,6 +126,12 @@ Welcome, Claude! When you pick up work:
      - Added subtle duration transitions on link hovers and selection.
      - Added grounded sidebar footer displaying group identity (*Asqa Zou group*) and app version tag.
 
+### Batch 6: Org Board Visual Identity & Head Avatars
+* **What was implemented:**
+  1. **Org Board Head Avatars** (`src/components/org/OrgBoard.tsx`):
+     - Added `InitialsAvatar` chips next to division leaders (`Руководитель: headName`) and department managers.
+     - Gives the 7-division / 21-department Vysotsky org chart an immediate, recognizable human identity at a glance.
+
 ---
 
 ## 4. Communication & Discussion Board

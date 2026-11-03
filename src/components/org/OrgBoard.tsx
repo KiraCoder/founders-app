@@ -34,6 +34,7 @@ import {
 import { formatDisplayDateTime } from "@/lib/dates";
 import { deptLabel, placeAt } from "@/lib/org";
 import type { OrgChartView, OrgDepartmentView, OrgDivisionView, OrgFunctionView } from "@/server/services/org";
+import { InitialsAvatar } from "@/components/ui";
 import { DepartmentPanel, DivisionPanel } from "./OrgPanels";
 
 export interface LinkedMetric {
@@ -512,7 +513,11 @@ function DivisionColumn({ division: d, h, mobileHidden }: { division: OrgDivisio
         <p className="text-[12.5px] leading-[18px]">
           <span className="font-semibold">Руководитель:</span>{" "}
           <InlineText value={d.headTitle} editing={h.editing} label={`Head title of division ${d.number}`} multiline={false} className="text-muted" onSave={(v) => h.saveDivision(d.id, { headTitle: v })} />
-          {d.headName && <span className="tag tag-ok ml-1">{d.headName}</span>}
+          {d.headName && (
+            <span className="tag tag-ok ml-1 inline-flex items-center gap-1">
+              <InitialsAvatar name={d.headName} size={14} tone="neutral" /> {d.headName}
+            </span>
+          )}
         </p>
         {(d.reportsTo || h.editing) && (
           <p className="rounded-[6px] bg-sunk px-2 py-1 text-[11.5px] text-muted">
@@ -642,7 +647,11 @@ function DepartmentCard({ dept, index, count, division, h }: { dept: OrgDepartme
       )}
       {(dept.headName || dept.openTasks > 0) && (
         <p className="flex flex-wrap gap-1 text-[11.5px]">
-          {dept.headName && <span className="tag tag-ok">{dept.headName}</span>}
+          {dept.headName && (
+            <span className="tag tag-ok inline-flex items-center gap-1">
+              <InitialsAvatar name={dept.headName} size={14} tone="neutral" /> {dept.headName}
+            </span>
+          )}
           {dept.openTasks > 0 && (
             <span className={`tag ${dept.overdueTasks ? "tag-risk" : ""}`}>
               {dept.openTasks} task{dept.openTasks === 1 ? "" : "s"}
