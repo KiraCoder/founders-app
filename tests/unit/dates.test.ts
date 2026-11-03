@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { checkRange, recentRange } from "@/server/connectors/runner";
 import {
   addDays,
   formatDisplayDate,
+  formatDisplayDateTime,
   parseDisplayDate,
   daysBetween,
   endOfIsoWeek,
@@ -74,5 +76,28 @@ describe("date fields: dd.mm.yyyy", () => {
     expect(parseDisplayDate("11/31/2026")).toBe("invalid");
     expect(parseDisplayDate("tomorrow")).toBe("invalid");
     expect(parseDisplayDate("2026-02-30")).toBe("invalid");
+  });
+});
+
+describe("formatDisplayDateTime (whole-app review #10)", () => {
+  it("shows an instant as dd.mm.yyyy HH:MM in the given app timezone", () => {
+    expect(formatDisplayDateTime(new Date("2026-11-02T18:30:00Z"), "Asia/Bishkek")).toBe("03.11.2026 00:30");
+    expect(formatDisplayDateTime("2026-11-02T08:05:00Z", "Asia/Bishkek")).toBe("02.11.2026 14:05");
+    expect(formatDisplayDateTime("2026-11-02T08:05:00Z", "Europe/Moscow")).toBe("02.11.2026 11:05");
+    expect(formatDisplayDateTime(null)).toBe("");
+    expect(formatDisplayDateTime("not a date")).toBe("");
+  });
+
+  it("defaults to APP_TIMEZONE, like the connectors' ranges", () => {
+    vi.stubEnv("APP_TIMEZONE", "Europe/Moscow");
+    try {
+      expect(formatDisplayDateTime("2026-11-02T22:30:00Z")).toBe("03.11.2026 01:30");
+      // 20:30 UTC on 2 Nov is still 2 Nov in Moscow ("yesterday" = 1 Nov), but 3 Nov in Bishkek.
+      expect(checkRange(new Date("2026-11-02T20:30:00Z")).to).toBe("2026-11-01");
+      expect(recentRange(new Date("2026-11-02T20:30:00Z"), 3)).toEqual({ from: "2026-10-30", to: "2026-11-01" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(checkRange(new Date("2026-11-02T20:30:00Z")).to).toBe("2026-11-02"); // Bishkek: 3 Nov 02:30
   });
 });

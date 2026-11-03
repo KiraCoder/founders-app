@@ -19,7 +19,7 @@
  * (with a fake connector).
  */
 import { and, eq, isNull } from "drizzle-orm";
-import { addDays, daysBetween, isIsoDate, todayInTimeZone, type IsoDate } from "@/lib/dates";
+import { addDays, appTimeZone, daysBetween, isIsoDate, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import {
   aggregateValues,
   metricValueProblem,
@@ -80,8 +80,8 @@ export function validateRange(range: DateRange): string | null {
   return null;
 }
 
-/** The last `days` days up to yesterday (Asia/Bishkek). */
-export function recentRange(now: Date, days = 7, timeZone = "Asia/Bishkek"): DateRange {
+/** The last `days` days up to yesterday (APP_TIMEZONE). */
+export function recentRange(now: Date, days = 7, timeZone = appTimeZone()): DateRange {
   const today = todayInTimeZone(now, timeZone);
   return { from: addDays(today, -days), to: addDays(today, -1) };
 }
@@ -90,7 +90,7 @@ export function recentRange(now: Date, days = 7, timeZone = "Asia/Bishkek"): Dat
  * Range for "Check now": from the 1st of the previous month (or 7 days back, whichever is
  * earlier) to yesterday, so the last complete week and month are always covered.
  */
-export function checkRange(now: Date, timeZone = "Asia/Bishkek"): DateRange {
+export function checkRange(now: Date, timeZone = appTimeZone()): DateRange {
   const today = todayInTimeZone(now, timeZone);
   const prevMonth = prevPeriod(periodStart(today, "month"), "month");
   const weekBack = addDays(today, -7);
@@ -261,7 +261,7 @@ export function planConnectorWrites(
 export async function runConnector(db: Db, id: string, range: DateRange, opts: RunOptions = {}): Promise<RunResult> {
   const registry = opts.registry ?? defaultRegistry();
   const now = opts.now ?? new Date();
-  const tz = opts.timeZone ?? (process.env.APP_TIMEZONE || "Asia/Bishkek");
+  const tz = opts.timeZone ?? appTimeZone();
   const none = { pointsReceived: 0, valuesWritten: 0, skipped: 0, conflicts: 0 };
   const connector = registry.get(id);
   if (!connector) return { runId: null, status: "error", message: `Unknown connector: ${id}`, ...none };

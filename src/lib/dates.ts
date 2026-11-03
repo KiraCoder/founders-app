@@ -163,6 +163,19 @@ export function formatDisplayDate(iso: string | null | undefined): string {
 }
 
 /**
+ * An instant as the app shows it: "02.11.2026 14:05" in APP_TIMEZONE (pass ctx.timeZone).
+ * Same dd.mm.yyyy as the date fields, 24-hour time; no locale-dependent formatting.
+ */
+export function formatDisplayDateTime(at: Date | string | null | undefined, timeZone: string = appTimeZone()): string {
+  if (!at) return "";
+  const d = typeof at === "string" ? new Date(at) : at;
+  if (Number.isNaN(d.getTime())) return "";
+  const mins = localMinutesOfDay(d, timeZone);
+  const hm = `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+  return `${formatDisplayDate(todayInTimeZone(d, timeZone))} ${hm}`;
+}
+
+/**
  * What a founder typed in a date field → ISO date. Accepts dd.mm.yyyy (also d.m.yyyy and
  * "/" or "-" as separator) and a pasted ISO yyyy-mm-dd. Two-digit years and impossible
  * dates (31.02.2026) are refused. Empty → null; anything else → "invalid".

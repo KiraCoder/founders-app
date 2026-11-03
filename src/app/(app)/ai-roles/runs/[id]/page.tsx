@@ -6,6 +6,7 @@ import { CreateTaskButton, RerunButton } from "@/components/ai-roles/RunActions"
 import { CompanyDot, PageHeader, Section } from "@/components/ui";
 import { monthLabel } from "@/lib/ai-roles";
 import { SEVERITY_LABELS, SEVERITY_ORDER, type Severity } from "@/server/ai/finance-rules";
+import { formatDisplayDateTime } from "@/lib/dates";
 import { formatDec, dec } from "@/lib/decimal";
 import { getPageContext } from "@/server/context";
 import { getRun, type RunView } from "@/server/services/ai-roles";
@@ -39,6 +40,7 @@ const SECTION_TITLE: Record<Severity, string> = { risk: "Risks", warn: "Warnings
 export default async function RunPage({ params }: Props) {
   const { id } = await params;
   const run = await load(id);
+  const timeZone = (await getPageContext()).timeZone;
   const analysed = run.status === "reported" || run.status === "analysed";
   return (
     <>
@@ -61,7 +63,7 @@ export default async function RunPage({ params }: Props) {
       >
         <p className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-muted">
           <RunStatusTag status={run.status} /> <span data-testid="run-summary">{run.summary}</span>
-          {run.analysedAt && <span>· analysed {new Date(run.analysedAt).toLocaleString("ru-RU", { timeZone: "Asia/Bishkek" })}</span>}
+          {run.analysedAt && <span>· analysed {formatDisplayDateTime(run.analysedAt, timeZone)}</span>}
           <span>· {run.trigger === "manual" ? "run by hand" : "scheduled"}</span>
         </p>
       </PageHeader>
@@ -120,7 +122,7 @@ export default async function RunPage({ params }: Props) {
             {run.error ?? "Unexpected error"} —{" "}
             {run.gaveUp
               ? `it failed ${run.attempts} times, so it is no longer retried automatically. Fix the cause (usually a number) and click Retry.`
-              : `tried ${run.attempts} time${run.attempts === 1 ? "" : "s"}; retried automatically${run.nextAttemptAt ? ` after ${new Date(run.nextAttemptAt).toLocaleString("ru-RU", { timeZone: "Asia/Bishkek" })}` : ""}.`}
+              : `tried ${run.attempts} time${run.attempts === 1 ? "" : "s"}; retried automatically${run.nextAttemptAt ? ` after ${formatDisplayDateTime(run.nextAttemptAt, timeZone)}` : ""}.`}
           </span>
           {run.hire.status === "active" && <RerunButton runId={run.id} label="Retry" />}
         </div>
