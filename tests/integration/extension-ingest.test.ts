@@ -234,6 +234,36 @@ describe("POST /api/v1/ingest", () => {
     expect(counter!.n).toBe(1);
   });
 
+  it("failed authentication: a malformed header never reaches the database; 20 failed key checks per IP per minute, then 429 before the lookup (C5b #8)", async () => {
+    now = new Date(FIXED_NOW.getTime() + 14_400_000 + 30_000);
+    let dbCalls = 0;
+    const real = t.handle.db;
+    const counting = new Proxy(real, {
+      get: (target, prop) => {
+        if (typeof prop === "string" && ["select", "insert", "update", "delete", "execute", "transaction"].includes(prop)) dbCalls++;
+        return Reflect.get(target, prop, target);
+      },
+    });
+    const body = env([]);
+    for (const authorization of ["", "Bearer", "Bearer fcx_short", `Basic ${key}`, `Bearer ${key}x`, `Bearer xyz_${key.slice(4)}`, `Bearer ${"a".repeat(5000)}`]) {
+      const r = await handleIngestRequest(post(body, { authorization }), { db: counting, now: () => now });
+      expect(r.status, authorization.slice(0, 30)).toBe(401);
+    }
+    expect(dbCalls).toBe(0);
+    const from = (ip: string, k: string) => send(post(body, { authorization: `Bearer ${k}`, "x-forwarded-for": `${ip}, 10.0.0.1` }));
+    const wrong = `fcx_${"A".repeat(43)}`;
+    for (let i = 0; i < 20; i++) expect((await from("9.9.9.9", wrong)).status).toBe(401);
+    const blocked = await from("9.9.9.9", wrong);
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("retry-after")).toBe("30");
+    // Blocked before the lookup: even a valid key from that address waits for the minute to end.
+    expect((await from("9.9.9.9", key)).status).toBe(429);
+    // Other addresses are not affected.
+    expect((await from("8.8.8.8", key)).status).toBe(200);
+    now = new Date(now.getTime() + 30_000);
+    expect((await from("9.9.9.9", key)).status).toBe(200);
+  });
+
   it("CORS: chrome-extension origins only, with preflight; other web origins are refused", async () => {
     const pre = handleIngestPreflight(new Request("http://app.test/api/v1/ingest", { method: "OPTIONS", headers: { origin: EXT, "access-control-request-method": "POST" } }));
     expect(pre.status).toBe(204);

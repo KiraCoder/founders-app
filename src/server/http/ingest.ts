@@ -4,12 +4,15 @@ import { makeContext } from "@/server/services/context";
 import { toServiceError } from "@/server/services/errors";
 import {
   authenticateKey,
+  authFailuresExceeded,
   INGEST_MAX_BYTES,
   INGEST_RATE_LIMIT,
   ingestEnvelopeSchema,
   ingestPoints,
   logIngest,
+  recordAuthFailure,
   takeIngestSlot,
+  wellFormedKeyHeader,
   type KeyAuth,
 } from "@/server/services/extension";
 import { allowedOrigins } from "./request-guard";
@@ -19,7 +22,9 @@ import { allowedOrigins } from "./request-guard";
  *
  * - Auth: `Authorization: Bearer <personal key>` (Settings → Browser extension). No session
  *   cookie, so the route is exempt from the same-origin guard (src/middleware.ts) — the key is
- *   the proof. Missing / unknown / revoked key → 401.
+ *   the proof. Missing / malformed / unknown / revoked key → 401. A malformed header is refused
+ *   without a database query; 20 failed key checks from one IP in a minute → 429 for the rest
+ *   of that minute (checked before the key lookup).
  * - CORS for this route only: `chrome-extension://…` origins get Access-Control-Allow-Origin
  *   (and a preflight answer); any other web origin is refused (403). Calls without an Origin
  *   (scripts, curl) are fine.
@@ -56,6 +61,16 @@ function json(body: unknown, status: number, origin: string | null, extra: Recor
 
 const error = (status: number, code: string, message: string, origin: string | null, extra?: Record<string, string>) =>
   json({ error: { code, message } }, status, origin, extra);
+
+/**
+ * The caller's address for the failed-authentication limit: the first X-Forwarded-For entry
+ * (Vercel sets it to the client), else X-Real-IP, else "unknown".
+ */
+export function clientIp(req: Request): string {
+  const fwd = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const ip = fwd || req.headers.get("x-real-ip")?.trim() || "unknown";
+  return ip.slice(0, 64);
+}
 
 /** A browser origin that is neither the extension nor this site: refused. */
 function foreignOrigin(req: Request, origin: string | null): boolean {
@@ -98,8 +113,21 @@ export async function handleIngestRequest(req: Request, deps: { db: Db; now?: ()
   const now = () => deps.now?.() ?? new Date();
   if (foreignOrigin(req, origin)) return error(403, "forbidden", "Cross-site request blocked", origin);
 
-  const auth = await authenticateKey(deps.db, req.headers.get("authorization"));
-  if (!auth) return error(401, "unauthorized", "A valid browser extension key is required (Settings → Browser extension)", origin);
+  const authorization = req.headers.get("authorization");
+  const unauthorized = () => error(401, "unauthorized", "A valid browser extension key is required (Settings → Browser extension)", origin);
+  // Cheap first: a header that can't be a key is refused without touching the database.
+  if (!wellFormedKeyHeader(authorization)) return unauthorized();
+  // An IP that keeps failing is refused before the key lookup, for the rest of the minute.
+  const ip = clientIp(req);
+  const failures = await authFailuresExceeded(deps.db, ip, now());
+  if (failures.blocked) {
+    return error(429, "rate_limited", `Too many failed key checks from this address — try again in ${failures.retryAfter} s`, origin, { "Retry-After": String(failures.retryAfter) });
+  }
+  const auth = await authenticateKey(deps.db, authorization);
+  if (!auth) {
+    await recordAuthFailure(deps.db, ip, now());
+    return unauthorized();
+  }
   // Counted before anything else is done, so parallel calls can't all pass (and refused or
   // failing calls count too).
   const slot = await takeIngestSlot(deps.db, auth.keyId, now());

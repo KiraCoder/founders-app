@@ -150,10 +150,18 @@ export interface KeyAuth {
   user: SessionUser;
 }
 
-/** "Bearer fcx_…" → the key and its owner (a founder), or null (missing, unknown, revoked). */
+/** The only shape a key header can have: "Bearer fcx_" + 43 base64url characters (32 bytes). */
+const KEY_HEADER = /^Bearer\s+(fcx_[A-Za-z0-9_-]{43})\s*$/i;
+
+/** Cheap pre-check, no database: could this header carry a key at all? */
+export function wellFormedKeyHeader(authorization: string | null): boolean {
+  return KEY_HEADER.test(authorization ?? "");
+}
+
+/** "Bearer fcx_…" → the key and its owner (a founder), or null (missing, malformed, unknown, revoked). */
 export async function authenticateKey(db: Db, authorization: string | null): Promise<KeyAuth | null> {
-  const m = /^Bearer\s+(\S+)\s*$/i.exec(authorization ?? "");
-  if (!m || !m[1]!.startsWith(KEY_PREFIX) || m[1]!.length > 200) return null;
+  const m = KEY_HEADER.exec(authorization ?? "");
+  if (!m) return null;
   const [row] = await db
     .select({ keyId: extensionKeys.id, id: users.id, email: users.email, name: users.name, shortName: users.shortName, role: users.role })
     .from(extensionKeys)
@@ -185,6 +193,27 @@ export async function hitRateCounter(db: Db, bucket: string, now: Date): Promise
   const n = Number(row?.n ?? 1);
   if (n === 1) await db.delete(ingestRateCounters).where(lt(ingestRateCounters.windowStart, new Date(start.getTime() - 3_600_000)));
   return { n, retryAfter: Math.max(1, Math.ceil((start.getTime() + 60_000 - now.getTime()) / 1000)) };
+}
+
+/** Failed authentications (well-formed header, unknown / revoked key) per IP per minute. */
+export const INGEST_AUTH_FAIL_LIMIT = 20;
+
+/**
+ * Before looking a key up: has this IP already failed authentication INGEST_AUTH_FAIL_LIMIT
+ * times this minute? (One primary-key read; the lookup is skipped while it is blocked.)
+ */
+export async function authFailuresExceeded(db: Db, ip: string, now: Date): Promise<{ blocked: boolean; retryAfter: number }> {
+  const start = windowStart(now);
+  const [row] = await db
+    .select({ n: ingestRateCounters.n })
+    .from(ingestRateCounters)
+    .where(and(eq(ingestRateCounters.bucket, `authfail:${ip}`), eq(ingestRateCounters.windowStart, start)));
+  return { blocked: (row?.n ?? 0) >= INGEST_AUTH_FAIL_LIMIT, retryAfter: Math.max(1, Math.ceil((start.getTime() + 60_000 - now.getTime()) / 1000)) };
+}
+
+/** Counts one failed authentication for the IP. */
+export async function recordAuthFailure(db: Db, ip: string, now: Date): Promise<void> {
+  await hitRateCounter(db, `authfail:${ip}`, now);
 }
 
 /**
