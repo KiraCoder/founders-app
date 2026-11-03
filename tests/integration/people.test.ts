@@ -21,7 +21,7 @@ import { createTestDb, type TestDb } from "../helpers/db";
 
 let t: TestDb;
 beforeAll(async () => {
-  t = await createTestDb();
+  t = await createTestDb({ salaryViewers: ["nuraaly"] });
 });
 afterAll(async () => {
   await t.handle.close();
@@ -61,7 +61,19 @@ async function unitId(company: string, slug: string) {
 }
 
 describe("salary viewers", () => {
-  it("default: only Nuraaly is a salary viewer", async () => {
+  it("default (fresh seed): both founders are salary viewers", async () => {
+    const fresh = await createTestDb();
+    try {
+      expect(await isSalaryViewer(fresh.ctx("nuraaly"))).toBe(true);
+      expect(await isSalaryViewer(fresh.ctx("talant"))).toBe(true);
+      const list = await listSalaryViewers(fresh.ctx("talant"));
+      expect(list.filter((v) => v.isViewer).map((v) => v.shortName).sort()).toEqual(["Nuraaly", "Talant"]);
+    } finally {
+      await fresh.handle.close();
+    }
+  });
+
+  it("switched off for Talant (Settings → Access): only Nuraaly is a salary viewer", async () => {
     expect(await isSalaryViewer(t.ctx("nuraaly"))).toBe(true);
     expect(await isSalaryViewer(t.ctx("talant"))).toBe(false);
     const list = await listSalaryViewers(t.ctx("talant"));

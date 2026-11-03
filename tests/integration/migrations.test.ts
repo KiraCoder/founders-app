@@ -109,7 +109,7 @@ describe("0005 notifications hardening on existing data", () => {
 });
 
 describe("0006 people + salaries on existing data", () => {
-  it("keeps people and links (active, staff) and makes Nuraaly the only salary viewer", async () => {
+  it("keeps people and links (active, staff) and makes Nuraaly the only salary viewer (until 0016)", async () => {
     const { client, db } = await newPglite();
     await migrate(db, { migrationsFolder: migrationsUpTo("0006") });
     await client.exec(`
@@ -120,7 +120,7 @@ describe("0006 people + salaries on existing data", () => {
       insert into person_companies (person_id, company_id, role) values
         ('55555555-5555-4555-8555-555555555555', '33333333-3333-4333-8333-333333333333', 'accountant');
     `);
-    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    await migrate(db, { migrationsFolder: migrationsUpTo("0016") });
     const links = await client.query<{ role: string; is_active: boolean; employment_type: string }>(
       "select role, is_active, employment_type from person_companies",
     );
@@ -403,14 +403,14 @@ describe("0013 AI roles fixes on existing data", () => {
 });
 
 describe("0014 overdue chase style on existing data", () => {
-  it("gives every saved preference row the default 'separate' and refuses unknown styles", async () => {
+  it("gives every saved preference row the default 'separate' (until 0016) and refuses unknown styles", async () => {
     const { client, db } = await newPglite();
     await migrate(db, { migrationsFolder: migrationsUpTo("0014") });
     await client.exec(`
       insert into users (id, email, name, short_name) values ('${NURAALY}', 'n@x', 'Nuraaly', 'Nuraaly');
       insert into notification_preferences (user_id, max_other_per_day) values ('${NURAALY}', 2);
     `);
-    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    await migrate(db, { migrationsFolder: migrationsUpTo("0016") });
     const rows = await client.query("select max_other_per_day, overdue_chase_style from notification_preferences");
     expect(rows.rows).toEqual([{ max_other_per_day: 2, overdue_chase_style: "separate" }]);
     await expect(client.exec("update notification_preferences set overdue_chase_style = 'loud'")).rejects.toBeTruthy();
@@ -575,5 +575,61 @@ describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
         (e: Error) => e.message,
       );
     expect(anon).toMatch(/permission denied/);
+  });
+});
+
+describe("0016 the founders' decisions on existing data", () => {
+  it("grouped chase for rows on 'separate' (other choices kept), Talant sees salaries, Financial Analyst hires accept month totals", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0016") });
+    const STAFF = "77777777-7777-4777-8777-777777777777";
+    const C1 = "33333333-3333-4333-8333-333333333331";
+    const C2 = "33333333-3333-4333-8333-333333333332";
+    await client.exec(`
+      insert into users (id, email, name, short_name, role) values
+        ('${NURAALY}', 'nuraaly@founders.local', 'Nuraaly', 'Nuraaly', 'founder'),
+        ('${TALANT}', 'talant@founders.local', 'Talant', 'Talant', 'founder'),
+        ('${STAFF}', 'staff@x', 'Staff', 'Staff', 'staff');
+      insert into salary_viewers (user_id) values ('${NURAALY}');
+      insert into notification_preferences (user_id, overdue_chase_style, max_other_per_day) values
+        ('${NURAALY}', 'separate', 2), ('${TALANT}', 'summary_only', 3);
+      insert into companies (id, slug, name) values ('${C1}', 'kiwi-go', 'Kiwi Go'), ('${C2}', 'jobutify', 'Jobutify');
+      insert into ai_role_templates (key, name, description, status, required_data, default_schedule) values
+        ('financial-analyst', 'Financial Analyst', 'd', 'available', '{"byCompanyType":{},"optionalUploads":[]}', '{"kind":"monthly","day":10}'),
+        ('hr', 'HR', 'd', 'coming_soon', '{"byCompanyType":{},"optionalUploads":[]}', '{"kind":"monthly","day":10}');
+      insert into ai_role_hires (template_key, company_id, settings, hired_on) values
+        ('financial-analyst', '${C1}', '{"schedule":{"kind":"monthly","day":10},"recipients":["${NURAALY}"]}', '2026-11-02'),
+        ('financial-analyst', '${C2}', '{"acceptMonthlyTotals":false}', '2026-11-02'),
+        ('hr', '${C1}', '{"acceptMonthlyTotals":false}', '2026-11-02');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+
+    const prefs = await client.query("select user_id, overdue_chase_style, max_other_per_day from notification_preferences order by user_id");
+    expect(prefs.rows).toEqual([
+      { user_id: NURAALY, overdue_chase_style: "grouped", max_other_per_day: 2 },
+      { user_id: TALANT, overdue_chase_style: "summary_only", max_other_per_day: 3 },
+    ]);
+    await client.exec(`insert into notification_preferences (user_id) values ('${STAFF}')`);
+    expect((await client.query(`select overdue_chase_style from notification_preferences where user_id = '${STAFF}'`)).rows).toEqual([
+      { overdue_chase_style: "grouped" },
+    ]);
+
+    const viewers = await client.query<{ user_id: string }>("select user_id from salary_viewers order by user_id");
+    expect(viewers.rows.map((r) => r.user_id)).toEqual([NURAALY, TALANT]);
+
+    const hires = await client.query<{ template_key: string; company_id: string; settings: Record<string, unknown> }>(
+      "select template_key, company_id, settings from ai_role_hires order by template_key, company_id",
+    );
+    expect(hires.rows).toEqual([
+      { template_key: "financial-analyst", company_id: C1, settings: { schedule: { kind: "monthly", day: 10 }, recipients: [NURAALY], acceptMonthlyTotals: true } },
+      { template_key: "financial-analyst", company_id: C2, settings: { acceptMonthlyTotals: true } },
+      { template_key: "hr", company_id: C1, settings: { acceptMonthlyTotals: false } },
+    ]);
+  });
+
+  it("is a no-op on an empty database (the seed then adds both founders as salary viewers)", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    expect((await client.query("select 1 from salary_viewers")).rows).toHaveLength(0);
   });
 });

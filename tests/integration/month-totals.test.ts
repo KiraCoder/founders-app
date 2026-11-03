@@ -1,6 +1,7 @@
 /**
  * Monthly totals for daily numbers: a founder enters one value for a daily number and a
- * month (period_kind = month_total). An AI role hire with acceptMonthlyTotals (default false)
+ * month (period_kind = month_total). An AI role hire with acceptMonthlyTotals (default true
+ * for a new Financial Analyst — the founders' decision; it can be switched off)
  * uses it when the days are incomplete; complete days always win; the value never mixes into
  * the daily series, freshness or the grid's day rows.
  */
@@ -62,7 +63,8 @@ beforeAll(async () => {
   hire = await hireRole(ctx(), {
     templateKey: "financial-analyst",
     companyId: kiwi,
-    settings: { requiredMetricKeys: ["revenue", "orders_day", "on_time_pct", "cod_collected"], askUserIds: [t.userIds.nuraaly] },
+    // Switched off on purpose: the first tests are about the "off" behaviour.
+    settings: { requiredMetricKeys: ["revenue", "orders_day", "on_time_pct", "cod_collected"], askUserIds: [t.userIds.nuraaly], acceptMonthlyTotals: false },
   });
   // Revenue (monthly) is complete; the daily numbers have only 10 of 31 days.
   const r = await saveMetricGrid(ctx(), kiwi, [{ metricId: await metricId(kiwi, "revenue"), period: "2026-10", value: "1500000" }]);
@@ -76,8 +78,23 @@ afterAll(async () => {
   await t.handle.close();
 });
 
-describe("default: acceptMonthlyTotals is off (today's behaviour)", () => {
-  it("a hire starts with the switch off and ignores entered month totals", async () => {
+describe("default for a new hire", () => {
+  it("a new Financial Analyst hire accepts monthly totals unless the wizard says otherwise", async () => {
+    const tt = await createTestDb();
+    try {
+      const c = tt.ctx("nuraaly", bishkek("2026-11-02", "12:00"));
+      const h = await hireRole(c, { templateKey: "financial-analyst", companyId: tt.companyIds["kiwi-go"]! });
+      expect(h.settings.acceptMonthlyTotals).toBe(true);
+      const off = await hireRole(c, { templateKey: "financial-analyst", companyId: tt.companyIds["jobutify"]!, settings: { acceptMonthlyTotals: false } });
+      expect(off.settings.acceptMonthlyTotals).toBe(false);
+    } finally {
+      await tt.handle.close();
+    }
+  });
+});
+
+describe("acceptMonthlyTotals off", () => {
+  it("a hire with the switch off ignores entered month totals", async () => {
     expect(hire.settings.acceptMonthlyTotals).toBe(false);
     await recordMonthTotal(ctx(), await metricId(kiwi, "orders_day"), { month: "2026-10", value: "3100" });
     const run = await runHireNow(ctx(), hire.id);
@@ -154,7 +171,7 @@ describe("acceptMonthlyTotals on", () => {
         .select({ id: metricDefinitions.id })
         .from(metricDefinitions)
         .where(and(eq(metricDefinitions.companyId, k), eq(metricDefinitions.key, "revenue")));
-      const h = await hireRole(c, { templateKey: "financial-analyst", companyId: k, settings: { requiredMetricKeys: ["revenue"] } });
+      const h = await hireRole(c, { templateKey: "financial-analyst", companyId: k, settings: { requiredMetricKeys: ["revenue"], acceptMonthlyTotals: false } });
       await saveMetricGrid(c, k, [{ metricId: rev!.id, period: "2026-10", value: "100" }]);
       const run = await runHireNow(c, h.id);
       expect(run.status).toBe("reported");
@@ -182,7 +199,7 @@ describe("month totals before the window (never entered vs 2+ months missing)", 
             .from(metricDefinitions)
             .where(and(eq(metricDefinitions.companyId, k), eq(metricDefinitions.key, key)))
         )[0]!.id;
-      const h = await hireRole(c, { templateKey: "financial-analyst", companyId: k, settings: { requiredMetricKeys: ["revenue"] } });
+      const h = await hireRole(c, { templateKey: "financial-analyst", companyId: k, settings: { requiredMetricKeys: ["revenue"], acceptMonthlyTotals: false } });
       await saveMetricGrid(c, k, [{ metricId: await idOf("revenue"), period: "2026-10", value: "100" }]);
       // On-time % (a daily number): no days ever, only a month total long before the window.
       await recordMonthTotal(c, await idOf("on_time_pct"), { month: "2025-06", value: "90" });

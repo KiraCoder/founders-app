@@ -15,7 +15,7 @@ const { GET: getRoute, PATCH: patchRoute } = await import("@/app/api/v1/people/[
 
 let t: TestDb;
 beforeAll(async () => {
-  t = await createTestDb();
+  t = await createTestDb({ salaryViewers: ["nuraaly"] });
 });
 afterAll(async () => {
   await t.handle.close();

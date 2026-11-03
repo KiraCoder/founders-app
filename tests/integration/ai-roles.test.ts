@@ -173,9 +173,10 @@ describe("run state machine, data requests and chasing", () => {
     const [run] = await t.handle.db.select().from(aiRoleRuns);
     expect(run).toMatchObject({ period: "2026-10-01", status: "waiting_for_data", trigger: "schedule" });
     expect(run!.missing.map((m) => `${m.label}: ${m.detail}`)).toEqual([
-      "Orders per day: no values (31 days)",
-      "COD collected: no values (31 days)",
-      "COD paid out: no values (31 days)",
+      // A new Financial Analyst accepts month totals (the founders' decision).
+      "Orders per day: no values (31 days) — or enter the month total",
+      "COD collected: no values (31 days) — or enter the month total",
+      "COD paid out: no values (31 days) — or enter the month total",
       "Revenue: no value",
     ]);
     const reqs = await t.handle.db.select().from(aiDataRequests);
@@ -188,7 +189,7 @@ describe("run state machine, data requests and chasing", () => {
     await tick(bishkek("2026-11-10", "08:30"));
     await tick(bishkek("2026-11-10", "12:00"));
     expect(aiLines(morningOf("nuraaly", "2026-11-10"))).toEqual([
-      "Financial Analyst needs October 2026 numbers for Kiwi Go: Orders per day, COD collected, COD paid out +1 more — enter them (the data-source ones by hand or upload until it is connected): /companies/kiwi-go?tab=numbers&g=day",
+      "Financial Analyst needs October 2026 numbers for Kiwi Go: Orders per day, COD collected, COD paid out +1 more — enter the October total (or every day) until the data source is connected: /companies/kiwi-go?tab=numbers&g=day",
     ]);
     await days("2026-11-11", "2026-12-01");
     const shownOn = sent.filter((s) => s.userId === t.userIds.nuraaly && aiLines(s.message).length).map((s) => s.day);
@@ -330,7 +331,7 @@ describe("run state machine, data requests and chasing", () => {
     await link("talant", "222", bishkek("2026-12-11", "07:00"));
     await tick(bishkek("2026-12-11", "08:30"));
     expect(aiLines(morningOf("talant", "2026-12-11"))).toEqual([
-      "Financial Analyst needs October and November 2026 numbers for Kiwi Go: Orders per day, COD collected, COD paid out +1 more — enter them (the data-source ones by hand or upload until it is connected): /companies/kiwi-go?tab=numbers&g=day",
+      "Financial Analyst needs October and November 2026 numbers for Kiwi Go: Orders per day, COD collected, COD paid out +1 more — enter the October and November 2026 totals (or every day) until the data source is connected: /companies/kiwi-go?tab=numbers&g=day",
     ]);
   });
 });

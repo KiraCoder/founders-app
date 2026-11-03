@@ -13,7 +13,7 @@ import { createTestDb, type TestDb } from "../helpers/db";
 
 let t: TestDb;
 beforeAll(async () => {
-  t = await createTestDb();
+  t = await createTestDb({ salaryViewers: ["nuraaly"] });
 });
 afterAll(async () => {
   await t.handle.close();

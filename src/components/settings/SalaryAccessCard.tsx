@@ -24,7 +24,7 @@ export function SalaryAccessCard({ viewers, canEdit, currentUserId }: { viewers:
     <div>
       <p className="mb-3 text-[13px] text-muted">
         Who can see and change salaries (people list, company pages, person page, API, import). Everyone else does not see
-        salary columns at all. Default: only Nuraaly, until the founders decide.
+        salary columns at all. Default: both founders.
         {!canEdit && " Only a salary viewer can change this."}
       </p>
       <ul className="divide-y divide-line rounded-[8px] border border-line">

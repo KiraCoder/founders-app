@@ -17,12 +17,12 @@ export interface PrefsValues {
 const CHASE_STYLES: { value: PrefsValues["overdueChaseStyle"]; label: string; hint: string }[] = [
   {
     value: "separate",
-    label: "One push per task (default)",
+    label: "One push per task",
     hint: "On chase days (1, 3, 7 days overdue, then weekly) each overdue task gets its own push, within the daily limit.",
   },
   {
     value: "grouped",
-    label: "One grouped push",
+    label: "One grouped push (default)",
     hint: "All overdue tasks due a chase that day come in one 10:00 push with Done / +1 day / +3 days per task. Counts as one push.",
   },
   {

@@ -31,7 +31,7 @@ import { runTick } from "@/server/notifications/tick";
 import type { NeutralMessage, NotificationChannel, Recipient } from "@/server/notifications/types";
 import { snoozeTaskReminder, unlinkMyTelegram, updateMyPreferences } from "@/server/services/notifications";
 import { changeTaskDeadline, createTask, getTask } from "@/server/services/tasks";
-import { createTestDb, FIXED_NOW, type TestDb } from "../helpers/db";
+import { createTestDb, FIXED_NOW, saveChaseStyle, type TestDb } from "../helpers/db";
 
 const at = (utc: string) => new Date(utc);
 const EVENING = at("2026-11-02T13:00:00Z"); // 19:00 Bishkek
@@ -61,6 +61,8 @@ beforeEach(async () => {
   await db.delete(telegramLinks);
   await db.delete(telegramLinkCodes);
   await db.delete(notificationPreferences);
+  // These tests are about one push per task (budget, parking): the "separate" chase style.
+  await saveChaseStyle(db, Object.values(t.userIds), "separate");
   await db.delete(taskEvents);
   await db.delete(tasks);
 });
@@ -397,6 +399,7 @@ describe("#5 one bad item does not stop the run", () => {
 
   it("the database rejects malformed preferences", async () => {
     const db = t.handle.db;
+    await db.delete(notificationPreferences).where(eq(notificationPreferences.userId, t.userIds.nuraaly));
     const bad = [
       { quietStart: "25:00" },
       { quietEnd: "8:00" },

@@ -1,10 +1,26 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { login, logout } from "./helpers";
 
-test("salary column: Nuraaly (salary viewer) sees it, Talant does not", async ({ page }) => {
+/** Settings → Access (as a salary viewer): Talant's salary switch on or off. */
+async function setTalantSalaryAccess(page: Page, on: boolean) {
+  await page.goto("/settings");
+  const sw = page.getByRole("switch", { name: "Salary access for Talant" });
+  if ((await sw.getAttribute("aria-checked")) !== String(on)) {
+    await sw.click();
+    await expect(sw).toHaveAttribute("aria-checked", String(on));
+  }
+}
+
+test("salary column: both founders see it by default; switched off, Talant does not", async ({ page }) => {
   const name = `[e2e] Salary Person ${Date.now()}`;
 
   await login(page, "nuraaly");
+  // Default (the founders' decision): both founders see salaries.
+  await page.goto("/settings");
+  await expect(page.getByRole("switch", { name: "Salary access for Talant" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("switch", { name: "Salary access for Nuraaly" })).toHaveAttribute("aria-checked", "true");
+  // The rest of the test is about a founder WITHOUT salary access: switch Talant off.
+  await setTalantSalaryAccess(page, false);
   const companies = (await (await page.request.get("/api/v1/companies")).json()) as { data: { id: string; slug: string }[] };
   const kiwi = companies.data.find((c) => c.slug === "kiwi-go")!;
   const created = await page.request.post("/api/v1/people", {
@@ -63,9 +79,12 @@ test("salary column: Nuraaly (salary viewer) sees it, Talant does not", async ({
   await page.goto("/settings");
   await expect(page.getByRole("switch", { name: "Salary access for Talant" })).toBeDisabled();
 
-  // Clean up: mark as left (no hard delete).
+  // Clean up: mark as left (no hard delete), and give Talant his salary access back.
   const left = await page.request.patch(`/api/v1/people/${id}`, { data: { status: "left" } });
   expect(left.ok()).toBeTruthy();
+  await logout(page);
+  await login(page, "nuraaly");
+  await setTalantSalaryAccess(page, true);
 });
 
 test("import wizard: preview then confirm (the previewed file's hash is sent back)", async ({ page }) => {

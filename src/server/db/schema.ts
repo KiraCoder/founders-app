@@ -263,7 +263,7 @@ export const salaries = pgTable(
   ],
 );
 
-/** Users allowed to see and edit salaries. Default: only Nuraaly (seeded). */
+/** Users allowed to see and edit salaries. Default: both founders (seeded; 0016 adds Talant). */
 export const salaryViewers = pgTable("salary_viewers", {
   userId: uuid("user_id")
     .primaryKey()
@@ -446,11 +446,11 @@ export const notificationPreferences = pgTable("notification_preferences", {
   /** Let priority "urgent" items through during quiet hours. */
   urgentAtNight: boolean("urgent_at_night").notNull().default(false),
   /**
-   * How overdue tasks are chased on chase days: "separate" (one push per task, the default),
-   * "grouped" (one 10:00 push listing them all) or "summary_only" (no chase pushes; the
-   * morning summary lists them).
+   * How overdue tasks are chased on chase days: "separate" (one push per task), "grouped"
+   * (one 10:00 push listing them all — the default, chosen by the founders; 0016) or
+   * "summary_only" (no chase pushes; the morning summary lists them).
    */
-  overdueChaseStyle: text("overdue_chase_style").notNull().default("separate"),
+  overdueChaseStyle: text("overdue_chase_style").notNull().default("grouped"),
   updatedAt: updatedAt(),
 }, (t) => [
   check("notification_preferences_morning_hm", sql`${t.morningSummaryTime} ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'`),
@@ -908,7 +908,10 @@ export interface AiHireSettingsJson {
   requiredMetricKeys: string[];
   recipients: string[];
   askUserIds: string[];
-  /** Accept month totals for daily numbers whose days are incomplete (absent = false). */
+  /**
+   * Accept month totals for daily numbers whose days are incomplete (absent = false). New
+   * Financial Analyst hires get true (founders' decision); 0016 set it on existing ones.
+   */
   acceptMonthlyTotals?: boolean;
 }
 

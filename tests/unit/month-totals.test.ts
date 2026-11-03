@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { defaultAcceptMonthlyTotals, defaultSettings, FINANCIAL_ANALYST, ROLE_TEMPLATES } from "@/lib/ai-roles";
 import { monthTotalKind, monthTotalMark, monthValue, periodsInMonth } from "@/server/ai/month-values";
 import { composeRequests, monthTotalsWording } from "@/server/ai/orchestrator";
 import type { AiRequestItem } from "@/server/services/ai-roles";
@@ -73,5 +74,14 @@ describe("request wording", () => {
     expect(aiLines[1]!.text).toMatch(/^Financial Analyst needs October 2026 numbers for Kiwi Go: Revenue, Orders per day — enter the October total \(or every day\): /);
     const off = composeRequests([item(missing, [OCT], false)], [], null);
     expect(off.aiLines[1]!.text).toContain("— enter them: ");
+  });
+});
+
+describe("acceptMonthlyTotals default (the founders' decision)", () => {
+  it("is on for a new Financial Analyst, off for the other roles", () => {
+    expect(defaultAcceptMonthlyTotals(FINANCIAL_ANALYST)).toBe(true);
+    for (const t of ROLE_TEMPLATES) {
+      expect(defaultSettings(t, "delivery", ["u1"]).acceptMonthlyTotals).toBe(t.key === FINANCIAL_ANALYST);
+    }
   });
 });

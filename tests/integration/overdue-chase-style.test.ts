@@ -1,7 +1,8 @@
 /**
- * Overdue chase style (Settings → Notifications): "separate" (default, one push per task),
- * "grouped" (one 10:00 push listing every task due a chase, buttons per task, counts as one
- * push) and "summary_only" (no chase pushes). Never talks to Telegram.
+ * Overdue chase style (Settings → Notifications): "separate" (one push per task), "grouped"
+ * (the default since the founders chose it: one 10:00 push listing every task due a chase,
+ * buttons per task, counts as one push) and "summary_only" (no chase pushes). Never talks to
+ * Telegram.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
@@ -134,15 +135,17 @@ async function outboxFor(userId: string): Promise<OutboxItem[]> {
 }
 
 describe("preference", () => {
-  it("defaults to separate and keeps the saved style when a save leaves it out", async () => {
-    expect(DEFAULT_PREFERENCES.overdueChaseStyle).toBe("separate");
-    expect((await loadPreferences(t.handle.db, t.userIds.nuraaly)).overdueChaseStyle).toBe("separate");
+  it("defaults to grouped (also for a new saved row) and keeps the saved style when a save leaves it out", async () => {
+    expect(DEFAULT_PREFERENCES.overdueChaseStyle).toBe("grouped");
+    expect((await loadPreferences(t.handle.db, t.userIds.nuraaly)).overdueChaseStyle).toBe("grouped");
     await updateMyPreferences(t.ctx("nuraaly"), PREFS);
-    expect((await loadPreferences(t.handle.db, t.userIds.nuraaly)).overdueChaseStyle).toBe("separate");
-    await setStyle("grouped");
+    expect((await loadPreferences(t.handle.db, t.userIds.nuraaly)).overdueChaseStyle).toBe("grouped");
+    await t.handle.db.insert(notificationPreferences).values({ userId: t.userIds.talant });
+    expect((await loadPreferences(t.handle.db, t.userIds.talant)).overdueChaseStyle).toBe("grouped");
+    await setStyle("separate");
     await updateMyPreferences(t.ctx("nuraaly"), { ...PREFS, maxOtherPerDay: 2 });
     const p = await loadPreferences(t.handle.db, t.userIds.nuraaly);
-    expect(p.overdueChaseStyle).toBe("grouped");
+    expect(p.overdueChaseStyle).toBe("separate");
     expect(p.maxOtherPerDay).toBe(2);
     await expect(updateMyPreferences(t.ctx("nuraaly"), { ...PREFS, overdueChaseStyle: "loud" as never })).rejects.toBeTruthy();
     // The DB refuses an unknown value too.
@@ -152,9 +155,21 @@ describe("preference", () => {
   });
 });
 
-describe("separate (default): today's behaviour", () => {
+describe("default (nothing saved): grouped", () => {
+  it("sends one grouped 10:00 push for a founder who never saved preferences", async () => {
+    await overdueSet();
+    const { sent, registry } = recorder();
+    await runTimes(["08:30", "10:00", "10:30"], registry);
+    const pushes = nuraalyPushes(sent);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]!.message.title).toBe("4 tasks need a new deadline");
+  });
+});
+
+describe("separate (the old default, still a choice)", () => {
   it("one push per task on chase days, within the budget; the rest is parked", async () => {
     await overdueSet();
+    await setStyle("separate");
     const { sent, registry } = recorder();
     await runTimes(["08:30", "10:00", "10:30"], registry);
     const pushes = nuraalyPushes(sent);

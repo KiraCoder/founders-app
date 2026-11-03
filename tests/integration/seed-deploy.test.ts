@@ -58,7 +58,7 @@ describe("runDeploySeed", () => {
     expect((await h.db.select({ n: count() }).from(users))[0]!.n).toBe(0);
   });
 
-  it("seeds an empty real database once: both founders, no samples", async () => {
+  it("seeds an empty real database once: both founders, both salary viewers, no samples", async () => {
     const h = asPostgres(await fresh());
     const env = { DATABASE_URL: SUPABASE, DEV_FOUNDER_PASSWORD: "a-private-pass-123" };
     const r = await runDeploySeed(h, env, { bcryptRounds: 4 });
@@ -66,7 +66,7 @@ describe("runDeploySeed", () => {
     const founders = await h.db.select().from(users).where(eq(users.role, "founder"));
     expect(founders.map((f) => f.email).sort()).toEqual(["nuraaly@founders.local", "talant@founders.local"]);
     expect(await bcrypt.compare("a-private-pass-123", founders[0]!.passwordHash!)).toBe(true);
-    expect(await h.db.select().from(salaryViewers)).toHaveLength(1);
+    expect(await h.db.select().from(salaryViewers)).toHaveLength(2);
     expect(await h.db.select().from(tasks).where(like(tasks.title, "[sample]%"))).toHaveLength(0);
 
     // A later deploy changes nothing: not the password, not a changed email (no re-created founder).

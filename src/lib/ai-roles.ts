@@ -164,7 +164,9 @@ export const hireSettingsSchema = z
     askUserIds: z.array(z.uuid()).min(1, "Choose at least one founder the role asks").max(10),
     /**
      * Accept a MONTH TOTAL entered for a daily number when its days are incomplete (complete
-     * days still win). Off by default: then a daily number counts only with every day in.
+     * days still win). Off: a daily number counts only with every day in. Default: on for the
+     * Financial Analyst (the founders' decision), off for other roles
+     * (`defaultAcceptMonthlyTotals`).
      */
     acceptMonthlyTotals: z.boolean().optional(),
   })
@@ -198,8 +200,13 @@ export function defaultSettings(t: RoleTemplate, type: CompanyType, founderIds: 
     requiredMetricKeys: requiredKeysFor(t, type),
     recipients: [...founderIds],
     askUserIds: [...founderIds],
-    acceptMonthlyTotals: false,
+    acceptMonthlyTotals: defaultAcceptMonthlyTotals(t.key),
   };
+}
+
+/** New hires: the Financial Analyst accepts month totals (founders' decision); other roles don't. */
+export function defaultAcceptMonthlyTotals(templateKey: string): boolean {
+  return templateKey === FINANCIAL_ANALYST;
 }
 
 // ---------------------------------------------------------------------------

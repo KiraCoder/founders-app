@@ -15,24 +15,24 @@ function monthShort(n: number): string {
   return `${SHORT[m - 1]} ${String(y).slice(2)}`;
 }
 
-test("Settings → Overdue tasks: the default is one push per task; another style is saved", async ({ page }) => {
+test("Settings → Overdue tasks: the default is one grouped push; another style is saved", async ({ page }) => {
   await login(page, "nuraaly");
   await page.goto("/settings");
   const separate = page.getByRole("radio", { name: /One push per task/ });
-  const grouped = page.getByRole("radio", { name: /One grouped push/ });
+  const grouped = page.getByRole("radio", { name: /One grouped push \(default\)/ });
   await expect(page.getByRole("radio", { name: /Morning summary only/ })).toBeVisible();
-  if (!(await separate.isChecked())) {
-    await separate.check();
+  if (!(await grouped.isChecked())) {
+    await grouped.check();
     await page.getByRole("button", { name: "Save preferences" }).click();
     await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
   }
-  await grouped.check();
+  await separate.check();
   await page.getByRole("button", { name: "Save preferences" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("radio", { name: /One grouped push/ })).toBeChecked();
+  await expect(page.getByRole("radio", { name: /One push per task/ })).toBeChecked();
   // Back to the default for the other tests.
-  await page.getByRole("radio", { name: /One push per task/ }).check();
+  await page.getByRole("radio", { name: /One grouped push/ }).check();
   await page.getByRole("button", { name: "Save preferences" }).click();
   await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
 });

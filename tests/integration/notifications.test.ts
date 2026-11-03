@@ -23,7 +23,7 @@ import type { TelegramUpdate } from "@/server/notifications/telegram-api";
 import type { NeutralMessage, NotificationChannel } from "@/server/notifications/types";
 import { updateMyPreferences } from "@/server/services/notifications";
 import { createTask, getTask, listTaskEvents } from "@/server/services/tasks";
-import { createTestDb, FIXED_NOW, type TestDb } from "../helpers/db";
+import { createTestDb, FIXED_NOW, saveChaseStyle, type TestDb } from "../helpers/db";
 
 const at = (utc: string) => new Date(utc);
 /** 19:00 Bishkek on the fixed day. */
@@ -46,6 +46,8 @@ beforeEach(async () => {
   await db.delete(telegramLinks);
   await db.delete(telegramLinkCodes);
   await db.delete(notificationPreferences);
+  // These tests are about one push per task (budget, parking): the "separate" chase style.
+  await saveChaseStyle(db, Object.values(t.userIds), "separate");
   await db.delete(taskEvents);
   await db.delete(tasks);
 });

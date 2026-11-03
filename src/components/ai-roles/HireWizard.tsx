@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { hireAction, tuneAction, type AiActionState } from "@/app/(app)/ai-roles/actions";
 import { Icon } from "@/components/Icon";
+import { defaultAcceptMonthlyTotals } from "@/lib/ai-roles";
 
 export interface WizardCompany {
   id: string;
@@ -66,7 +67,7 @@ export function HireWizard({
   const [riskPct, setRiskPct] = useState(String(target.settings?.thresholds.riskChangePct ?? 50));
   const [recipients, setRecipients] = useState<string[]>(target.settings?.recipients ?? allFounders);
   const [askIds, setAskIds] = useState<string[]>(target.settings?.askUserIds ?? allFounders);
-  const [acceptMonthly, setAcceptMonthly] = useState(target.settings?.acceptMonthlyTotals ?? false);
+  const [acceptMonthly, setAcceptMonthly] = useState(target.settings?.acceptMonthlyTotals ?? defaultAcceptMonthlyTotals(target.templateKey));
   const [notes, setNotes] = useState(target.notes ?? "");
   const [state, setState] = useState<AiActionState>({});
   const [pending, start] = useTransition();
