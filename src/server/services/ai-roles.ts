@@ -11,7 +11,6 @@ import {
   hirePatchSchema,
   hireSettingsSchema,
   monthLabel,
-  monthsLabel,
   prevMonth,
   monthStart,
   runDueOn,
