@@ -110,3 +110,49 @@ test("company tab title uses the name; date fields show dd.mm.yyyy and refuse im
   await actDate.blur();
   await expect(actDate).toHaveValue("02.10.2026");
 });
+
+test("holding: who to ask — per flow (Flows → Edit) and per round (Ask for акты), grouped by person", async ({ page }) => {
+  await login(page, "nuraaly");
+  await page.goto("/holding");
+  const flowRow = page.getByTestId("flows-list").locator("li", { hasText: "Jobutify" }).filter({ hasText: "Kiwi Go" }).first();
+  await expect(flowRow.getByTestId("flow-ask-person")).toHaveText("Ask: Elmurat");
+
+  // Per flow: Edil (he works for Jobutify) instead of Elmurat.
+  await flowRow.getByRole("button", { name: /^Edit / }).click();
+  const form = page.getByRole("form", { name: /^Edit Jobutify → Kiwi Go/ });
+  await expect(form.getByLabel("Who to ask for the акты")).toHaveValue(/.+/);
+  await form.getByLabel("Who to ask for the акты").selectOption({ label: "Edil" });
+  await form.getByRole("button", { name: "Save" }).click();
+  await expect(flowRow.getByTestId("flow-ask-person")).toHaveText("Ask: Edil");
+
+  // The card groups by person: when that flow has something to ask, Edil gets his own block + message.
+  const acts = (await (await page.request.get("/api/v1/holding/acts")).json()) as {
+    data: { ask: { people: { person: { name: string } | null; message: string }[]; flows: { label: string }[] } };
+  };
+  const edil = acts.data.ask.people.find((p) => p.person?.name === "Edil");
+  if (acts.data.ask.flows.some((f) => f.label.startsWith("Jobutify → Kiwi Go"))) {
+    expect(edil?.message.split("\n")[0]).toBe("Эдил, пришлите, пожалуйста, акты приёма-передачи за:");
+    await expect(page.getByRole("region", { name: "Ask Edil" })).toBeVisible();
+  }
+
+  // Per round: pick someone else for this month only, then go back to the flow's person.
+  const who = page.getByTestId("who-to-ask");
+  if (await who.count()) {
+    await who.locator("summary").click();
+    const select = who.locator("select").first();
+    const options = await select.locator("option").allTextContents();
+    const other = options.find((o) => o.endsWith("this month only"));
+    if (other) {
+      await select.selectOption({ label: other });
+      await expect(who.locator("summary")).toContainText("1 changed");
+      await who.locator("select").first().selectOption({ index: 0 });
+      await expect(who.locator("summary")).not.toContainText("changed");
+    }
+  }
+
+  // Back to Elmurat (the e2e database is reused between runs).
+  await flowRow.getByRole("button", { name: /^Edit / }).click();
+  await form.getByLabel("Who to ask for the акты").selectOption({ label: "Elmurat" });
+  await form.getByRole("button", { name: "Save" }).click();
+  await expect(flowRow.getByTestId("flow-ask-person")).toHaveText("Ask: Elmurat");
+});

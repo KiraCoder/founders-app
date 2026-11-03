@@ -933,7 +933,7 @@ vercel.json                Vercel build command (npm run vercel-build); no crons
 supabase/policies.sql      RLS policies for a future direct-client mode (applied by hand)
 tests/                     Vitest unit + service tests
 e2e/                       Playwright smoke test + screenshots
-docs/screenshots/          UI screenshots (org-desktop.png, org-edit-mode.png, org-phone.png, ai-roles-hire-wizard.png, ai-report.png, holding-desktop.png, holding-act-panel.png, numbers-grid.png, people-list-salaries.png, …)
+docs/screenshots/          UI screenshots (org-desktop.png, org-edit-mode.png, org-phone.png, ai-roles-hire-wizard.png, ai-report.png, holding-desktop.png, holding-act-panel.png, holding-ask-card.png, numbers-grid.png, people-list-salaries.png, …)
 docs/samples/              people-sample.csv, kiwi-go-numbers-sample.csv (fake data) for the importers
 docs/reviews/              Independent reviews and how each finding was resolved
 ```

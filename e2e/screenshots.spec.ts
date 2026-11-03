@@ -91,6 +91,10 @@ test("holding screenshots", async ({ page }) => {
   await page.goto("/holding");
   await page.getByTestId("acts-grid").waitFor();
   await page.screenshot({ path: "docs/screenshots/holding-desktop.png", fullPage: true });
+  // The "Ask for акты" card: one block per person, the Russian message, "Who to ask this month".
+  const who = page.getByTestId("who-to-ask");
+  if (await who.count()) await who.locator("summary").click();
+  await page.getByTestId("ask-card").screenshot({ path: "docs/screenshots/holding-ask-card.png" });
   const cell = page.locator('[data-testid="act-cell"][data-cell-state="missing"]').first();
   await cell.click();
   await page.getByTestId("act-panel").waitFor();
