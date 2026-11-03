@@ -422,16 +422,8 @@ async function seedSamples(db: Db, ids: SeedResult, options: SeedOptions) {
       priority: "high",
       dueDate: addDays(today, 2),
     },
-    {
-      title: "[sample] Ask Elmurat for missing October акты",
-      companyId: c["asqa-zou-holding"]!,
-      ownerUserId: u.talant,
-      visibility: "shared",
-      assigneePersonId: p.elmurat,
-      status: "todo",
-      priority: "urgent",
-      dueDate: addDays(today, 1),
-    },
+    // No "[sample] Ask Elmurat for missing … акты" task: the Holding section of the morning
+    // summary asks for акты itself ("I asked Elmurat"); a task would ask twice.
     {
       title: "[sample] Define Factory KPI card layout",
       companyId: c["alura-style"]!,

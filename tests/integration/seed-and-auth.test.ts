@@ -50,6 +50,12 @@ describe("seed", () => {
     const overdue = await listTasks(t.ctx("nuraaly"), { view: "overdue" });
     expect(overdue.length).toBeGreaterThanOrEqual(1);
   });
+
+  it("has no sample task asking Elmurat for акты: the Holding section does that (whole-app review #12)", async () => {
+    const all = await listTasks(t.ctx("talant"), { view: "company" });
+    expect(all.length).toBeGreaterThan(3);
+    expect(all.filter((x) => /Elmurat|акты/.test(x.title))).toEqual([]);
+  });
 });
 
 describe("re-running the seed", () => {
