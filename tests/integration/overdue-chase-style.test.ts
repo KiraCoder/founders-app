@@ -119,6 +119,13 @@ async function runTimes(times: string[], registry: ChannelRegistry) {
   for (const hm of times) await tick(hm, registry);
 }
 
+/** The morning summary of 3 Nov (08:30 Bishkek). */
+async function dispatchSummaryNextDay(registry: ChannelRegistry) {
+  const now = new Date("2026-11-03T08:30:00+06:00");
+  await planTick(t.handle.db, now);
+  await dispatch(t.handle.db, now, { registry });
+}
+
 const nuraalyPushes = (sent: Sent[]) =>
   sent.filter((s) => s.userId === t.userIds.nuraaly && !s.message.title.startsWith("Good morning") && s.message.title !== "Evening check");
 
@@ -420,6 +427,60 @@ describe("grouped: the leader row is not always listed", () => {
     expect(push.message.lines.some((l) => l.text === "+1 more — open the app")).toBe(true);
     expect(JSON.stringify(push.message.lines)).not.toContain("Low and old");
     await expectLeaderUntouched(low!.id, MAX_GROUPED_CHASE_TASKS, registry, sent);
+  });
+});
+
+describe("grouped: at most one grouped push per founder per day", () => {
+  it("a chase row claimed after today's grouped push is parked for the next summary", async () => {
+    await overdueSet();
+    await setStyle("grouped");
+    const { sent, registry } = recorder();
+    await runTimes(["08:30", "10:00"], registry);
+    expect(nuraalyPushes(sent)).toHaveLength(1);
+    // A later chase row the same day (e.g. a run that claimed it on its own).
+    const late = await task("Late chase", "2026-11-01");
+    await enqueue(t.handle.db, { userId: t.userIds.nuraaly, kind: "overdue_chase", taskId: late!.id, dedupeKey: `late:${late!.id}`, scheduledFor: nov2("10:00") });
+    await dispatch(t.handle.db, nov2("10:30"), { registry });
+    expect(nuraalyPushes(sent)).toHaveLength(1);
+    const row = (await outboxFor(t.userIds.nuraaly)).find((r) => r.taskId === late!.id && r.kind === "overdue_chase")!;
+    expect(row.status).toBe("parked");
+    expect(row.lastError).toBe("grouped_already_sent");
+    // Next morning's summary lists it as a parked line.
+    await dispatchSummaryNextDay(registry);
+    const summary = sent.filter((x) => x.userId === t.userIds.nuraaly && x.message.title.startsWith("Good morning")).at(-1)!;
+    expect(JSON.stringify(summary.message.lines)).toContain("Late chase");
+  });
+
+  it("another run mid-send (its leader marked for today): this run's chase rows are parked, nothing sent", async () => {
+    const [a] = await overdueSet();
+    await setStyle("grouped");
+    await planTick(t.handle.db, nov2("10:00"));
+    // Simulate run 1: it claimed A's row and marked it as today's grouped leader.
+    await t.handle.db
+      .update(notificationsOutbox)
+      .set({ status: "sending", claimedAt: new Date(), payload: { groupedChaseDay: "2026-11-02" } })
+      .where(and(eq(notificationsOutbox.taskId, a!.id), eq(notificationsOutbox.kind, "overdue_chase")));
+    const { sent, registry } = recorder();
+    const report = await dispatch(t.handle.db, nov2("10:00"), { registry, userIds: [t.userIds.nuraaly] });
+    expect(report.parked).toBe(3);
+    expect(nuraalyPushes(sent)).toHaveLength(0);
+    const rows = (await outboxFor(t.userIds.nuraaly)).filter((r) => r.kind === "overdue_chase" && r.taskId !== a!.id);
+    expect(rows.every((r) => r.status === "parked" && r.lastError === "grouped_already_sent")).toBe(true);
+  });
+
+  it("two overlapping dispatch runs send ONE grouped push", async () => {
+    await overdueSet();
+    await setStyle("grouped");
+    await planTick(t.handle.db, nov2("10:00"));
+    const { sent, registry } = recorder();
+    await Promise.all([dispatch(t.handle.db, nov2("10:00"), { registry }), dispatch(t.handle.db, nov2("10:00"), { registry })]);
+    expect(nuraalyPushes(sent)).toHaveLength(1);
+    const rows = (await outboxFor(t.userIds.nuraaly)).filter((r) => r.kind === "overdue_chase");
+    expect(rows).toHaveLength(4);
+    // Every task is either in the one push (sent) or parked for the next summary; none twice.
+    expect(rows.every((r) => r.status === "sent" || (r.status === "parked" && r.lastError === "grouped_already_sent"))).toBe(true);
+    const listed = (nuraalyPushes(sent)[0]!.message.lines.filter((l) => /^\d+\. /.test(l.text))).length;
+    expect(rows.filter((r) => r.status === "sent")).toHaveLength(listed);
   });
 });
 

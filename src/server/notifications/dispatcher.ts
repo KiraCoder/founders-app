@@ -8,6 +8,7 @@ import { composeMorningRequests } from "@/server/ai/orchestrator";
 import { buildReportReadyMessage, markRequestsShown, REPORT_KIND, reportParkedLine } from "@/server/services/ai-roles";
 import { holdingSummarySection, markAskItemsShown } from "@/server/services/holding-asks";
 import { staleMetricsFor } from "@/server/services/metrics";
+import { lockTransaction } from "@/server/services/locks";
 import { getTask, getTodaySummary, type TaskView } from "@/server/services/tasks";
 import { mintActionTokens } from "./action-tokens";
 import { createChannelRegistry, type ChannelRegistry } from "./channels";
@@ -554,7 +555,12 @@ async function processItem(
  *   `grouped_not_listed` and are not touched — the leader too: the message, its buttons and
  *   the budget are then carried by the first listed row (the list is ordered by task priority
  *   and days overdue, the claim order by outbox priority, so they can differ);
- * - on a failed send the other rows wait with the same backoff and go out together again.
+ * - on a failed send the other rows wait with the same backoff and go out together again;
+ * - at most ONE grouped push per founder per local day, also with overlapping runs (each run
+ *   claims its own leader): under an advisory lock on `grouped_chase:<user>:<day>` the leader
+ *   is marked `payload.groupedChaseDay`; if another row of that founder already carries
+ *   today's mark and is sent or being sent, this leader is parked (`grouped_already_sent`)
+ *   and listed in the next summary instead.
  */
 async function sendGroupedChase(
   ctx: ServiceContext,
@@ -569,6 +575,36 @@ async function sendGroupedChase(
   const now = ctx.now;
   const o = notificationsOutbox;
   const { start, end } = dayBounds(now, ctx.timeZone);
+  const today = todayInTimeZone(now, ctx.timeZone);
+  const groupedMark = { groupedChaseDay: today };
+  const alreadyGrouped = await db.transaction(async (tx) => {
+    await lockTransaction(tx as unknown as Db, `grouped_chase:${leader.userId}:${today}`);
+    const [other] = await tx
+      .select({ id: o.id })
+      .from(o)
+      .where(
+        and(
+          eq(o.userId, leader.userId),
+          eq(o.kind, "overdue_chase"),
+          ne(o.id, leader.id),
+          isNull(o.bundledIntoId),
+          sql`(${o.payload} ->> 'groupedChaseDay') = ${today}`,
+          or(eq(o.status, "sent"), eq(o.status, "sending")),
+        ),
+      )
+      .limit(1);
+    if (other) return true;
+    await tx
+      .update(o)
+      .set({ payload: sql`${o.payload} || ${JSON.stringify(groupedMark)}::jsonb` })
+      .where(eq(o.id, leader.id));
+    return false;
+  });
+  if (alreadyGrouped) {
+    await finish({ status: "parked", parkedAt: now, nextAttemptAt: null, lastError: "grouped_already_sent" });
+    report.parked++;
+    return;
+  }
   const followers = await db
     .update(o)
     .set({ status: "sending", claimedAt: wall })
@@ -626,7 +662,6 @@ async function sendGroupedChase(
     (x, y) =>
       (rank[x.task.priority] ?? 9) - (rank[y.task.priority] ?? 9) || (x.task.dueDate ?? "").localeCompare(y.task.dueDate ?? ""),
   );
-  const today = todayInTimeZone(now, ctx.timeZone);
   const built = buildGroupedChase(valid.map((v) => v.task), today);
   const { message, keptRefs } = fitTelegram(built.message);
   const listed = new Set(built.listed.filter((id) => keptRefs.has(taskRef(id))));
@@ -668,7 +703,7 @@ async function sendGroupedChase(
       lastError: null,
       nextAttemptAt: null,
       bundledIntoId: null,
-      payload: { ...(carrier.row.payload as Record<string, unknown>), groupedTaskIds: [...listed] },
+      payload: { ...(carrier.row.payload as Record<string, unknown>), ...groupedMark, groupedTaskIds: [...listed] },
     });
     if (!carrierIsLeader) {
       // Not in the message: not touched today (a snooze reminder later today still goes out).

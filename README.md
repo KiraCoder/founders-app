@@ -202,7 +202,9 @@ How it works (all in `src/server/notifications/`):
      lists (a snooze reminder for such a task that day is cancelled). A task left out (past
      the 10, or cut) is not touched that day — its own row is cancelled `grouped_not_listed`
      even when it was the row the dispatcher picked first; the first listed row then carries
-     the message and its buttons. If the budget is full it
+     the message and its buttons. At most **one** grouped push per founder per day, also when
+     two ticks overlap (an advisory lock per founder and day): a chase row claimed after it
+     is parked (`grouped_already_sent`) and listed in the next summary. If the budget is full it
      is parked like any push. **Morning summary only** (`summary_only`): no overdue chase
      pushes at all; overdue tasks are listed only in the morning summary (due-today nudges,
      snooze reminders and `urgent` notifications still push). Stored in
