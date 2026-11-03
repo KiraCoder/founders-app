@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { NextRequest } from "next/server";
 import type { ServiceContext } from "@/server/services/context";
-import { LocalFileStorage, setFileStorageForTests } from "@/server/storage/file-storage";
+import { fileUploadStatus, LocalFileStorage, setFileStorageForTests } from "@/server/storage/file-storage";
 import { holdingFiles } from "@/server/db/schema";
 import { cleanupUnattachedFiles, saveHoldingFile } from "@/server/services/holding-files";
 import { createTestDb, type TestDb } from "../helpers/db";
@@ -210,5 +210,38 @@ describe("no orphan files", () => {
     const left = await db.select().from(holdingFiles);
     expect(left.map((f) => f.id).sort()).toEqual(attached.map((f) => f.id).sort());
     expect(readdirSync(path.join(dir, "holding")).sort()).toEqual(attached.map((f) => f.storageKey.slice("holding/".length)).sort());
+  });
+});
+
+describe("uploads without a storage that keeps files (whole-app review #4)", () => {
+  it("fileUploadStatus: production needs FILE_STORAGE=local off Vercel (Supabase adapter not written yet)", () => {
+    setFileStorageForTests(null);
+    try {
+      expect(fileUploadStatus({ NODE_ENV: "development" }).available).toBe(true);
+      expect(fileUploadStatus({ NODE_ENV: "production" })).toEqual({ available: false, message: "File uploads arrive with Supabase storage" });
+      expect(fileUploadStatus({ NODE_ENV: "production", FILE_STORAGE: "supabase" }).available).toBe(false);
+      expect(fileUploadStatus({ NODE_ENV: "production", FILE_STORAGE: "local", VERCEL: "1" }).available).toBe(false);
+      expect(fileUploadStatus({ NODE_ENV: "production", FILE_STORAGE: "local" }).available).toBe(true);
+    } finally {
+      setFileStorageForTests(new LocalFileStorage(dir));
+    }
+  });
+
+  it("the upload API answers 503 with that message and the service refuses too; nothing is stored", async () => {
+    setFileStorageForTests(null);
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("FILE_STORAGE", "");
+    try {
+      as("nuraaly");
+      const before = await t.handle.db.select().from(holdingFiles);
+      const res = await upload(uploadReq(PDF, "akt.pdf"));
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: { code: "unavailable", message: "File uploads arrive with Supabase storage" } });
+      await expect(saveHoldingFile(t.ctx("nuraaly"), { name: "a.pdf", bytes: PDF })).rejects.toThrow("File uploads arrive with Supabase storage");
+      expect(await t.handle.db.select().from(holdingFiles)).toHaveLength(before.length);
+    } finally {
+      vi.unstubAllEnvs();
+      setFileStorageForTests(new LocalFileStorage(dir));
+    }
   });
 });

@@ -7,6 +7,7 @@ import { CONTRACT_STATUS_LABELS, CONTRACT_STATUSES, contractWarningText } from "
 import type { ContractView, FlowView } from "@/server/services/holding";
 import { Tag } from "@/components/ui";
 import { ACCEPT, fileUrl, uploadHoldingFile } from "./upload";
+import { UploadsUnavailableNote, useUploads } from "./uploads-context";
 import { DateInput } from "@/components/DateInput";
 
 /** Intercompany договоры: list with expiry warnings, add / edit / archive, optional scan. */
@@ -70,6 +71,7 @@ function ContractForm({ contract, flows, onDone }: { contract: ContractView | nu
   const [pending, start] = useTransition();
   const [state, setState] = useState<HoldingActionState>({});
   const [attachment, setAttachment] = useState(contract?.attachment ? { id: contract.attachment.id, name: contract.attachment.name } : null);
+  const uploads = useUploads();
   const [uploading, setUploading] = useState(false);
   const err = (k: string) => state.fieldErrors?.[k]?.[0];
   const submit = (fd: FormData) =>
@@ -157,6 +159,8 @@ function ContractForm({ contract, flows, onDone }: { contract: ContractView | nu
               Remove
             </button>
           </div>
+        ) : !uploads.available ? (
+          <UploadsUnavailableNote message={uploads.message} />
         ) : (
           <input
             type="file"

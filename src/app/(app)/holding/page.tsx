@@ -3,6 +3,7 @@ import { AskElmuratCard } from "@/components/holding/AskElmuratCard";
 import { ContractsSection } from "@/components/holding/ContractsSection";
 import { DebtsSection } from "@/components/holding/DebtsSection";
 import { FlowsSection } from "@/components/holding/FlowsSection";
+import { UploadsProvider } from "@/components/holding/uploads-context";
 import { PageHeader, Section } from "@/components/ui";
 import { formatMoney } from "@/lib/money";
 import { getPageContext } from "@/server/context";
@@ -10,6 +11,7 @@ import { listCompanies } from "@/server/services/companies";
 import { today } from "@/server/services/context";
 import { getActsGrid, getDebts, listArchivedFlowActs, listContracts, listFlows, listLedgerEntries } from "@/server/services/holding";
 import { askCardFromGrid } from "@/server/services/holding-asks";
+import { fileUploadStatus } from "@/server/storage/file-storage";
 
 export const metadata = { title: "Holding" };
 export const dynamic = "force-dynamic";
@@ -38,12 +40,13 @@ export default async function HoldingPage() {
     listArchivedFlowActs(ctx),
   ]);
   const ask = askCardFromGrid(grid);
+  const uploads = fileUploadStatus();
   const expiring = contracts.filter((c) => c.warning).length;
   const liveFlows = flows.filter((f) => !f.archived);
   const companyOptions = companies.map((c) => ({ id: c.id, name: c.name }));
 
   return (
-    <>
+    <UploadsProvider value={uploads}>
       <PageHeader eyebrow="Group" title="Holding">
         <p className="mt-1 text-[13px] text-muted">Intercompany договоры, monthly акты приёма-передачи and debts between group companies.</p>
       </PageHeader>
@@ -91,6 +94,6 @@ export default async function HoldingPage() {
       <Section title="Flows">
         <FlowsSection flows={flows} companies={companyOptions} archivedActs={archivedActs} />
       </Section>
-    </>
+    </UploadsProvider>
   );
 }

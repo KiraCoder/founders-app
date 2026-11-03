@@ -443,7 +443,14 @@ in `access.ts`); all logic in `src/server/services/holding.ts` (+ `holding-asks.
   not — Chrome's PDF viewer refuses to render sandboxed documents). Bytes go through
   `FileStorage` (`src/server/storage/file-storage.ts`): local disk `.data/uploads` now,
   a `SupabaseFileStorage` placeholder (no network) for later. **On Vercel the local disk is
-  not kept** — set up Supabase Storage before uploading real documents there.
+  read-only and not kept**, so uploads are **switched off in production** unless a storage that
+  keeps files is chosen with `FILE_STORAGE`:
+  - empty (default): local disk in development; in production uploads are off — the scan
+    fields show "File uploads arrive with Supabase storage" and `POST /api/v1/holding/files`
+    answers **503** with that message (everything else on /holding works);
+  - `supabase`: the placeholder adapter — still off until a developer writes it;
+  - `local`: the local disk, as an explicit choice for a server with its own lasting disk (or
+    a local production test; e2e sets it). Ignored on Vercel (`VERCEL=1`).
   The metadata row is written before the bytes (a failed write removes the row), and uploads
   never attached to an акт or договор are removed after **24 h** by the scheduler tick (20
   per run); a document attached once is never removed. `next.config.ts` raises

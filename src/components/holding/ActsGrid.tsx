@@ -7,6 +7,7 @@ import { ACT_STATUS_LABELS, ACT_STATUSES, CELL_STATE_LABELS, monthList, monthLon
 import { formatMoney } from "@/lib/money";
 import type { ActCell, ActsGrid as Grid } from "@/server/services/holding";
 import { ACCEPT, fileUrl, uploadHoldingFile } from "./upload";
+import { UploadsUnavailableNote, useUploads } from "./uploads-context";
 import { DateInput } from "@/components/DateInput";
 
 const TONE_CLASS: Record<CellTone, string> = {
@@ -169,6 +170,7 @@ function CellPanel({ flowLabel, cell, today, onClose }: { flowLabel: string; cel
   const [requestedOn, setRequestedOn] = useState(cell.requestedOn ?? today);
   const [note, setNote] = useState(cell.note ?? "");
   const [attachment, setAttachment] = useState(cell.attachment ? { id: cell.attachment.id, name: cell.attachment.name } : null);
+  const uploads = useUploads();
   const [uploading, setUploading] = useState(false);
   const [state, setState] = useState<HoldingActionState>({});
   const first = useRef<HTMLInputElement>(null);
@@ -292,6 +294,8 @@ function CellPanel({ flowLabel, cell, today, onClose }: { flowLabel: string; cel
                 Remove
               </button>
             </div>
+          ) : !uploads.available ? (
+            <UploadsUnavailableNote message={uploads.message} />
           ) : (
             <input
               type="file"

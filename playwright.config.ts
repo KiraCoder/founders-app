@@ -40,6 +40,8 @@ export default defineConfig({
           DEV_TOOLS: "1",
           // Production mode on the local embedded database (refused without this flag).
           ALLOW_LOCAL_DB: "1",
+          // Uploads in a production build need an explicit storage that keeps files.
+          FILE_STORAGE: "local",
         },
       },
 });

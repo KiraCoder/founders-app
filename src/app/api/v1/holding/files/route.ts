@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { handleApi, jsonError } from "@/server/api";
 import { HoldingFileError, MAX_HOLDING_FILE_BYTES, saveHoldingFile } from "@/server/services/holding-files";
+import { fileUploadStatus } from "@/server/storage/file-storage";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +42,10 @@ async function readLimited(req: Request, max: number): Promise<Uint8Array | null
  */
 export async function POST(req: NextRequest) {
   return handleApi(async (ctx) => {
+    // No storage that keeps files here (production without a working remote adapter, e.g.
+    // Vercel's read-only disk): say so before reading the body.
+    const uploads = fileUploadStatus();
+    if (!uploads.available) return jsonError(503, "unavailable", uploads.message!);
     const type = req.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
     if (type !== "multipart/form-data") return jsonError(415, "unsupported_media_type", "Send the file as multipart/form-data");
     const declared = Number(req.headers.get("content-length") ?? "0");
@@ -60,7 +65,7 @@ export async function POST(req: NextRequest) {
       const saved = await saveHoldingFile(ctx, { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
       return NextResponse.json({ data: saved }, { status: 201 });
     } catch (err) {
-      if (err instanceof HoldingFileError) return jsonError(err.httpStatus, err.httpStatus === 415 ? "unsupported_media_type" : err.httpStatus === 413 ? "too_large" : "validation", err.message, err.fields);
+      if (err instanceof HoldingFileError) return jsonError(err.httpStatus, err.httpStatus === 415 ? "unsupported_media_type" : err.httpStatus === 413 ? "too_large" : err.httpStatus === 503 ? "unavailable" : "validation", err.message, err.fields);
       throw err;
     }
   });

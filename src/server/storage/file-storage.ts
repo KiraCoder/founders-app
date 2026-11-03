@@ -77,6 +77,32 @@ export class SupabaseFileStorage implements FileStorage {
   }
 }
 
+/** Shown instead of the upload field, and the 503 message of the upload API, when uploads are off. */
+export const UPLOADS_UNAVAILABLE_MESSAGE = "File uploads arrive with Supabase storage";
+
+export interface UploadStatus {
+  available: boolean;
+  /** Why not (UPLOADS_UNAVAILABLE_MESSAGE) when unavailable. */
+  message?: string;
+}
+
+/**
+ * Can documents be uploaded here? In development: yes (local disk). In production only with a
+ * storage that keeps files:
+ * - `FILE_STORAGE` empty → off (the default local disk is not kept on Vercel, and on Vercel it
+ *   is read-only: every upload would fail);
+ * - `FILE_STORAGE=supabase` → off until the Supabase adapter is written (it is a placeholder);
+ * - `FILE_STORAGE=local` → on, as an explicit choice for a server with its own lasting disk
+ *   (or a local production test), but never on Vercel (`VERCEL=1`).
+ */
+export function fileUploadStatus(env: Record<string, string | undefined> = process.env): UploadStatus {
+  if (override) return { available: true };
+  if (env.NODE_ENV !== "production") return { available: true };
+  const choice = env.FILE_STORAGE?.trim() || "";
+  const working = choice === "local" && env.VERCEL !== "1";
+  return working ? { available: true } : { available: false, message: UPLOADS_UNAVAILABLE_MESSAGE };
+}
+
 let override: FileStorage | null = null;
 
 /** Tests point the storage at a temporary folder. */

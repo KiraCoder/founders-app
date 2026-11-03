@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, asc, eq, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "@/server/db/connect";
 import { holdingFiles, intercompanyActs, intercompanyContracts } from "@/server/db/schema";
-import { fileStorage, fileStorageByName } from "@/server/storage/file-storage";
+import { fileStorage, fileStorageByName, fileUploadStatus, UPLOADS_UNAVAILABLE_MESSAGE } from "@/server/storage/file-storage";
 import { assertHoldingAccess, assertValidId } from "./access";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
@@ -40,7 +40,7 @@ export function cleanFileName(name: string, type: AllowedType): string {
 export class HoldingFileError extends ServiceError {
   constructor(
     message: string,
-    public readonly httpStatus: 413 | 415 | 400,
+    public readonly httpStatus: 413 | 415 | 400 | 503,
   ) {
     super("validation", message, { file: [message] });
   }
@@ -48,6 +48,8 @@ export class HoldingFileError extends ServiceError {
 
 export async function saveHoldingFile(ctx: ServiceContext, input: { name: string; bytes: Uint8Array }): Promise<FileRef> {
   assertHoldingAccess(ctx);
+  const uploads = fileUploadStatus();
+  if (!uploads.available) throw new HoldingFileError(uploads.message ?? UPLOADS_UNAVAILABLE_MESSAGE, 503);
   if (input.bytes.byteLength === 0) throw new HoldingFileError("The file is empty", 400);
   if (input.bytes.byteLength > MAX_HOLDING_FILE_BYTES) throw new HoldingFileError("The file is larger than 10 MB", 413);
   const type = detectFileType(input.bytes);
