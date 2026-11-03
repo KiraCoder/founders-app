@@ -295,26 +295,39 @@ function genericChecksOf(checks: ChecksConfig): ChecksConfig {
   return out;
 }
 
+/**
+ * A version number from a caller: a positive integer (or its digits as text) within the
+ * database's integer range. Anything else ("abc", 0, -1, 1.5, NaN) is "Version not found" —
+ * never a database error.
+ */
+export function parseVersion(v: unknown): number {
+  const n = typeof v === "number" ? v : typeof v === "string" && /^\d{1,10}$/.test(v.trim()) ? Number(v.trim()) : NaN;
+  if (!Number.isSafeInteger(n) || n < 1 || n > 2_147_483_647) throw new ServiceError("not_found", "Version not found");
+  return n;
+}
+
 /** Restores a role's settings to an earlier version (logged as a new version). */
-export async function revertRole(ctx: ServiceContext, key: unknown, version: number): Promise<ResolvedRole> {
+export async function revertRole(ctx: ServiceContext, key: unknown, version: unknown): Promise<ResolvedRole> {
   assertAiRolesAccess(ctx);
   const role = await roleOrThrow(ctx, key);
+  const v = parseVersion(version);
   const [row] = await ctx.db
     .select()
     .from(aiRoleSettingsLog)
-    .where(and(eq(aiRoleSettingsLog.scopeKey, `role:${role.key}`), eq(aiRoleSettingsLog.version, Number(version))));
+    .where(and(eq(aiRoleSettingsLog.scopeKey, `role:${role.key}`), eq(aiRoleSettingsLog.version, v)));
   if (!row) throw new ServiceError("not_found", "Version not found");
   return updateRoleConfig(ctx, role.key, row.after, { revertedTo: row.version });
 }
 
 /** Restores a hire's settings and notes to an earlier version (logged as a new version). */
-export async function revertHire(ctx: ServiceContext, hireId: unknown, version: number): Promise<HireView> {
+export async function revertHire(ctx: ServiceContext, hireId: unknown, version: unknown): Promise<HireView> {
   assertAiRolesAccess(ctx);
   assertValidId(hireId, "AI role");
+  const v = parseVersion(version);
   const [row] = await ctx.db
     .select()
     .from(aiRoleSettingsLog)
-    .where(and(eq(aiRoleSettingsLog.scopeKey, `hire:${hireId}`), eq(aiRoleSettingsLog.version, Number(version))));
+    .where(and(eq(aiRoleSettingsLog.scopeKey, `hire:${hireId}`), eq(aiRoleSettingsLog.version, v)));
   if (!row) throw new ServiceError("not_found", "Version not found");
   const after = row.after as { settings?: HireSettings; notes?: string | null };
   const settings = { ...(after.settings ?? {}) } as Record<string, unknown>;

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { composeRequests, orchestrateTick } from "@/server/ai/orchestrator";
 import type { LlmGenerateInput, LlmProvider } from "@/server/ai/provider";
-import { aiRoleConfigs, aiRoleSettingsLog, metricDefinitions } from "@/server/db/schema";
+import { aiRoleConfigs, aiRoleHires, aiRoleSettingsLog, metricDefinitions } from "@/server/db/schema";
 import { createCustomRole, listHireVersions, listRoleVersions, revertHire, revertRole, updateRoleConfig } from "@/server/services/ai-role-editor";
 import { collectAiRequests, getHire, getRun, hireRole, listRoles, rerunReport, runHireNow, updateHire } from "@/server/services/ai-roles";
 import type { ServiceContext } from "@/server/services/context";
@@ -288,5 +288,19 @@ describe("built-in roles: template-level edits, defaults unchanged", () => {
     const first = await orgExpertSummaryLines(t.ctx("nuraaly", new Date("2026-12-01T06:00:00Z"))); // the 1st
     expect(first).toHaveLength(1);
     expect(first[0]!.text).toContain("Org Structure Expert (monthly): Jobutify");
+  });
+});
+
+describe("revert: a version that is not a positive integer is 'not found', never a 500 (C5b #5)", () => {
+  it("role and hire", async () => {
+    const [hire] = await t.handle.db.select({ id: aiRoleHires.id }).from(aiRoleHires).limit(1);
+    expect(hire).toBeTruthy();
+    for (const bad of ["abc", "", "1.5", "1e3", "-1", 0, -1, 1.5, Number.NaN, Infinity, 2 ** 40, "99999999999", null, undefined, {}, [1]]) {
+      await expect(revertRole(t.ctx("nuraaly"), "financial-analyst", bad as never), String(bad)).rejects.toMatchObject({ code: "not_found", message: "Version not found" });
+      await expect(revertHire(t.ctx("nuraaly"), hire!.id, bad as never), String(bad)).rejects.toMatchObject({ code: "not_found", message: "Version not found" });
+    }
+    // A well-formed number that does not exist is also "not found"; digits as text work.
+    await expect(revertRole(t.ctx("nuraaly"), "financial-analyst", 9999)).rejects.toMatchObject({ code: "not_found" });
+    await expect(revertRole(t.ctx("nuraaly"), "financial-analyst", "1" as never)).resolves.toBeTruthy();
   });
 });
