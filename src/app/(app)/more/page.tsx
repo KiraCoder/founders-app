@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Icon, type IconName } from "@/components/Icon";
-import { PageHeader } from "@/components/ui";
+import { InitialsAvatar, PageHeader } from "@/components/ui";
 import { getPageContext } from "@/server/context";
 import { devToolsEnabled } from "@/server/notifications/config";
 import { logoutAction } from "../actions";
@@ -20,11 +20,21 @@ export default async function MorePage() {
   const ctx = await getPageContext();
   return (
     <>
-      <PageHeader eyebrow={ctx.user.email} title="More" />
+      <PageHeader eyebrow="Menu & Navigation" title="More" />
+
+      {/* User profile card */}
+      <div className="card mb-4 flex items-center gap-3 p-3.5">
+        <InitialsAvatar name={ctx.user.name} size={40} />
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold text-ink leading-tight">{ctx.user.name}</p>
+          <p className="truncate text-[12px] text-muted">{ctx.user.email}</p>
+        </div>
+      </div>
+
       <ul className="card mb-4 divide-y divide-line">
         {[...LINKS, ...(devToolsEnabled() ? [{ href: "/dev/notifications", label: "Dev inbox", icon: "bell" as const }] : [])].map((l) => (
           <li key={l.href}>
-            <Link href={l.href} className="flex items-center gap-3 px-4 py-3 hover:bg-sunk">
+            <Link href={l.href} className="flex items-center gap-3 px-4 py-3 text-[14px] font-medium hover:bg-sunk">
               <Icon name={l.icon} /> {l.label}
             </Link>
           </li>

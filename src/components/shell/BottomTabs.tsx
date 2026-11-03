@@ -17,7 +17,7 @@ export function BottomTabs() {
   return (
     <nav
       aria-label="Tabs"
-      className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] md:hidden"
+      className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-line bg-surface/95 backdrop-blur-md pb-[env(safe-area-inset-bottom)] md:hidden"
     >
       {TABS.map((t) => {
         const active = t.match.some((m) => isActivePath(pathname, m));
@@ -26,10 +26,18 @@ export function BottomTabs() {
             key={t.href}
             href={t.href}
             aria-current={active ? "page" : undefined}
-            className={`flex flex-col items-center gap-0.5 py-2 text-[11px] font-medium ${active ? "text-accent" : "text-muted"}`}
+            className={`relative flex flex-col items-center gap-0.5 py-2 text-[11px] transition-colors ${
+              active ? "font-semibold text-accent" : "font-medium text-muted hover:text-ink"
+            }`}
           >
             <Icon name={t.icon} size={20} />
             {t.label}
+            {active && (
+              <span
+                className="absolute top-1 size-1 rounded-full bg-accent"
+                aria-hidden="true"
+              />
+            )}
           </Link>
         );
       })}

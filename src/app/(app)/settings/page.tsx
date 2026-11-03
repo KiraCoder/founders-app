@@ -6,6 +6,7 @@ import { SalaryAccessCard } from "@/components/settings/SalaryAccessCard";
 import { ReminderClockCard } from "@/components/settings/ReminderClockCard";
 import { TelegramBotSetupCard } from "@/components/settings/TelegramBotSetupCard";
 import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
+import { ThemeToggle } from "@/components/settings/ThemeToggle";
 import { PageHeader } from "@/components/ui";
 import { getPageContext } from "@/server/context";
 import { devToolsEnabled, telegramBotToken, telegramBotUsername } from "@/server/notifications/config";
@@ -39,6 +40,19 @@ export default async function SettingsPage() {
   return (
     <>
       <PageHeader eyebrow={`${ctx.user.shortName} · your Telegram and notifications are private`} title="Settings" />
+
+      <section className="card mb-5 p-4 md:p-5" aria-labelledby="appearance-heading">
+        <h2 id="appearance-heading" className="eyebrow mb-3">
+          Appearance
+        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-[13px] font-medium">Theme</p>
+            <p className="text-[12px] text-muted">Choose light, dark, or follow your system preference.</p>
+          </div>
+          <ThemeToggle />
+        </div>
+      </section>
 
       <section className="card mb-5 p-4 md:p-5" aria-labelledby="tg-heading">
         <h2 id="tg-heading" className="eyebrow mb-3">
