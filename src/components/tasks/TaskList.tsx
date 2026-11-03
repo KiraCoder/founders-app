@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useState, useTransition } from "react";
 import { deleteTaskAction, setTaskDeadlineAction, setTaskStatusAction } from "@/app/(app)/actions";
 import { Icon } from "@/components/Icon";
-import { CompanyDot, Tag } from "@/components/ui";
+import { CompanyDot, InitialsAvatar, Tag } from "@/components/ui";
 import { daysBetween, formatDueDate } from "@/lib/dates";
 import type { TaskFormOptions } from "@/server/services/options";
 import { PRIORITY_TONE, STATUS_OPTIONS, STATUS_TONE, priorityLabel, statusLabel } from "./labels";
@@ -114,7 +114,12 @@ function TaskRow({
                 <Icon name="folder" size={12} /> {task.project.name}
               </Link>
             )}
-            {task.assignee && <span>→ {task.assignee.name}</span>}
+            {task.assignee && (
+              <span className="inline-flex items-center gap-1">
+                <InitialsAvatar name={task.assignee.name} size={16} />
+                <span>{task.assignee.name}</span>
+              </span>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">

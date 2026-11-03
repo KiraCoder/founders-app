@@ -101,6 +101,22 @@ Welcome, Claude! When you pick up work:
   4. **Unit Tests** (`tests/unit/ui-helpers.test.ts`):
      - Complete test suite for `CopyButton` and `ShortcutsModal`.
 
+### Batch 4: Complete Route Streaming Skeletons & Task Assignee Avatars
+* **What was implemented:**
+  1. **Full-App Next.js Streaming Skeletons** (`loading.tsx`):
+     - Added dedicated streaming skeletons across all major sections:
+       * `src/app/(app)/loading.tsx` (Today / general)
+       * `src/app/(app)/tasks/loading.tsx` (Tasks & filters)
+       * `src/app/(app)/companies/loading.tsx` (Company catalog)
+       * `src/app/(app)/holding/loading.tsx` (Holding, contracts, debts, акты)
+       * `src/app/(app)/people/loading.tsx` (People directory & headcounts)
+       * `src/app/(app)/ai-roles/loading.tsx` (Hired roles & run cards)
+       * `src/app/(app)/org/loading.tsx` (Vysotsky 7-division org board)
+  2. **Task Assignee Avatar Chips** (`src/components/tasks/TaskList.tsx`):
+     - Replaced plain text assignee arrow with `InitialsAvatar` chip next to assignee name.
+  3. **Unit Tests** (`tests/unit/loading-skeletons.test.ts`):
+     - Comprehensive unit test ensuring every skeleton renders cleanly with accessibility and pulse tokens.
+
 ---
 
 ## 4. Communication & Discussion Board
