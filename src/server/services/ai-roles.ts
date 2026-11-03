@@ -1,4 +1,5 @@
 import "server-only";
+import { resolveAppBaseUrl } from "@/server/app-url";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import {
@@ -806,8 +807,9 @@ export interface AiRequestItem {
   acceptMonthlyTotals?: boolean;
 }
 
+/** An absolute link when the site's address is known (APP_URL, or Vercel's), else the path. */
 export function appUrl(path: string): string {
-  const base = process.env.APP_URL?.trim().replace(/\/+$/, "");
+  const base = resolveAppBaseUrl()?.url;
   return base ? `${base}${path}` : path;
 }
 

@@ -2,10 +2,12 @@ import Link from "next/link";
 import { DataSources } from "@/components/metrics/DataSources";
 import { PreferencesForm } from "@/components/settings/PreferencesForm";
 import { SalaryAccessCard } from "@/components/settings/SalaryAccessCard";
+import { TelegramBotSetupCard } from "@/components/settings/TelegramBotSetupCard";
 import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
 import { PageHeader } from "@/components/ui";
 import { getPageContext } from "@/server/context";
 import { devToolsEnabled, telegramBotToken, telegramBotUsername } from "@/server/notifications/config";
+import { canSetUpApp, getTelegramSetupConfig } from "@/server/services/app-setup";
 import { listConnectorStatuses } from "@/server/services/connectors";
 import { getMyPreferences, getMyTelegramLink } from "@/server/services/notifications";
 import { canViewSalaries, listSalaryAccessLog, listSalaryViewers } from "@/server/services/salaries";
@@ -22,6 +24,7 @@ export default async function SettingsPage() {
     listConnectorStatuses(ctx),
   ]);
   const log = isViewer ? await listSalaryAccessLog(ctx, 15) : [];
+  const founder = canSetUpApp(ctx);
   const fmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: ctx.timeZone });
   const linkedAt = link
     ? new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: ctx.timeZone }).format(link.createdAt)
@@ -42,6 +45,15 @@ export default async function SettingsPage() {
           timeZone={ctx.timeZone}
         />
       </section>
+
+      {founder && (
+        <section className="card mb-5 p-4 md:p-5" aria-labelledby="tg-setup-heading">
+          <h2 id="tg-setup-heading" className="eyebrow mb-3">
+            Telegram bot · setup
+          </h2>
+          <TelegramBotSetupCard config={getTelegramSetupConfig(ctx)} timeZone={ctx.timeZone} />
+        </section>
+      )}
 
       <section className="card mb-5 p-4 md:p-5" aria-labelledby="prefs-heading">
         <h2 id="prefs-heading" className="eyebrow mb-3">

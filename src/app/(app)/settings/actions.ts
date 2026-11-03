@@ -9,6 +9,8 @@ import {
   updateMyPreferences,
 } from "@/server/services/notifications";
 import type { NotificationPrefsInput } from "@/lib/schemas";
+import type { TelegramSetupResult } from "@/server/notifications/telegram-setup";
+import { connectTelegramBot, getTelegramBotStatus } from "@/server/services/app-setup";
 
 export interface PrefsState {
   ok?: boolean;
@@ -59,4 +61,15 @@ export async function unlinkTelegramAction(): Promise<void> {
   const ctx = await getPageContext();
   await unlinkMyTelegram(ctx);
   revalidatePath("/settings");
+}
+
+// --- App setup (founders only; the services check) ---------------------------------
+export async function connectTelegramAction(): Promise<TelegramSetupResult> {
+  const ctx = await getPageContext();
+  return connectTelegramBot(ctx);
+}
+
+export async function telegramStatusAction(): Promise<TelegramSetupResult> {
+  const ctx = await getPageContext();
+  return getTelegramBotStatus(ctx);
 }
