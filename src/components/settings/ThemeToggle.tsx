@@ -10,18 +10,18 @@ const OPTIONS = [
 
 /**
  * Three-way segmented control for light / dark / system theme.
- * Designed to match the Founder Cockpit design system.
+ * Designed to match the Founder Cockpit design system. Toggle buttons (aria-pressed), not
+ * radios: role="radio" would promise arrow-key navigation these buttons do not have.
  */
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
   return (
-    <div className="flex items-center gap-1 rounded-[10px] border border-line bg-sunk p-1" role="radiogroup" aria-label="Theme">
+    <div className="flex items-center gap-1 rounded-[10px] border border-line bg-sunk p-1" role="group" aria-label="Theme">
       {OPTIONS.map((o) => (
         <button
           key={o.value}
           type="button"
-          role="radio"
-          aria-checked={theme === o.value}
+          aria-pressed={theme === o.value}
           onClick={() => setTheme(o.value)}
           className={`flex items-center gap-1.5 rounded-[7px] px-3 py-1.5 text-[13px] font-medium transition-colors ${
             theme === o.value
