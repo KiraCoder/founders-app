@@ -527,7 +527,12 @@ No LLM SDK, key or network call exists in the app.
 file, register it in `PROVIDER_FACTORIES` in `src/server/ai/provider.ts`, set `AI_PROVIDER` to
 its id and its key in the hosting dashboard. Callers don't change. The narrative prompt
 (`src/server/ai/narrative.ts`) is built **only from findings**; salary data can't enter it
-(strict schema + `assertNoSalaryData`, tested).
+(strict schema + `assertNoSalaryData`, tested). Findings about a pay-named number (salary,
+payroll, wages, зарплата, ФОТ, оплата труда, оклад — by label, sentence or metric key) are left
+out of the prompt and the report says so; if the check still refuses the prompt nothing is sent
+and the run records `narrative_skipped:salary` — the report itself never fails because of it.
+Only the factory's piecework pay **total** (`piecework_total`) is allowed, by explicit key.
+Without a provider no prompt is built at all.
 
 ## REST API (for the future iOS app)
 

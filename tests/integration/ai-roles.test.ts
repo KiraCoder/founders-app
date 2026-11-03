@@ -414,6 +414,38 @@ describe("report-ready push respects budget, quiet hours and not linked", () => 
   });
 });
 
+describe("pay-named numbers never break a report", () => {
+  it("'Payroll fund': reported without a provider; with one, its finding is left out of the prompt", async () => {
+    const tp = await createTestDb();
+    try {
+      const kg = tp.companyIds["kiwi-go"]!;
+      const [def] = await tp.handle.db
+        .insert(metricDefinitions)
+        .values({ companyId: kg, key: "payroll_fund", name: "Payroll fund", unit: "KGS", granularity: "month", aggregation: "last", direction: "lower_is_better" })
+        .returning();
+      const hire = await hireRole(tp.ctx("nuraaly"), { templateKey: "financial-analyst", companyId: kg, settings: { requiredMetricKeys: ["payroll_fund"] } });
+      const ctx = tp.ctx("nuraaly", bishkek("2026-11-06", "12:00"));
+      await saveMetricGrid(ctx, kg, [
+        { metricId: def!.id, period: "2026-09", value: "900000" },
+        { metricId: def!.id, period: "2026-10", value: "1200000" },
+      ]);
+      const run = await runHireNow(ctx, hire.id);
+      expect(run).toMatchObject({ status: "reported", narrativeStatus: "narrative_skipped", error: null });
+      expect(run.findings.some((f) => f.metricKeys.includes("payroll_fund"))).toBe(true);
+
+      const prompts: LlmGenerateInput[] = [];
+      const capture: LlmProvider = { id: "capture", configured: true, generate: async (i) => (prompts.push(i), { text: "ok", usage: { inputTokens: 0, outputTokens: 0 } }) };
+      await saveMetricGrid(ctx, kg, [{ metricId: def!.id, period: "2026-10", value: "1300000" }]);
+      const again = await rerunReport(ctx, run.id, { provider: capture });
+      expect(again).toMatchObject({ status: "reported", narrativeStatus: "narrative_done", narrativeOmitted: 1 });
+      expect(prompts).toHaveLength(1);
+      expect(JSON.stringify(prompts)).not.toMatch(/payroll|1 300 000/i);
+    } finally {
+      await tp.handle.close();
+    }
+  });
+});
+
 describe("ai_role tables", () => {
   it("runs are unique per hire and month; requests per hire, founder and round", async () => {
     const [run] = await t.handle.db.select().from(aiRoleRuns);

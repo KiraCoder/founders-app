@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Finding } from "@/server/ai/finance-rules";
-import { assertNoSalaryData, buildNarrativePrompt, generateNarrative, SalaryDataInPromptError } from "@/server/ai/narrative";
+import { assertNoSalaryData, buildNarrativePrompt, generateNarrative, salaryLikeFinding, SalaryDataInPromptError } from "@/server/ai/narrative";
 import {
   AiProviderError,
   getLlmProvider,
@@ -108,5 +108,61 @@ describe("generateNarrative", () => {
     expect(calls[0]).toEqual(buildNarrativePrompt({ ...base, findings }));
     const broken: LlmProvider = { id: "broken", configured: true, generate: async () => Promise.reject(new Error("boom")) };
     expect(await generateNarrative({ ...base, findings }, broken)).toMatchObject({ status: "narrative_failed", error: "boom" });
+  });
+});
+
+describe("pay data: findings are left out, the report never fails", () => {
+  const pay = (key: string, label: string): Finding => ({
+    id: `change:${key}:`,
+    rule: "change",
+    severity: "warn",
+    company: "Alura Style",
+    metrics: [label],
+    metricKeys: [key],
+    numbers: [{ label: `${label} · October 2026`, value: "1 200 000 KGS" }],
+    sentence: `${label} rose 30% vs September (Sep: 900 000 KGS, Oct: 1 200 000 KGS).`,
+  });
+  const payFindings = [
+    pay("payroll_fund", "Payroll fund"),
+    pay("fot", "ФОТ"),
+    pay("wages", "Wages"),
+    pay("labour_cost", "Оплата труда"),
+    pay("zp_total", "Total"), // by key only
+    pay("base_pay", "Оклады · ХБК"),
+  ];
+  it("the word list covers payroll, wages, ФОТ, оплата труда, оклад, зарплата and pay keys — not 'фото'", () => {
+    for (const f of payFindings) expect(salaryLikeFinding(f), f.metrics[0]).toBe(true);
+    for (const w of ["Payroll fund", "Wages", "ФОТ за октябрь", "Оплата труда", "Зарплата", "оклад"]) {
+      expect(() => assertNoSalaryData({ label: w }), w).toThrow(SalaryDataInPromptError);
+    }
+    expect(() => assertNoSalaryData({ label: "Фото товаров", key: "photo_count" })).not.toThrow();
+    expect(salaryLikeFinding(findings[0]!)).toBe(false);
+    expect(salaryLikeFinding(findings[1]!)).toBe(false); // piecework pay per piece (factory total)
+  });
+  it("piecework pay TOTAL is allowed only by its explicit key", () => {
+    const piecework = pay("piecework_total", "Сдельная оплата труда · ХБК");
+    expect(salaryLikeFinding(piecework)).toBe(false);
+    expect(buildNarrativePrompt({ ...base, findings: [piecework] }).messages[0]!.content).toContain("Сдельная оплата труда · ХБК");
+    expect(salaryLikeFinding(pay("piecework_bonus", "Сдельная оплата труда · ХБК"))).toBe(true);
+    expect(() => buildNarrativePrompt({ ...base, findings: [pay("piecework_bonus", "Сдельная оплата труда · ХБК")] })).toThrow(SalaryDataInPromptError);
+  });
+  it("with no provider nothing is built: a pay-named number does not throw", async () => {
+    expect(await generateNarrative({ ...base, findings: payFindings }, getLlmProvider({}))).toEqual({ status: "narrative_skipped", text: null, provider: "none" });
+  });
+  it("with a provider the pay findings are left out of the prompt and counted", async () => {
+    const calls: LlmGenerateInput[] = [];
+    const p: LlmProvider = { id: "t", configured: true, generate: async (i) => (calls.push(i), { text: "Summary.", usage: { inputTokens: 0, outputTokens: 0 } }) };
+    const r = await generateNarrative({ ...base, findings: [...payFindings, ...findings] }, p);
+    expect(r).toEqual({ status: "narrative_done", text: "Summary.", provider: "t", omitted: 6 });
+    const text = JSON.stringify(calls);
+    expect(text).not.toMatch(/payroll|wages|ФОТ|Оплата труда|zp_total|Оклад|1 200 000/i);
+    expect(text).toContain("Ош Район");
+  });
+  it("when the prompt is still refused nothing is sent: narrative_skipped:salary", async () => {
+    let called = 0;
+    const p: LlmProvider = { id: "t", configured: true, generate: async () => (called++, { text: "x", usage: { inputTokens: 0, outputTokens: 0 } }) };
+    const r = await generateNarrative({ ...base, companyName: "ФОТ Сервис", findings }, p);
+    expect(r).toMatchObject({ status: "narrative_skipped:salary", text: null });
+    expect(called).toBe(0);
   });
 });

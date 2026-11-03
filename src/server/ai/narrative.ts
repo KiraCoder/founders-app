@@ -8,9 +8,13 @@
  * **No raw salaries ever enter a prompt.** The prompt is built ONLY from findings (metric
  * labels, company name, month, numbers already shown in the report), validated by a strict
  * schema, and `assertNoSalaryData` refuses anything that looks like salary data — salary
- * fields (salary, amount by person, pay type, person links) or salary-named metrics
- * (salary / оклад / зарплата / ФОТ by person). Company totals such as "Piecework pay total"
- * are group numbers, not a person's salary, and are allowed.
+ * fields (salary, amount by person, pay type, person links) or pay-named metrics in a label,
+ * sentence or metric key (salary, payroll, wage(s), зарплата, заработная плата, ЗП, ФОТ,
+ * оплата труда, оклад; keys like `payroll_fund`, `fot`, `zp_total`). Findings about such a
+ * metric are left out of the prompt (`salaryLikeFinding`); if the prompt is still refused the
+ * run records `narrative_skipped:salary` — the report itself never fails because of it.
+ * The only pay number allowed is the factory's piecework pay TOTAL, by explicit key
+ * (`ALLOWED_PAY_KEYS`): a group number, not a person's salary.
  *
  * Pure except `generateNarrative`, which calls the provider it is given.
  */
@@ -18,7 +22,11 @@ import { z } from "zod";
 import type { Finding } from "./finance-rules";
 import { isAiProviderError, type LlmGenerateInput, type LlmProvider } from "./provider";
 
-export type NarrativeStatus = "narrative_skipped" | "narrative_done" | "narrative_failed";
+/**
+ * narrative_skipped        — no provider chosen (nothing built, nothing sent)
+ * narrative_skipped:salary — the safety check refused the prompt (nothing sent; the report is fine)
+ */
+export type NarrativeStatus = "narrative_skipped" | "narrative_skipped:salary" | "narrative_done" | "narrative_failed";
 
 export class SalaryDataInPromptError extends Error {
   constructor(where: string) {
@@ -29,8 +37,26 @@ export class SalaryDataInPromptError extends Error {
 
 /** Keys that only salary / per-person pay data has. */
 const SALARY_KEY = /^(salary|salaries|salaryHistory|payType|pay_type|personCompanyId|person_company_id|effectiveFrom|effective_from|personId|person_id)$/i;
-/** Words that mark a salary in a label or a metric key (English and Russian). */
-const SALARY_WORD = /(salar|оклад|зарплат|заработн|(^|[^а-яё])зп([^а-яё]|$))/i;
+/** Words that mark pay data in a label, sentence or metric key (English and Russian). */
+const SALARY_WORD = /(salar|payroll|wage|оклад|зарплат|заработн|оплат[аыуе]?\s+труда|(^|[^а-яё])(зп|фот)([^а-яё]|$))/i;
+/** Metric keys (snake_case, Latin) that name pay data. */
+const SALARY_METRIC_KEY = /(^|_)(salary|salaries|payroll|wages?|fot|zp|oklad|zarplat[a-z]*|zarabotn[a-z]*)(_|$)/i;
+/** Pay numbers that may be sent: company / factory totals, never a person's pay. */
+export const ALLOWED_PAY_KEYS: ReadonlySet<string> = new Set(["piecework_total"]);
+
+function isSalaryText(v: string): boolean {
+  return SALARY_WORD.test(v) || SALARY_METRIC_KEY.test(v);
+}
+
+/**
+ * A finding about pay data (by metric key, metric label, number label or sentence). Findings
+ * whose metric keys are all on the allow-list (piecework pay total) are not.
+ */
+export function salaryLikeFinding(f: Pick<Finding, "metricKeys" | "metrics" | "numbers" | "sentence">): boolean {
+  if (f.metricKeys.length && f.metricKeys.every((k) => ALLOWED_PAY_KEYS.has(k))) return false;
+  if (f.metricKeys.some((k) => !ALLOWED_PAY_KEYS.has(k) && isSalaryText(k))) return true;
+  return [...f.metrics, ...f.numbers.map((n) => n.label), f.sentence].some((t) => SALARY_WORD.test(t));
+}
 
 /**
  * Throws SalaryDataInPromptError when `value` (deeply) has a salary-only key, or a string
@@ -38,7 +64,7 @@ const SALARY_WORD = /(salar|оклад|зарплат|заработн|(^|[^а-�
  */
 export function assertNoSalaryData(value: unknown, where = "input"): void {
   if (typeof value === "string") {
-    if (SALARY_WORD.test(value)) throw new SalaryDataInPromptError(where);
+    if (isSalaryText(value)) throw new SalaryDataInPromptError(where);
     return;
   }
   if (Array.isArray(value)) {
@@ -86,7 +112,11 @@ const SEVERITY_RANK = { risk: 0, warn: 1, info: 2 } as const;
  * Refuses salary data (see the header).
  */
 export function buildNarrativePrompt(raw: NarrativeInput): LlmGenerateInput {
-  assertNoSalaryData(raw);
+  const { findings: rawFindings, ...head } = raw;
+  assertNoSalaryData(head);
+  // Every finding is checked; an allow-listed pay total (piecework) is exempt from the word
+  // check only — salary-only fields are refused everywhere.
+  (rawFindings ?? []).forEach((f, i) => assertNoSalaryData(allowListed(f) ? stripText(f) : f, `input.findings[${i}]`));
   const input = narrativeInputSchema.parse(raw);
   const nfc = (s: string) => s.normalize("NFC");
   const findings = [...input.findings].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.id.localeCompare(b.id));
@@ -107,33 +137,65 @@ export function buildNarrativePrompt(raw: NarrativeInput): LlmGenerateInput {
     ...(lines.length ? lines : ["(none)"]),
   ].join("\n");
   const prompt: LlmGenerateInput = { system, messages: [{ role: "user", content: user }], maxTokens: 600 };
-  assertNoSalaryData(prompt, "prompt");
+  // The finished prompt again, minus the lines of allow-listed findings (checked above).
+  const allowedLines = new Set(findings.flatMap((f, i) => (allowListed(f) ? [lines[i]!] : [])));
+  assertNoSalaryData({ system, user: user.split("\n").filter((l) => !allowedLines.has(l)) }, "prompt");
   return prompt;
+}
+
+function allowListed(f: { metricKeys?: unknown }): boolean {
+  return Array.isArray(f.metricKeys) && f.metricKeys.length > 0 && f.metricKeys.every((k) => typeof k === "string" && ALLOWED_PAY_KEYS.has(k));
+}
+
+/** The finding without its free text (for the key check of an allow-listed finding). */
+function stripText(f: object): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(f)) out[k] = typeof v === "string" || Array.isArray(v) ? null : v;
+  return out;
 }
 
 export interface NarrativeResult {
   status: NarrativeStatus;
   text: string | null;
   provider: string;
+  /** Findings about pay data left out of the prompt. */
+  omitted?: number;
   error?: string;
 }
 
 /**
- * Calls the provider only when one is configured. With "none" nothing is called and the
- * result is `narrative_skipped`. A provider failure never fails the report.
+ * Calls the provider only when one is configured. With "none" no prompt is even built and the
+ * result is `narrative_skipped`. Findings about pay data are left out of the prompt; if the
+ * safety check still refuses it, nothing is sent (`narrative_skipped:salary`). Neither that nor
+ * a provider failure ever fails the report.
  */
 export async function generateNarrative(
   input: { roleName: string; companyName: string; periodLabel: string; findings: readonly Finding[] },
   provider: LlmProvider,
 ): Promise<NarrativeResult> {
-  const prompt = buildNarrativePrompt({ ...input, findings: [...input.findings] });
   if (!provider.configured) return { status: "narrative_skipped", text: null, provider: provider.id };
+  const safe = input.findings.filter((f) => !salaryLikeFinding(f));
+  const omitted = input.findings.length - safe.length;
+  let prompt: LlmGenerateInput;
+  try {
+    prompt = buildNarrativePrompt({ ...input, findings: safe.map(promptFinding) });
+  } catch (err) {
+    if (err instanceof SalaryDataInPromptError) return { status: "narrative_skipped:salary", text: null, provider: provider.id, omitted };
+    return { status: "narrative_failed", text: null, provider: provider.id, error: err instanceof Error ? err.message.slice(0, 300) : "prompt" };
+  }
   try {
     const res = await provider.generate(prompt);
     const text = res.text.trim();
-    return text ? { status: "narrative_done", text: text.slice(0, 4000), provider: provider.id } : { status: "narrative_failed", text: null, provider: provider.id, error: "empty" };
+    if (!text) return { status: "narrative_failed", text: null, provider: provider.id, error: "empty" };
+    return { status: "narrative_done", text: text.slice(0, 4000), provider: provider.id, ...(omitted ? { omitted } : {}) };
   } catch (err) {
     if (isAiProviderError(err, "ai_provider_not_configured")) return { status: "narrative_skipped", text: null, provider: provider.id };
     return { status: "narrative_failed", text: null, provider: provider.id, error: err instanceof Error ? err.message.slice(0, 300) : "error" };
   }
+}
+
+/** Only the schema's fields (a stored finding may carry more later). */
+function promptFinding(f: Finding): Finding {
+  const { id, rule, severity, company, metrics, metricKeys, numbers, sentence, taskId } = f;
+  return { id, rule, severity, company, metrics, metricKeys, numbers: numbers.map(({ label, value }) => ({ label, value })), sentence, ...(taskId !== undefined ? { taskId } : {}) };
 }

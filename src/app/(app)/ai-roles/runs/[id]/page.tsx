@@ -131,7 +131,16 @@ export default async function RunPage({ params }: Props) {
           <Section title="AI summary">
             <div className="card px-4 py-3 text-[13px]" data-testid="ai-summary">
               {run.narrativeStatus === "narrative_done" && run.narrative ? (
-                <p className="whitespace-pre-wrap">{run.narrative}</p>
+                <>
+                  <p className="whitespace-pre-wrap">{run.narrative}</p>
+                  {run.narrativeOmitted > 0 && (
+                    <p className="mt-2 text-[12px] text-muted">
+                      {run.narrativeOmitted} finding{run.narrativeOmitted === 1 ? " is" : "s are"} about pay and {run.narrativeOmitted === 1 ? "was" : "were"} left out: pay data is never sent to the AI provider.
+                    </p>
+                  )}
+                </>
+              ) : run.narrativeStatus === "narrative_skipped:salary" ? (
+                <p className="text-muted">No AI summary for this report: it would have included pay data, which is never sent to the AI provider. The findings above are complete without it.</p>
               ) : run.narrativeStatus === "narrative_failed" ? (
                 <p className="text-muted">The AI summary could not be written this time. The findings above are complete without it.</p>
               ) : (

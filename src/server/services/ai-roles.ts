@@ -27,7 +27,7 @@ import {
 import { addDays, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import { analyseFinance, countBySeverity, severitySummary, type Finding, type MonthSeries, type Severity } from "@/server/ai/finance-rules";
 import { monthValue, periodsInMonth, type Granularity } from "@/server/ai/month-values";
-import { generateNarrative } from "@/server/ai/narrative";
+import { generateNarrative, salaryLikeFinding } from "@/server/ai/narrative";
 import { getLlmProvider, type LlmProvider } from "@/server/ai/provider";
 import type { Db } from "@/server/db/connect";
 import { syncAiTemplates } from "@/server/db/seed";
@@ -122,6 +122,8 @@ export interface RunView extends RunSummary {
   inputs: AiRunInputs | null;
   narrative: string | null;
   narrativeStatus: string | null;
+  /** Findings about pay data that are never sent to the AI provider (left out of its summary). */
+  narrativeOmitted: number;
   provider: string | null;
   error: string | null;
   trigger: string;
@@ -850,6 +852,7 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
     inputs: run.inputs ?? null,
     narrative: run.narrative,
     narrativeStatus: run.narrativeStatus,
+    narrativeOmitted: findingsOf(run).filter(salaryLikeFinding).length,
     provider: run.provider,
     error: run.error,
     trigger: run.trigger,
