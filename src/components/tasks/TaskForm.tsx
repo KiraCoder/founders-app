@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useEffect, useRef, useState } from "react";
+import { assigneePeopleOptions } from "@/lib/task-assignee";
 import { createTaskAction, updateTaskAction, type ActionState } from "@/app/(app)/actions";
 import type { TaskFormOptions } from "@/server/services/options";
 import { PRIORITY_OPTIONS, STATUS_OPTIONS } from "./labels";
@@ -51,7 +52,10 @@ export function TaskForm({
   }, [state.nonce]);
 
   const projects = options.projects.filter((p) => !companyId || p.companyId === companyId);
-  const people = companyId ? options.peopleByCompany[companyId] ?? [] : [];
+  // Anyone who works for the task's company (the current assignee is kept even if they left).
+  const people = companyId
+    ? assigneePeopleOptions(options.peopleByCompany[companyId] ?? [], task?.assignee, { taskCompanyId: task?.company?.id, companyId })
+    : [];
   const departments = companyId ? (options.departmentsByCompany?.[companyId] ?? []) : [];
   const err = (f: string) => state.fieldErrors?.[f]?.[0];
 
