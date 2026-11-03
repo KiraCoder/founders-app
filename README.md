@@ -513,8 +513,10 @@ company (`ai_role_hires`).
 **The orchestrator** (`src/server/ai/orchestrator.ts`) runs the roles on every tick and
 composes the morning summary's requests so nothing is asked twice: a number an AI role is
 asking for is removed from *Numbers waiting* (also on days the role's line is parked until its
-next chase day); the intercompany-debt number (derived from акты) is asked by the Holding
-section only, which then notes that the role waits for those акты too. Only the two founders
+next chase day); numbers the Holding computes from акты (intercompany debt, any `derived`
+number) are **never** on a role's line — not even after "I asked Elmurat", when the Holding has
+nothing to ask that day (a hand-entered value would block the later derived update). The
+Holding section asks for the акты and notes that the role waits for them too. Only the two founders
 are ever asked or notified — people records (Elmurat, Edil) never.
 
 **Without an AI provider (now).** Everything above works with `AI_PROVIDER` empty or `none`

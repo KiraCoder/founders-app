@@ -53,6 +53,7 @@ import type { NeutralMessage } from "@/server/notifications/types";
 import { assertAiRolesAccess, assertCompanyAccess, assertValidId } from "./access";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
+import { DEBT_METRIC_KEY } from "./holding";
 import { createTask } from "./tasks";
 
 /**
@@ -130,6 +131,8 @@ export interface RunView extends RunSummary {
   analysedAt: string | null;
   /** Deep link to enter the missing numbers. */
   numbersHref: string;
+  /** Missing numbers computed by the Holding from акты (not entered by hand). */
+  missingFromHolding: string[];
   /** A report was made, but its numbers were corrected since ("Run again" re-analyses). */
   inputsChanged: boolean;
 }
@@ -267,6 +270,16 @@ interface MetricDef extends CompanyMetricOption {
   aggregation: "sum" | "avg" | "last";
   direction: "higher_is_better" | "lower_is_better" | "neutral";
   target: string | null;
+  sourceKind: "manual" | "upload" | "connector" | "derived";
+}
+
+/**
+ * A number the Holding computes from акты and payments (intercompany debt, or any `derived`
+ * number). A role never asks the founders to enter it: the Holding section owns asking for
+ * the акты, and a hand-entered value would block later derived updates.
+ */
+export function holdingFed(d: { key: string; sourceKind?: string }): boolean {
+  return d.key === DEBT_METRIC_KEY || d.sourceKind === "derived";
 }
 
 async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]> {
@@ -287,6 +300,7 @@ async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]
     aggregation: d.aggregation,
     direction: d.direction,
     target: d.target,
+    sourceKind: d.sourceKind,
   }));
 }
 
@@ -620,8 +634,13 @@ export interface AiRequestItem {
   companySlug: string;
   /** Months still waiting (oldest first). */
   months: IsoDate[];
-  /** Missing numbers across those months (one entry per metric). */
+  /** Missing numbers across those months the founders can enter (one entry per metric). */
   missing: { metricId: string; key: string; label: string; granularity: Granularity }[];
+  /**
+   * Missing numbers the Holding computes from акты (never asked by the role; the Holding
+   * section asks for the акты). Still listed here so "Numbers waiting" doesn't ask for them.
+   */
+  waitingOnHolding: { metricId: string; key: string; label: string }[];
   /** True when today is one of the request's chase days (daily for 7 days, then weekly). */
   dueToday: boolean;
 }
@@ -674,10 +693,13 @@ export async function collectAiRequests(ctx: ServiceContext): Promise<AiRequestI
     }
     const defs = new Map((await companyMetricDefs(ctx.db, hc.hire.companyId)).map((d) => [d.id, d]));
     const missing: AiRequestItem["missing"] = [];
+    const waitingOnHolding: AiRequestItem["waitingOnHolding"] = [];
     for (const run of waiting) {
       for (const m of run.missing) {
-        if (missing.some((x) => x.metricId === m.metricId)) continue;
-        missing.push({ metricId: m.metricId, key: m.key, label: m.label, granularity: defs.get(m.metricId)?.granularity ?? "month" });
+        if (missing.some((x) => x.metricId === m.metricId) || waitingOnHolding.some((x) => x.metricId === m.metricId)) continue;
+        const def = defs.get(m.metricId);
+        if (holdingFed({ key: m.key, sourceKind: def?.sourceKind })) waitingOnHolding.push({ metricId: m.metricId, key: m.key, label: m.label });
+        else missing.push({ metricId: m.metricId, key: m.key, label: m.label, granularity: def?.granularity ?? "month" });
       }
     }
     out.push({
@@ -688,6 +710,7 @@ export async function collectAiRequests(ctx: ServiceContext): Promise<AiRequestI
       companySlug: hc.companySlug,
       months: waiting.map((w) => w.period),
       missing,
+      waitingOnHolding,
       dueToday: chaseDueToday(r.createdOn, r.lastShownOn, todayIso),
     });
   }
@@ -828,7 +851,8 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
   const hire = await getHire(ctx, run.hireId).catch(() => null);
   if (!hire) throw new ServiceError("not_found", "Report not found");
   const defs = await companyMetricDefs(ctx.db, hire.companyId);
-  const firstMissing = defs.find((d) => d.id === run.missing[0]?.metricId);
+  const fromHolding = run.missing.filter((m) => holdingFed({ key: m.key, sourceKind: defs.find((d) => d.id === m.metricId)?.sourceKind })).map((m) => m.metricId);
+  const firstMissing = defs.find((d) => d.id === run.missing.find((m) => !fromHolding.includes(m.metricId))?.metricId);
   let inputsChanged = false;
   if ((run.status === "reported" || run.status === "analysed") && run.inputsHash) {
     const months = Array.from({ length: HISTORY_MONTHS + 1 }, (_, i) => prevMonth(run.period, HISTORY_MONTHS - i));
@@ -858,6 +882,7 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
     trigger: run.trigger,
     analysedAt: run.analysedAt?.toISOString() ?? null,
     numbersHref: numbersHref(hire.companySlug, firstMissing?.granularity ?? "month"),
+    missingFromHolding: fromHolding,
     inputsChanged,
   };
 }

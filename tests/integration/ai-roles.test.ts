@@ -19,6 +19,7 @@ import { consumeLinkCode, createLinkCode } from "@/server/notifications/linking"
 import { planTick } from "@/server/notifications/planner";
 import type { NeutralMessage, NotificationChannel } from "@/server/notifications/types";
 import {
+  collectAiRequests,
   createTaskFromFinding,
   getHire,
   getRun,
@@ -207,7 +208,7 @@ describe("run state machine, data requests and chasing", () => {
     const revenue = await metricId(kiwiGoId, "revenue");
     const sales = await metricId(t.companyIds["alura-brand"]!, "sales");
     const c = composeRequests(
-      [{ requestId: "r1", hireId: "h1", roleName: "Financial Analyst", companyName: "Kiwi Go", companySlug: "kiwi-go", months: ["2026-10-01"], dueToday: false, missing: [{ metricId: revenue, key: "revenue", label: "Revenue", granularity: "month" }] }],
+      [{ requestId: "r1", hireId: "h1", roleName: "Financial Analyst", companyName: "Kiwi Go", companySlug: "kiwi-go", months: ["2026-10-01"], dueToday: false, missing: [{ metricId: revenue, key: "revenue", label: "Revenue", granularity: "month" }], waitingOnHolding: [] }],
       [
         { metricId: revenue, companyName: "Kiwi Go", label: "Revenue" },
         { metricId: sales, companyName: "Alura Brand", label: "Sales" },
@@ -228,14 +229,41 @@ describe("run state machine, data requests and chasing", () => {
       companySlug: "asqa-zou-holding",
       months: ["2026-10-01"],
       dueToday: true,
-      missing: [{ metricId: "m-debt", key: "intercompany_debt", label: "Intercompany debt total", granularity: "month" as const }],
+      missing: [],
+      waitingOnHolding: [{ metricId: "m-debt", key: "intercompany_debt", label: "Intercompany debt total" }],
     };
-    const c = composeRequests([item], [], holding);
+    const c = composeRequests([item], [{ metricId: "m-debt", companyName: "Asqa Zou Holding", label: "Intercompany debt total" }], holding);
     expect(c.aiLines).toEqual([]);
     expect(c.aiRequestIds).toEqual([]);
+    expect(c.waiting).toEqual([]);
     expect(c.holding!.lines.at(-1)!.text).toBe("The Financial Analyst (Asqa Zou Holding) is waiting for these акты too (intercompany debt).");
-    // Without a Holding ask line the analyst asks for it itself.
-    expect(composeRequests([item], [], null).aiLines[1]!.text).toContain("Intercompany debt total");
+    // The day after "I asked Elmurat" the Holding section has nothing to ask: the analyst
+    // still never asks the founders to enter the derived number itself.
+    const asked = composeRequests([item], [], null);
+    expect(asked.aiLines).toEqual([]);
+    expect(composeRequests([item], [], { ...holding, lines: [] }).aiLines).toEqual([]);
+    // Even if the debt slipped into `missing`, it is dropped from the line.
+    const slipped = { ...item, waitingOnHolding: [], missing: [{ metricId: "m-debt", key: "intercompany_debt", label: "Intercompany debt total", granularity: "month" as const }] };
+    expect(composeRequests([slipped], [], null).aiLines).toEqual([]);
+  });
+
+  it("a Holding hire waiting only for the debt number: the request lists it as waiting on the Holding, never as a number to enter", async () => {
+    const th = await createTestDb();
+    try {
+      const holdingId = th.companyIds["asqa-zou-holding"]!;
+      const hire = await hireRole(th.ctx("nuraaly"), { templateKey: "financial-analyst", companyId: holdingId });
+      expect(hire.settings.requiredMetricKeys).toEqual(["intercompany_debt"]);
+      await orchestrateTick(th.handle.db, bishkek("2026-11-10", "08:00"));
+      const items = await collectAiRequests(th.ctx("nuraaly", bishkek("2026-11-11", "08:30")));
+      expect(items).toHaveLength(1);
+      expect(items[0]!.missing).toEqual([]);
+      expect(items[0]!.waitingOnHolding.map((m) => m.label)).toEqual(["Intercompany debt total"]);
+      expect(composeRequests(items, [], null).aiLines).toEqual([]);
+      const [run] = await th.handle.db.select().from(aiRoleRuns);
+      expect((await getRun(th.ctx("nuraaly"), run!.id)).missingFromHolding).toEqual([run!.missing[0]!.metricId]);
+    } finally {
+      await th.handle.close();
+    }
   });
 
   it("pause closes the requests; resume brings this month's request back (fresh cadence)", async () => {

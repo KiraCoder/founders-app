@@ -76,6 +76,15 @@ export default async function RunPage({ params }: Props) {
               <div key={m.metricId} className="flex items-center gap-2 px-4 py-2 text-[13px]">
                 <span className="font-medium">{m.label}</span>
                 <span className="text-muted">· {m.detail}</span>
+                {run.missingFromHolding.includes(m.metricId) && (
+                  <span className="text-muted">
+                    · computed from the{" "}
+                    <Link href="/holding" className="text-accent hover:underline">
+                      Holding акты
+                    </Link>{" "}
+                    — no need to enter it
+                  </span>
+                )}
               </div>
             ))}
           </div>

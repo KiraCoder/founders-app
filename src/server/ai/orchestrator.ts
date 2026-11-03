@@ -29,10 +29,11 @@ import type { HoldingSection } from "@/server/services/holding-asks";
  *    is parked until the role's next chase day instead of being asked by "Numbers waiting".
  * 2. One line per hire per founder per day at most, at most 3 role lines per summary.
  * 3. Holding акты are asked by the Holding section (it has the "I asked Elmurat" button and
- *    the person who can act). The intercompany-debt number is derived from those акты, so a
- *    role waiting for it does not ask separately while a Holding ask line is in the summary:
- *    the number is dropped from the role's line and the Holding section gets one muted line
- *    saying the role is waiting for those акты too.
+ *    the person who can act). Numbers the Holding computes from those акты (intercompany
+ *    debt, any `derived` number) are NEVER on a role's line — not even on days the Holding
+ *    has nothing to ask (e.g. after "I asked Elmurat"): entering one by hand would only block
+ *    the later derived update. When a Holding ask line is in the summary, the Holding section
+ *    gets one muted line saying the role is waiting for those акты too.
  * 4. Only the two founders are ever asked; people records (Elmurat, Edil) never get anything.
  */
 
@@ -69,14 +70,15 @@ export function composeRequests(
   waiting: readonly (WaitingNumber & { metricId?: string })[],
   holding: HoldingSection | null,
 ): ComposedRequests {
-  const covered = new Set(items.flatMap((i) => i.missing.map((m) => m.metricId)));
+  const covered = new Set(items.flatMap((i) => [...i.missing, ...i.waitingOnHolding].map((m) => m.metricId)));
   const holdingAsks = !!holding?.lines.length;
   const lines: string[] = [];
   const shownIds: string[] = [];
   const waitingOnActs: string[] = [];
   for (const item of items) {
-    const own = holdingAsks ? item.missing.filter((m) => m.key !== DEBT_METRIC_KEY) : item.missing;
-    if (own.length < item.missing.length) waitingOnActs.push(`${item.roleName} (${item.companyName})`);
+    // Defence in depth: a holding-fed number is never asked by a role, however it got here.
+    const own = item.missing.filter((m) => m.key !== DEBT_METRIC_KEY);
+    if (holdingAsks && (item.waitingOnHolding.length || own.length < item.missing.length)) waitingOnActs.push(`${item.roleName} (${item.companyName})`);
     if (!item.dueToday || !own.length) continue;
     lines.push(roleLine(item, own));
     shownIds.push(item.requestId);
