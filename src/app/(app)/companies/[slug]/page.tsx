@@ -6,6 +6,7 @@ import { PeopleTable } from "@/components/people/PeopleTable";
 import { NewProjectForm } from "@/components/projects/NewProjectForm";
 import { ProjectCard } from "@/components/projects/ProjectCard";
 import { NewTaskPanel } from "@/components/tasks/NewTaskPanel";
+import { OrgWorkspace } from "@/components/org/OrgWorkspace";
 import { TaskList } from "@/components/tasks/TaskList";
 import { toTaskItem } from "@/components/tasks/types";
 import { ComingSoon, CompanyDot, PageHeader, Section, TabNav, Tag } from "@/components/ui";
@@ -43,7 +44,7 @@ const TABS = [
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 
-type Props = { params: Promise<{ slug: string }>; searchParams: Promise<{ tab?: string; g?: string }> };
+type Props = { params: Promise<{ slug: string }>; searchParams: Promise<{ tab?: string; g?: string; unit?: string; archived?: string }> };
 
 /** The tab title is the company's name as written ("Kiwi Go"), not its URL slug. */
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
@@ -68,7 +69,7 @@ async function loadCompany(slug: string) {
 
 export default async function CompanyPage({ params, searchParams }: Props) {
   const { slug } = await params;
-  const { tab: rawTab, g } = await searchParams;
+  const { tab: rawTab, g, unit: unitParam, archived: archivedParam } = await searchParams;
   const tab: TabKey = TABS.some((t) => t.key === rawTab) ? (rawTab as TabKey) : "overview";
   const { ctx, company } = await loadCompany(slug);
 
@@ -95,11 +96,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
       {tab === "projects" && <ProjectsTab ctx={ctx} companyId={company.id} />}
       {tab === "tasks" && <TasksTab ctx={ctx} companyId={company.id} />}
       {tab === "people" && <PeopleTab ctx={ctx} companyId={company.id} slug={company.slug} />}
-      {tab === "org" && (
-        <ComingSoon title="Org structure">
-          Editable org chart based on the Vysotsky model (7 divisions, 21 departments), labels in Russian.
-        </ComingSoon>
-      )}
+      {tab === "org" && <OrgTab ctx={ctx} company={company} unitSlug={unitParam} archived={archivedParam === "1"} />}
       {tab === "documents" && <ComingSoon title="Documents">Contracts, акты and uploaded files for this company.</ComingSoon>}
       {tab === "ai" && <AiRolesTab ctx={ctx} company={company} />}
     </>
@@ -380,5 +377,28 @@ async function AiRolesTab({ ctx, company }: { ctx: Ctx; company: CompanyFull }) 
         </div>
       )}
     </Section>
+  );
+}
+
+/** The company's org chart (the same board as /org, without the company switcher). */
+async function OrgTab({ ctx, company, unitSlug, archived }: { ctx: Ctx; company: CompanyFull; unitSlug?: string; archived: boolean }) {
+  const unit = company.units.find((u) => u.slug === unitSlug) ?? null;
+  const hrefFor = ({ unit: u, archived: a }: { unit?: string | null; archived?: boolean }) => {
+    const params = new URLSearchParams({ tab: "org" });
+    const slug = u === undefined ? unit?.slug : u;
+    if (slug) params.set("unit", slug);
+    if (a) params.set("archived", "1");
+    return `/companies/${company.slug}?${params.toString()}`;
+  };
+  return (
+    <>
+      <p className="mb-3 text-[12px] text-muted">
+        <Link href={`/org?company=${company.slug}`} className="text-accent hover:underline">
+          Open on the Org structure page
+        </Link>{" "}
+        (all companies)
+      </p>
+      <OrgWorkspace ctx={ctx} company={company} unit={unit} showArchived={archived} hrefFor={hrefFor} />
+    </>
   );
 }

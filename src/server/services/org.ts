@@ -18,7 +18,6 @@ import {
   type DivisionPatch,
   type FunctionPatch,
   type OrgFinding,
-  type TemplateDivision,
 } from "@/lib/org";
 import type { Db } from "@/server/db/connect";
 import {
