@@ -2,12 +2,13 @@ import Link from "next/link";
 import { DataSources } from "@/components/metrics/DataSources";
 import { PreferencesForm } from "@/components/settings/PreferencesForm";
 import { SalaryAccessCard } from "@/components/settings/SalaryAccessCard";
+import { ReminderClockCard } from "@/components/settings/ReminderClockCard";
 import { TelegramBotSetupCard } from "@/components/settings/TelegramBotSetupCard";
 import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
 import { PageHeader } from "@/components/ui";
 import { getPageContext } from "@/server/context";
 import { devToolsEnabled, telegramBotToken, telegramBotUsername } from "@/server/notifications/config";
-import { canSetUpApp, getTelegramSetupConfig } from "@/server/services/app-setup";
+import { canSetUpApp, getReminderClockConfig, getTelegramSetupConfig } from "@/server/services/app-setup";
 import { listConnectorStatuses } from "@/server/services/connectors";
 import { getMyPreferences, getMyTelegramLink } from "@/server/services/notifications";
 import { canViewSalaries, listSalaryAccessLog, listSalaryViewers } from "@/server/services/salaries";
@@ -52,6 +53,15 @@ export default async function SettingsPage() {
             Telegram bot · setup
           </h2>
           <TelegramBotSetupCard config={getTelegramSetupConfig(ctx)} timeZone={ctx.timeZone} />
+        </section>
+      )}
+
+      {founder && (
+        <section className="card mb-5 p-4 md:p-5" aria-labelledby="clock-heading">
+          <h2 id="clock-heading" className="eyebrow mb-3">
+            Reminder clock · setup
+          </h2>
+          <ReminderClockCard config={getReminderClockConfig(ctx)} timeZone={ctx.timeZone} />
         </section>
       )}
 

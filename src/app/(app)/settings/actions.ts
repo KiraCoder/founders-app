@@ -10,7 +10,8 @@ import {
 } from "@/server/services/notifications";
 import type { NotificationPrefsInput } from "@/lib/schemas";
 import type { TelegramSetupResult } from "@/server/notifications/telegram-setup";
-import { connectTelegramBot, getTelegramBotStatus } from "@/server/services/app-setup";
+import type { ReminderClockResult } from "@/server/notifications/reminder-clock";
+import { connectTelegramBot, getReminderClockStatus, getTelegramBotStatus, startAppReminderClock } from "@/server/services/app-setup";
 
 export interface PrefsState {
   ok?: boolean;
@@ -72,4 +73,14 @@ export async function connectTelegramAction(): Promise<TelegramSetupResult> {
 export async function telegramStatusAction(): Promise<TelegramSetupResult> {
   const ctx = await getPageContext();
   return getTelegramBotStatus(ctx);
+}
+
+export async function startReminderClockAction(): Promise<ReminderClockResult> {
+  const ctx = await getPageContext();
+  return startAppReminderClock(ctx);
+}
+
+export async function reminderClockStatusAction(): Promise<ReminderClockResult> {
+  const ctx = await getPageContext();
+  return getReminderClockStatus(ctx);
 }

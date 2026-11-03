@@ -1,5 +1,6 @@
 import "server-only";
 import { connectTelegram, telegramSetupConfig, telegramWebhookStatus, type TelegramSetupConfig, type TelegramSetupResult } from "@/server/notifications/telegram-setup";
+import { reminderClockConfig, reminderClockStatus, startReminderClock, type ReminderClockConfig, type ReminderClockResult } from "@/server/notifications/reminder-clock";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 
@@ -28,4 +29,19 @@ export async function connectTelegramBot(ctx: ServiceContext): Promise<TelegramS
 export async function getTelegramBotStatus(ctx: ServiceContext): Promise<TelegramSetupResult> {
   assertAppSetupAccess(ctx);
   return telegramWebhookStatus();
+}
+
+export function getReminderClockConfig(ctx: ServiceContext): ReminderClockConfig {
+  assertAppSetupAccess(ctx);
+  return reminderClockConfig();
+}
+
+export async function startAppReminderClock(ctx: ServiceContext): Promise<ReminderClockResult> {
+  assertAppSetupAccess(ctx);
+  return startReminderClock(ctx.db);
+}
+
+export async function getReminderClockStatus(ctx: ServiceContext): Promise<ReminderClockResult> {
+  assertAppSetupAccess(ctx);
+  return reminderClockStatus(ctx.db);
 }
