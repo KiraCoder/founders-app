@@ -198,7 +198,10 @@ How it works (all in `src/server/notifications/`):
      when an urgent-priority task leads it), follows quiet hours, the fold-into-summary rule
      and `not_linked` like any push, is shortened to 4096 characters by whole lines (a task
      whose line is cut loses its buttons too), and is the day's one push for every task it
-     lists (a snooze reminder for such a task that day is cancelled). If the budget is full it
+     lists (a snooze reminder for such a task that day is cancelled). A task left out (past
+     the 10, or cut) is not touched that day — its own row is cancelled `grouped_not_listed`
+     even when it was the row the dispatcher picked first; the first listed row then carries
+     the message and its buttons. If the budget is full it
      is parked like any push. **Morning summary only** (`summary_only`): no overdue chase
      pushes at all; overdue tasks are listed only in the morning summary (due-today nudges,
      snooze reminders and `urgent` notifications still push). Stored in

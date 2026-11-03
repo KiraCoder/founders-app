@@ -351,6 +351,74 @@ describe("grouped", () => {
   });
 });
 
+describe("grouped: the leader row is not always listed", () => {
+  /**
+   * Plans 10:00, then makes `leaderTaskId`'s chase row the oldest so claimNext picks it first
+   * (a low task and a normal task both map to outbox priority "normal"), then dispatches.
+   */
+  async function dispatchWithLeader(leaderTaskId: string, registry: ChannelRegistry) {
+    await planTick(t.handle.db, nov2("10:00"));
+    await t.handle.db
+      .update(notificationsOutbox)
+      .set({ createdAt: new Date("2026-11-01T00:00:00Z") })
+      .where(and(eq(notificationsOutbox.taskId, leaderTaskId), eq(notificationsOutbox.kind, "overdue_chase")));
+    await dispatch(t.handle.db, nov2("10:00"), { registry });
+  }
+
+  async function expectLeaderUntouched(leaderTaskId: string, listedCount: number, registry: ChannelRegistry, sent: Sent[]) {
+    const rows = (await outboxFor(t.userIds.nuraaly)).filter((r) => r.kind === "overdue_chase");
+    const leader = rows.find((r) => r.taskId === leaderTaskId)!;
+    expect(leader.status).toBe("cancelled");
+    expect(leader.lastError).toBe("grouped_not_listed");
+    // The first listed row carries the message, its buttons and the one budget slot.
+    const carriers = rows.filter((r) => r.status === "sent" && !r.bundledIntoId);
+    expect(carriers).toHaveLength(1);
+    const carrier = carriers[0]!;
+    expect(carrier.message).toBeTruthy();
+    const ids = (carrier.payload as { groupedTaskIds: string[] }).groupedTaskIds;
+    expect(ids).toHaveLength(listedCount);
+    expect(ids).not.toContain(leaderTaskId);
+    expect(rows.filter((r) => r.status === "sent" && r.bundledIntoId === carrier.id)).toHaveLength(listedCount - 1);
+    const tokens = await t.handle.db.select().from(notificationActionTokens).where(eq(notificationActionTokens.outboxId, carrier.id));
+    expect(tokens).toHaveLength(listedCount * 3);
+    expect(tokens.some((tk) => tk.taskId === leaderTaskId)).toBe(false);
+
+    // Not touched today: a reminder for it later today still goes out.
+    await enqueue(t.handle.db, { userId: t.userIds.nuraaly, kind: "task_reminder", taskId: leaderTaskId, dedupeKey: `snooze:${leaderTaskId}:x`, scheduledFor: nov2("15:00") });
+    await dispatch(t.handle.db, nov2("15:00"), { registry });
+    const reminder = (await outboxFor(t.userIds.nuraaly)).find((r) => r.dedupeKey === `snooze:${leaderTaskId}:x`)!;
+    expect(reminder.status).toBe("sent");
+    expect(nuraalyPushes(sent).map((p) => p.message.title)).toEqual([expect.stringMatching(/tasks need a new deadline$/), "Reminder"]);
+  }
+
+  it("cut by Telegram's limit: the leader is cancelled (not touched), the first listed row carries the push", async () => {
+    // The reviewer's repro: one low task 14 days overdue + 5 normal tasks 1 day overdue, 290×"&".
+    const low = await task("Low and old", "2026-10-19", { priority: "low" });
+    for (let i = 0; i < 5; i++) await task(`${i} ${"&".repeat(290)}`, "2026-11-01");
+    await setStyle("grouped");
+    const { sent, registry } = recorder();
+    await dispatchWithLeader(low!.id, registry);
+    const push = nuraalyPushes(sent)[0]!;
+    expect(push.message.title).toBe("6 tasks need a new deadline");
+    const listedLines = push.message.lines.filter((l) => /^\d+\. /.test(l.text));
+    expect(JSON.stringify(push.message.lines)).not.toContain("Low and old");
+    await expectLeaderUntouched(low!.id, listedLines.length, registry, sent);
+  });
+
+  it("past the 10-task cap: the leader is cancelled (not touched), the first listed row carries the push", async () => {
+    const low = await task("Low and old", "2026-10-19", { priority: "low" });
+    for (let i = 0; i < MAX_GROUPED_CHASE_TASKS; i++) await task(`Short ${i}`, "2026-11-01");
+    await setStyle("grouped");
+    const { sent, registry } = recorder();
+    await dispatchWithLeader(low!.id, registry);
+    const push = nuraalyPushes(sent)[0]!;
+    expect(push.message.title).toBe(`${MAX_GROUPED_CHASE_TASKS + 1} tasks need a new deadline`);
+    expect(push.message.lines.some((l) => l.text === "+1 more — open the app")).toBe(true);
+    expect(JSON.stringify(push.message.lines)).not.toContain("Low and old");
+    await expectLeaderUntouched(low!.id, MAX_GROUPED_CHASE_TASKS, registry, sent);
+  });
+});
+
 describe("summary_only", () => {
   it("queues no chase pushes; overdue tasks are in the morning summary; urgent items still push", async () => {
     const [a, , , , other] = await overdueSet();

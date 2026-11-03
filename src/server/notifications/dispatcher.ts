@@ -551,7 +551,9 @@ async function processItem(
  *   reminder or any other push for those tasks later that day is cancelled;
  * - tasks that are no longer due a chase are dropped (same reasons as a single push); tasks
  *   that did not fit (MAX_GROUPED_CHASE_TASKS, Telegram's limit) are cancelled as
- *   `grouped_not_listed` and are not touched;
+ *   `grouped_not_listed` and are not touched — the leader too: the message, its buttons and
+ *   the budget are then carried by the first listed row (the list is ordered by task priority
+ *   and days overdue, the claim order by outbox priority, so they can differ);
  * - on a failed send the other rows wait with the same backoff and go out together again.
  */
 async function sendGroupedChase(
@@ -628,16 +630,35 @@ async function sendGroupedChase(
   const built = buildGroupedChase(valid.map((v) => v.task), today);
   const { message, keptRefs } = fitTelegram(built.message);
   const listed = new Set(built.listed.filter((id) => keptRefs.has(taskRef(id))));
-  // The leader row carries the message even if (in theory) its own line were cut.
+  // The message is carried by the first LISTED row (the documented order, highest priority
+  // first): the leader (the row claimNext picked) can fall past the cap or be cut by
+  // fitTelegram (outbox priority does not tell low from normal), and a row whose task is not
+  // in the message must never be finished "sent" (that would be its task's touch for today).
+  const carrier = valid.find((v) => listed.has(v.task.id));
+  const setLeader = (set: Partial<typeof o.$inferInsert>) => finish(set);
+  if (!carrier) {
+    // Cannot happen with 300-character titles; nothing listed, nothing sent, nothing touched.
+    for (const v of valid) {
+      if (v.row.id === leader.id) continue;
+      await setRow(v.row.id, { status: "cancelled", lastError: "grouped_not_listed", nextAttemptAt: null });
+      report.cancelled++;
+    }
+    await setLeader({ status: "cancelled", lastError: leaderSkip ?? "grouped_not_listed", nextAttemptAt: null });
+    report.cancelled++;
+    return;
+  }
+  const carrierIsLeader = carrier.row.id === leader.id;
+  const setCarrier = (set: Partial<typeof o.$inferInsert>) => (carrierIsLeader ? finish(set) : setRow(carrier.row.id, set));
   const callbacks = message.actions?.length
-    ? await mintActionTokens(db, { userId: leader.userId, outboxId: leader.id, actions: message.actions, now })
+    ? await mintActionTokens(db, { userId: leader.userId, outboxId: carrier.row.id, actions: message.actions, now })
     : undefined;
   const result = await channel.send(recipient, message, callbacks);
-  const attempts = leader.attempts + 1;
-  const others = valid.filter((v) => v.row.id !== leader.id);
+  const attempts = carrier.row.attempts + 1;
+  const others = valid.filter((v) => v.row.id !== carrier.row.id && v.row.id !== leader.id);
+  const leaderValid = !carrierIsLeader && valid.some((v) => v.row.id === leader.id);
 
   if (result.ok) {
-    await finish({
+    await setCarrier({
       status: "sent",
       sentAt: now,
       channel: channel.name,
@@ -646,11 +667,17 @@ async function sendGroupedChase(
       attempts,
       lastError: null,
       nextAttemptAt: null,
-      payload: { ...(leader.payload as Record<string, unknown>), groupedTaskIds: [...listed] },
+      bundledIntoId: null,
+      payload: { ...(carrier.row.payload as Record<string, unknown>), groupedTaskIds: [...listed] },
     });
+    if (!carrierIsLeader) {
+      // Not in the message: not touched today (a snooze reminder later today still goes out).
+      await setLeader({ status: "cancelled", lastError: leaderSkip ?? "grouped_not_listed", nextAttemptAt: null });
+      report.cancelled++;
+    }
     for (const v of others) {
       if (listed.has(v.task.id)) {
-        await setRow(v.row.id, { status: "sent", sentAt: now, channel: channel.name, bundledIntoId: leader.id, lastError: null, nextAttemptAt: null });
+        await setRow(v.row.id, { status: "sent", sentAt: now, channel: channel.name, bundledIntoId: carrier.row.id, lastError: null, nextAttemptAt: null });
       } else {
         await setRow(v.row.id, { status: "cancelled", lastError: "grouped_not_listed", nextAttemptAt: null });
         report.cancelled++;
@@ -661,11 +688,19 @@ async function sendGroupedChase(
   }
   const failed = result.permanent || attempts >= MAX_ATTEMPTS;
   const nextAttemptAt = failed ? null : new Date(now.getTime() + backoffMs(attempts));
-  await finish({ status: failed ? "failed" : "pending", attempts, lastError: result.error ?? "error", channel: channel.name, nextAttemptAt });
+  await setCarrier({ status: failed ? "failed" : "pending", attempts, lastError: result.error ?? "error", channel: channel.name, nextAttemptAt });
   // The others wait with the same backoff (they were not attempted themselves).
-  for (const v of others) {
-    await setRow(v.row.id, failed ? { status: "failed", lastError: result.error ?? "error", nextAttemptAt: null } : { status: "pending", nextAttemptAt });
+  const waiting = failed
+    ? { status: "failed" as const, lastError: result.error ?? "error", nextAttemptAt: null }
+    : { status: "pending" as const, nextAttemptAt };
+  if (!carrierIsLeader) {
+    if (leaderValid) await setLeader(waiting);
+    else {
+      await setLeader({ status: "cancelled", lastError: leaderSkip ?? "nothing_to_send", nextAttemptAt: null });
+      report.cancelled++;
+    }
   }
+  for (const v of others) await setRow(v.row.id, waiting);
   if (failed) report.failed++;
   else report.retrying++;
 }
