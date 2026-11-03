@@ -96,3 +96,27 @@ test("holding screenshots", async ({ page }) => {
   await page.getByTestId("act-panel").waitFor();
   await page.screenshot({ path: "docs/screenshots/holding-act-panel.png" });
 });
+
+test("AI roles screenshots", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await login(page, "nuraaly");
+  // The hire wizard on its "Data it needs" step (Alura Style: factory numbers per ХБК / Ош Район).
+  await page.goto("/ai-roles");
+  const styleCard = page.locator('[data-testid="hire-card"][data-company="alura-style"]');
+  if (await styleCard.count()) await styleCard.getByRole("button", { name: "Tune" }).click();
+  else {
+    await page.getByRole("button", { name: "Hire Financial Analyst" }).click();
+    await page.getByRole("dialog").getByRole("radio", { name: /Alura Style/ }).check();
+    await page.getByRole("dialog").getByRole("button", { name: "Next" }).click();
+  }
+  await page.getByRole("dialog").waitFor();
+  await page.screenshot({ path: "docs/screenshots/ai-roles-hire-wizard.png" });
+  await page.keyboard.press("Escape");
+  // The Kiwi Go report (made by e2e/ai-roles.spec.ts).
+  const kiwi = page.locator('[data-testid="hire-card"][data-company="kiwi-go"]');
+  await kiwi.getByRole("link", { name: /Latest/ }).click();
+  await page.waitForURL(/\/ai-roles\/runs\//);
+  await page.screenshot({ path: "docs/screenshots/ai-report.png", fullPage: true });
+  await page.goto("/ai-roles");
+  await page.screenshot({ path: "docs/screenshots/ai-roles-desktop.png", fullPage: true });
+});
