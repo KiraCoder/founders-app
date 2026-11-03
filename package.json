@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "vercel-build": "npm run db:migrate:deploy && npm run db:seed:deploy && next build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
@@ -15,6 +16,7 @@
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:migrate:deploy": "tsx scripts/db-migrate-deploy.ts",
     "db:seed": "tsx scripts/db-seed.ts",
+    "db:seed:deploy": "tsx scripts/db-seed-deploy.ts",
     "db:reset": "tsx scripts/db-reset.ts",
     "cron:tick": "tsx scripts/cron-tick.ts",
     "telegram:poll": "tsx scripts/telegram-poll.ts"

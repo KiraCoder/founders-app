@@ -1,9 +1,10 @@
 import "./env";
 import { connectDb } from "@/server/db/connect";
-import { runMigrations } from "@/server/db/migrate";
+import { migrationDatabaseUrl, runMigrations } from "@/server/db/migrate";
 
 async function main() {
-  const handle = await connectDb();
+  // MIGRATION_DATABASE_URL (optional) wins over DATABASE_URL; neither = the embedded database.
+  const handle = await connectDb(migrationDatabaseUrl());
   console.log(`[db:migrate] driver=${handle.driver}`);
   await runMigrations(handle);
   await handle.close();

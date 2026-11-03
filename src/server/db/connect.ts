@@ -33,8 +33,7 @@ export async function connectDb(databaseUrl = process.env.DATABASE_URL): Promise
   if (databaseUrl && databaseUrl !== "memory://") {
     const { default: postgres } = await import("postgres");
     const { drizzle } = await import("drizzle-orm/postgres-js");
-    // `prepare: false` keeps it compatible with Supabase's transaction pooler (pgbouncer).
-    const client = postgres(databaseUrl, { prepare: false, max: 5 });
+    const client = postgres(withoutPgbouncerParam(databaseUrl), postgresClientOptions(databaseUrl));
     const db = drizzle(client, { schema }) as unknown as Db;
     return { db, driver: "postgres", close: () => client.end() };
   }
@@ -51,6 +50,57 @@ export async function connectDb(databaseUrl = process.env.DATABASE_URL): Promise
   await client.waitReady;
   const db = drizzle(client, { schema }) as unknown as Db;
   return { db, driver: "pglite", close: () => client.close() };
+}
+
+/**
+ * True for a connection through a transaction-mode pooler: Supabase's Transaction pooler
+ * (port 6543) or any URL marked `pgbouncer=true`. Such a pooler hands each transaction to
+ * any server connection, so named prepared statements would break.
+ */
+export function isTransactionPoolerUrl(databaseUrl: string): boolean {
+  try {
+    const u = new URL(databaseUrl);
+    return u.port === "6543" || u.searchParams.get("pgbouncer") === "true";
+  } catch {
+    return /:6543(\/|$|\?)/.test(databaseUrl) || /[?&]pgbouncer=true\b/.test(databaseUrl);
+  }
+}
+
+/**
+ * postgres-js options. Prepared statements are ALWAYS off: required behind Supabase's
+ * transaction pooler (port 6543, `isTransactionPoolerUrl`) and harmless on a direct or
+ * session-pooler connection, so a URL copied from the wrong tab still works.
+ * `connect_timeout` keeps an unreachable database from hanging a build step or a request.
+ */
+export function postgresClientOptions(databaseUrl: string): {
+  prepare: false;
+  max: number;
+  connect_timeout: number;
+  onnotice: () => void;
+} {
+  return {
+    prepare: false,
+    // Serverless (Vercel): every instance opens its own pool; the pooler multiplexes them.
+    max: isTransactionPoolerUrl(databaseUrl) ? 3 : 5,
+    connect_timeout: 15,
+    // "relation already exists, skipping" and similar notices are noise in build logs.
+    onnotice: () => {},
+  };
+}
+
+/**
+ * `pgbouncer=true` is a marker for tools (Prisma, us), not a Postgres setting: postgres-js
+ * would send it to the server as a startup parameter and the connection would be refused.
+ */
+export function withoutPgbouncerParam(databaseUrl: string): string {
+  try {
+    const u = new URL(databaseUrl);
+    if (!u.searchParams.has("pgbouncer")) return databaseUrl;
+    u.searchParams.delete("pgbouncer");
+    return u.toString();
+  } catch {
+    return databaseUrl;
+  }
 }
 
 /** True when DATABASE_URL points somewhere other than this machine. */

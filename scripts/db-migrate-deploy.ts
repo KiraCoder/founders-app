@@ -1,6 +1,6 @@
 /**
- * Guarded migration for a deploy build (e.g. Vercel Build Command
- * `npm run db:migrate:deploy && npm run build`). Does nothing unless MIGRATE_ON_BUILD=1.
+ * Guarded migration for a deploy build (`npm run vercel-build`, see vercel.json). Does nothing
+ * unless MIGRATE_ON_BUILD=1. Uses MIGRATION_DATABASE_URL when set, else DATABASE_URL.
  */
 import "./env";
 import { connectDb } from "@/server/db/connect";
@@ -10,7 +10,7 @@ async function main() {
   const decision = migrateOnBuildDecision();
   console.log(`[db:migrate:deploy] ${decision.message}`);
   if (!decision.run) return;
-  const handle = await connectDb(process.env.DATABASE_URL!.trim());
+  const handle = await connectDb(decision.url);
   await runMigrations(handle);
   await handle.close();
   console.log("[db:migrate:deploy] done");
