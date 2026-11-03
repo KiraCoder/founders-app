@@ -106,7 +106,7 @@ async function roleOrThrow(ctx: ServiceContext, key: unknown): Promise<ResolvedR
 /** Company metric definitions by key (for the watched-numbers checks). */
 async function companyMetrics(db: Db, companyId: string) {
   return db
-    .select({ key: metricDefinitions.key, name: metricDefinitions.name, aliases: metricDefinitions.aliases })
+    .select({ key: metricDefinitions.key, name: metricDefinitions.name, aliases: metricDefinitions.aliases, isPayData: metricDefinitions.isPayData })
     .from(metricDefinitions)
     .where(and(eq(metricDefinitions.companyId, companyId), isNull(metricDefinitions.archivedAt)));
 }

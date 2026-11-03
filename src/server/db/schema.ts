@@ -600,6 +600,12 @@ export const metricDefinitions = pgTable(
     /** Connector id (src/server/connectors) when sourceKind = connector. */
     connectorId: text("connector_id"),
     sort: integer("sort").notNull().default(100),
+    /**
+     * Pay data (salaries, payroll, bonuses, ФОТ…): never sent to an AI provider and never
+     * watched by a custom AI role, whatever its name says (0024). Checked IN ADDITION to the
+     * name / key word list. The piecework pay total (a factory total) stays allowed.
+     */
+    isPayData: boolean("is_pay_data").notNull().default(false),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),

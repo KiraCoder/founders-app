@@ -863,3 +863,45 @@ describe("0023 ingest rate counters", () => {
     expect((await hit()).rows[0]!.n).toBe(2);
   });
 });
+
+describe("0024 is_pay_data on existing metrics", () => {
+  it("flags pay-named metrics (name, aliases, snake / camel key); piecework_total and look-alikes stay unflagged", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0024") });
+    const C = "55555555-5555-4555-8555-555555555551";
+    await client.exec(`insert into companies (id, slug, name) values ('${C}', 'alura-style', 'Alura Style')`);
+    const defs: [string, string, string[]][] = [
+      ["staff_pay", "З/П сотрудников", []],
+      ["zar", "Зар. плата", []],
+      ["comp", "Compensation", []],
+      ["fotTotal", "Total", []],
+      ["fot_total", "Total", []],
+      ["bonus_q", "Quarterly", []],
+      ["prem", "Премии", []],
+      ["office", "Office", ["Оклады"]],
+      ["piecework_total", "Piecework pay total", ["ФОТ сдельный"]],
+      ["premium_sales", "Премиум продажи", []],
+      ["photos", "Photos", ["Фото"]],
+      ["revenue", "Revenue", []],
+    ];
+    for (const [key, name, aliases] of defs) {
+      await client.query("insert into metric_definitions (company_id, key, name, aliases, unit, granularity) values ($1, $2, $3, $4::jsonb, 'KGS', 'month')", [C, key, name, JSON.stringify(aliases)]);
+    }
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rows = await client.query<{ key: string; is_pay_data: boolean }>("select key, is_pay_data from metric_definitions order by key");
+    expect(Object.fromEntries(rows.rows.map((r) => [r.key, r.is_pay_data]))).toEqual({
+      staff_pay: true,
+      zar: true,
+      comp: true,
+      fotTotal: true,
+      fot_total: true,
+      bonus_q: true,
+      prem: true,
+      office: true,
+      piecework_total: false,
+      premium_sales: false,
+      photos: false,
+      revenue: false,
+    });
+  });
+});

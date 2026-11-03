@@ -350,6 +350,8 @@ export interface CompanyMetricOption {
 interface MetricDef extends CompanyMetricOption {
   name: string;
   aliases: string[];
+  /** Flagged as pay data (metric_definitions.is_pay_data). */
+  isPayData: boolean;
   /** Factory / unit name ("ХБК"), null for the whole company. */
   unitName: string | null;
   unitSlug: string | null;
@@ -388,6 +390,7 @@ async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]
     key: d.key,
     name: d.name,
     aliases: d.aliases ?? [],
+    isPayData: d.isPayData,
     label: unitName ? `${d.name} · ${unitName}` : d.name,
     unitName: unitName ?? null,
     unit: d.unit,
@@ -420,6 +423,11 @@ export async function companyMetricOptions(
     else if (isSalaryMetric(d)) prev.payData = true;
   }
   return [...byKey.values()];
+}
+
+/** Keys of the metrics flagged as pay data (never in an AI prompt). */
+function payKeysOf(defs: readonly Pick<MetricDef, "key" | "isPayData">[]): ReadonlySet<string> {
+  return new Set(defs.filter((d) => d.isPayData).map((d) => d.key));
 }
 
 /**
@@ -703,7 +711,14 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
         checks: hc.analysis,
       });
       const narrative = await generateNarrative(
-        { roleName: hc.roleName, companyName: hc.companyName, periodLabel: monthLabel(run.period), instructions: hc.instructions, findings },
+        {
+          roleName: hc.roleName,
+          companyName: hc.companyName,
+          periodLabel: monthLabel(run.period),
+          instructions: hc.instructions,
+          findings,
+          payKeys: payKeysOf(numbers.defs),
+        },
         opts.provider ?? getLlmProvider(),
       );
       // Written under the row lock that "Create task" also takes: the task links are read from
@@ -1250,7 +1265,7 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
     inputs: run.inputs ?? null,
     narrative: run.narrative,
     narrativeStatus: run.narrativeStatus,
-    narrativeOmitted: findingsOf(run).filter(salaryLikeFinding).length,
+    narrativeOmitted: findingsOf(run).filter((f) => salaryLikeFinding(f, payKeysOf(defs))).length,
     provider: run.provider,
     error: run.error,
     trigger: run.trigger,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Finding } from "@/server/ai/finance-rules";
-import { assertNoSalaryData, buildNarrativePrompt, generateNarrative, salaryLikeFinding, SalaryDataInPromptError } from "@/server/ai/narrative";
+import { assertNoSalaryData, buildNarrativePrompt, generateNarrative, isPayLikeMetric, isSalaryText, salaryLikeFinding, SalaryDataInPromptError } from "@/server/ai/narrative";
 import {
   AiProviderError,
   getLlmProvider,
@@ -138,6 +138,56 @@ describe("pay data: findings are left out, the report never fails", () => {
     expect(() => assertNoSalaryData({ label: "Фото товаров", key: "photo_count" })).not.toThrow();
     expect(salaryLikeFinding(findings[0]!)).toBe(false);
     expect(salaryLikeFinding(findings[1]!)).toBe(false); // piecework pay per piece (factory total)
+  });
+  it("wider word list (C5b #3): З/П, зар. плата, зарплат, заработн, оклад, премия, бонус, bonus, compensation, payroll, wage, salary, FOT as a word / camel / snake part", () => {
+    const words = [
+      "З/П сотрудников",
+      "з / п",
+      "Зар. плата",
+      "Зар.плата цеха",
+      "Зарплаты",
+      "Заработная плата",
+      "Оклад",
+      "Премия",
+      "Премии за октябрь",
+      "Бонусы",
+      "Sales bonus",
+      "Bonuses",
+      "Compensation",
+      "Payroll",
+      "Wage",
+      "Salary",
+      "FOT",
+      "FOT total",
+      "ФОТ",
+    ];
+    for (const w of words) {
+      expect(isSalaryText(w), w).toBe(true);
+      expect(salaryLikeFinding(pay("x_total", w)), w).toBe(true);
+      expect(isPayLikeMetric({ key: "x_total", name: w }), w).toBe(true);
+    }
+    for (const key of ["fotTotal", "fot_total", "totalFot", "total_fot", "zpTotal", "salaryFund", "staffBonus", "staff_bonuses", "premiya_total", "compensation", "wages"]) {
+      expect(isSalaryText(key), key).toBe(true);
+      expect(salaryLikeFinding(pay(key, "Total")), key).toBe(true);
+      expect(isPayLikeMetric({ key, name: "Total" }), key).toBe(true);
+    }
+    // Not pay data.
+    for (const w of ["Премиум выручка", "Photos", "photo_count", "Фото товаров", "Revenue", "Orders per day", "Comfort score", "footfall"]) {
+      expect(isSalaryText(w), w).toBe(false);
+    }
+    expect(isPayLikeMetric({ key: "piecework_total", name: "Piecework pay total", aliases: ["ФОТ сдельный"] })).toBe(false);
+  });
+  it("the per-metric is_pay_data flag (payKeys) is checked in addition to names, and wins over the allow-list", async () => {
+    const innocent = pay("fund_a", "Fund A");
+    expect(salaryLikeFinding(innocent)).toBe(false);
+    expect(salaryLikeFinding(innocent, new Set(["fund_a"]))).toBe(true);
+    expect(salaryLikeFinding(findings[1]!, new Set(["piecework_total"]))).toBe(true);
+    expect(salaryLikeFinding(findings[1]!, new Set(["fund_a"]))).toBe(false);
+    const calls: LlmGenerateInput[] = [];
+    const p: LlmProvider = { id: "t", configured: true, generate: async (i) => (calls.push(i), { text: "Summary.", usage: { inputTokens: 0, outputTokens: 0 } }) };
+    const r = await generateNarrative({ ...base, findings: [innocent, findings[0]!], payKeys: new Set(["fund_a"]) }, p);
+    expect(r).toMatchObject({ status: "narrative_done", omitted: 1 });
+    expect(JSON.stringify(calls)).not.toContain("Fund A");
   });
   it("piecework pay TOTAL is allowed only by its explicit key", () => {
     const piecework = pay("piecework_total", "Сдельная оплата труда · ХБК");

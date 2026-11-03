@@ -12,6 +12,7 @@ import { addDays, todayInTimeZone } from "@/lib/dates";
 import { ROLE_TEMPLATES } from "@/lib/ai-roles";
 import { metricSeedFor, seedAggregation } from "@/lib/kpis";
 import { ORG_SEED } from "@/lib/org";
+import { isPayLikeMetric } from "@/server/ai/narrative";
 import { defaultAskPersonId } from "./ask-person";
 import { createChartFromTemplate } from "./org-charts";
 import type { Db } from "./connect";
@@ -378,6 +379,7 @@ export async function seedMetricDefinitions(db: Db, companyIds: Record<string, s
             sourceKind: d.sourceKind,
             connectorId: d.connectorId ?? null,
             target: d.target === undefined ? null : String(d.target),
+            isPayData: isPayLikeMetric(d),
             sort: sort + ui,
           })
           .onConflictDoNothing();

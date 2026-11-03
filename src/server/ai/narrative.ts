@@ -37,25 +37,44 @@ export class SalaryDataInPromptError extends Error {
 
 /** Keys that only salary / per-person pay data has. */
 const SALARY_KEY = /^(salary|salaries|salaryHistory|payType|pay_type|personCompanyId|person_company_id|effectiveFrom|effective_from|personId|person_id)$/i;
-/** Words that mark pay data in a label, sentence or metric key (English and Russian). */
-const SALARY_WORD = /(salar|payroll|wage|оклад|зарплат|заработн|оплат[аыуе]?\s+труда|(^|[^а-яё])(зп|фот)([^а-яё]|$))/i;
-/** Metric keys (snake_case, Latin) that name pay data. */
-const SALARY_METRIC_KEY = /(^|_)(salary|salaries|payroll|wages?|fot|zp|oklad|zarplat[a-z]*|zarabotn[a-z]*)(_|$)/i;
+/**
+ * Words that mark pay data in a label, sentence or metric key (English and Russian): salary,
+ * payroll, wage(s), bonus, compensation, FOT; зарплата / заработная плата, «зар. плата», «З/П»,
+ * ЗП, ФОТ, оклад, премия (not «премиум»), бонус, оплата труда.
+ */
+const SALARY_WORD =
+  /(salar|payroll|wage|bonus|compensation|оклад|зарплат|заработн|бонус|преми(?!ум)|оплат[аыуе]?\s+труда|зар\.?\s*плат|з\s*\/\s*п|(^|[^а-яё])(зп|фот)([^а-яё]|$)|(^|[^a-z])fot([^a-z]|$))/i;
+/** Metric keys (snake_case or camelCase, Latin) that name pay data. */
+const SALARY_METRIC_KEY =
+  /(^|_)(salary|salaries|payroll|wages?|fot|zp|oklad|zarplat[a-z]*|zarabotn[a-z]*|bonus(es)?|premi(ya|ia|ja|i|a)?|compensation)(_|$)/i;
 /** Pay numbers that may be sent: company / factory totals, never a person's pay. */
 export const ALLOWED_PAY_KEYS: ReadonlySet<string> = new Set(["piecework_total"]);
 
+/** "fotTotal" → "fot_Total" (camelCase parts become snake_case parts). */
+const snakeParts = (v: string) => v.replace(/([a-zа-яё0-9])([A-ZА-ЯЁ])/g, "$1_$2");
+
 export function isSalaryText(v: string): boolean {
-  return SALARY_WORD.test(v) || SALARY_METRIC_KEY.test(v);
+  const snake = snakeParts(v);
+  return SALARY_WORD.test(v) || SALARY_METRIC_KEY.test(v) || SALARY_WORD.test(snake) || SALARY_METRIC_KEY.test(snake);
+}
+
+/** A metric whose key, name or aliases name pay data (not the allow-listed piecework total). */
+export function isPayLikeMetric(def: { key: string; name: string; aliases?: readonly string[] }): boolean {
+  if (ALLOWED_PAY_KEYS.has(def.key)) return false;
+  return [def.key, def.name, ...(def.aliases ?? [])].some((t) => isSalaryText(t));
 }
 
 /**
  * A finding about pay data (by metric key, metric label, number label or sentence). Findings
- * whose metric keys are all on the allow-list (piecework pay total) are not.
+ * whose metric keys are all on the allow-list (piecework pay total) are not — unless a metric
+ * is flagged as pay data (`metric_definitions.is_pay_data`, passed as `payKeys`): the flag
+ * always wins.
  */
-export function salaryLikeFinding(f: Pick<Finding, "metricKeys" | "metrics" | "numbers" | "sentence">): boolean {
+export function salaryLikeFinding(f: Pick<Finding, "metricKeys" | "metrics" | "numbers" | "sentence">, payKeys?: ReadonlySet<string>): boolean {
+  if (payKeys && f.metricKeys.some((k) => payKeys.has(k))) return true;
   if (f.metricKeys.length && f.metricKeys.every((k) => ALLOWED_PAY_KEYS.has(k))) return false;
   if (f.metricKeys.some((k) => !ALLOWED_PAY_KEYS.has(k) && isSalaryText(k))) return true;
-  return [...f.metrics, ...f.numbers.map((n) => n.label), f.sentence].some((t) => SALARY_WORD.test(t));
+  return [...f.metrics, ...f.numbers.map((n) => n.label), f.sentence].some((t) => isSalaryText(t));
 }
 
 /**
@@ -173,15 +192,24 @@ export interface NarrativeResult {
  * a provider failure ever fails the report.
  */
 export async function generateNarrative(
-  input: { roleName: string; companyName: string; periodLabel: string; instructions?: string | null; findings: readonly Finding[] },
+  input: {
+    roleName: string;
+    companyName: string;
+    periodLabel: string;
+    instructions?: string | null;
+    findings: readonly Finding[];
+    /** Keys of the company's metrics flagged as pay data (`is_pay_data`). */
+    payKeys?: ReadonlySet<string>;
+  },
   provider: LlmProvider,
 ): Promise<NarrativeResult> {
   if (!provider.configured) return { status: "narrative_skipped", text: null, provider: provider.id };
-  const safe = input.findings.filter((f) => !salaryLikeFinding(f));
+  const safe = input.findings.filter((f) => !salaryLikeFinding(f, input.payKeys));
   const omitted = input.findings.length - safe.length;
   let prompt: LlmGenerateInput;
   try {
-    const { instructions, ...rest } = input;
+    const { instructions, payKeys: _payKeys, ...rest } = input;
+    void _payKeys;
     prompt = buildNarrativePrompt({ ...rest, ...(instructions?.trim() ? { instructions } : {}), findings: safe.map(promptFinding) });
   } catch (err) {
     if (err instanceof SalaryDataInPromptError) return { status: "narrative_skipped:salary", text: null, provider: provider.id, omitted };

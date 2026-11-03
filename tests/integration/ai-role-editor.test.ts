@@ -211,6 +211,28 @@ describe("salary guard: a custom role can never watch pay data", () => {
   });
 });
 
+describe("salary guard: the is_pay_data flag (C5b #3)", () => {
+  it("a number flagged as pay data is refused for a custom role whatever its name; seeded numbers keep their flag", async () => {
+    await t.handle.db.insert(metricDefinitions).values({ companyId: kiwi, key: "fund_a", name: "Fund A", unit: "KGS", granularity: "month", isPayData: true });
+    await expect(createCustomRole(t.ctx("nuraaly"), { companyId: kiwi, config: { profile: { name: "Fund" }, watchedMetricKeys: ["revenue", "fund_a"] } })).rejects.toMatchObject({
+      code: "validation",
+      message: expect.stringContaining("pay data"),
+    });
+    const flags = await t.handle.db.select({ key: metricDefinitions.key, pay: metricDefinitions.isPayData }).from(metricDefinitions).where(eq(metricDefinitions.isPayData, true));
+    expect(flags.map((f) => f.key)).toEqual(["fund_a"]); // the seed has no pay data; piecework_total stays allowed
+    // Name-only variants the old list missed are refused too.
+    await t.handle.db.insert(metricDefinitions).values([
+      { companyId: kiwi, key: "staff_pay", name: "З/П сотрудников", unit: "KGS", granularity: "month" },
+      { companyId: kiwi, key: "fotTotal", name: "Total", unit: "KGS", granularity: "month" },
+      { companyId: kiwi, key: "comp", name: "Compensation", unit: "KGS", granularity: "month" },
+      { companyId: kiwi, key: "zar", name: "Зар. плата", unit: "KGS", granularity: "month" },
+    ]);
+    for (const key of ["staff_pay", "fotTotal", "comp", "zar"]) {
+      await expect(createCustomRole(t.ctx("nuraaly"), { companyId: kiwi, config: { profile: { name: "Pay" }, watchedMetricKeys: [key] } }), key).rejects.toMatchObject({ code: "validation" });
+    }
+  });
+});
+
 describe("built-in roles: template-level edits, defaults unchanged", () => {
   it("a Financial Analyst hire without edits keeps its report hash; a role-level check change is 'Settings changed'", async () => {
     const hire = await hireRole(t.ctx("nuraaly"), { templateKey: "financial-analyst", companyId: brand });

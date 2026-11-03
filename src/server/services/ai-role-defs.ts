@@ -19,7 +19,7 @@ import {
   type HireSettings,
   type RoleTemplate,
 } from "@/lib/ai-roles";
-import { ALLOWED_PAY_KEYS, isSalaryText } from "@/server/ai/narrative";
+import { isPayLikeMetric } from "@/server/ai/narrative";
 import type { Db } from "@/server/db/connect";
 import { aiRoleConfigs, aiRoleSettingsLog, type AiRoleHire } from "@/server/db/schema";
 
@@ -175,13 +175,13 @@ export function disabledOrgRules(checks: ChecksConfig): string[] {
 }
 
 /**
- * Pay data a custom role may never watch: a metric whose key, name or aliases name salaries /
- * payroll / wages (the narrative's word list), unless its key is on the allow-list
- * (`piecework_total`, a factory total).
+ * Pay data a custom role may never watch (and the AI summary never sees): a metric flagged
+ * `is_pay_data`, or whose key, name or aliases name salaries / payroll / wages / bonuses (the
+ * narrative's word list), unless its key is on the allow-list (`piecework_total`, a factory
+ * total) and it is not flagged.
  */
-export function isSalaryMetric(def: { key: string; name: string; aliases?: readonly string[] }): boolean {
-  if (ALLOWED_PAY_KEYS.has(def.key)) return false;
-  return [def.key, def.name, ...(def.aliases ?? [])].some((t) => isSalaryText(t));
+export function isSalaryMetric(def: { key: string; name: string; aliases?: readonly string[]; isPayData?: boolean }): boolean {
+  return !!def.isPayData || isPayLikeMetric(def);
 }
 
 /** The hire's role name (its own override, else the role's). */
