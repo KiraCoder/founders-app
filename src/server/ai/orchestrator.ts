@@ -37,6 +37,9 @@ import type { HoldingSection } from "@/server/services/holding-asks";
  *    the later derived update. When a Holding ask line is in the summary, the Holding section
  *    gets one muted line saying the role is waiting for those акты too.
  * 4. Only the two founders are ever asked; people records (Elmurat, Edil) never get anything.
+ * 5. A number a role asks for that is expected from a data source that is not connected yet
+ *    is asked as "enter by hand or upload until the data source is connected" and is left out
+ *    of the Monday "N numbers wait for data sources" line while the request is active.
  */
 
 /** At most this many AI role lines in one morning summary. */
@@ -61,7 +64,16 @@ function roleLine(item: AiRequestItem, missing: AiRequestItem["missing"]): strin
   const labels = missing.map((m) => m.label);
   const shown = labels.slice(0, 3).join(", ") + (labels.length > 3 ? ` +${labels.length - 3} more` : "");
   const g = missing[0]?.granularity ?? "month";
-  return `${item.roleName} needs ${monthsLabel(item.months)} numbers for ${item.companyName}: ${shown} — enter them: ${appUrl(numbersHref(item.companySlug, g))}`;
+  // Numbers expected from a data source that is not connected yet: say how to get them in
+  // meanwhile (the Monday "wait for data sources" line leaves them out, see composeRequests).
+  const fromSource = missing.filter((m) => m.awaitingSource).length;
+  const how =
+    fromSource === 0
+      ? "enter them"
+      : fromSource === missing.length
+        ? "enter by hand or upload until the data source is connected"
+        : "enter them (the data-source ones by hand or upload until it is connected)";
+  return `${item.roleName} needs ${monthsLabel(item.months)} numbers for ${item.companyName}: ${shown} — ${how}: ${appUrl(numbersHref(item.companySlug, g))}`;
 }
 
 /**
@@ -81,9 +93,12 @@ export function composeRequests(
       covered.set(m.metricId, set);
     }
   }
-  const isCovered = (w: { metricId?: string; waitingFor?: IsoDate }) => {
+  const isCovered = (w: { metricId?: string; waitingFor?: IsoDate; awaitingSource?: string | null }) => {
     const months = w.metricId ? covered.get(w.metricId) : undefined;
     if (!months) return false;
+    // A number waiting for a data source that a role asks for (by hand / upload meanwhile)
+    // is left out of the Monday "N numbers wait for data sources" line altogether.
+    if (w.awaitingSource) return true;
     return !w.waitingFor || months.has(monthStart(w.waitingFor));
   };
   const holdingAsks = !!holding?.lines.length;

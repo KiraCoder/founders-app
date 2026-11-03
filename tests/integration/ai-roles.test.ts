@@ -17,6 +17,7 @@ import type { ChannelRegistry } from "@/server/notifications/channels";
 import { dispatch } from "@/server/notifications/dispatcher";
 import { consumeLinkCode, createLinkCode } from "@/server/notifications/linking";
 import { planTick } from "@/server/notifications/planner";
+import { numbersWaitingSection } from "@/server/notifications/messages";
 import type { NeutralMessage, NotificationChannel } from "@/server/notifications/types";
 import {
   collectAiRequests,
@@ -28,6 +29,7 @@ import {
   rerunReport,
   runHireNow,
   updateHire,
+  type AiRequestItem,
   type HireView,
 } from "@/server/services/ai-roles";
 import type { ServiceContext } from "@/server/services/context";
@@ -186,7 +188,7 @@ describe("run state machine, data requests and chasing", () => {
     await tick(bishkek("2026-11-10", "08:30"));
     await tick(bishkek("2026-11-10", "12:00"));
     expect(aiLines(morningOf("nuraaly", "2026-11-10"))).toEqual([
-      "Financial Analyst needs October 2026 numbers for Kiwi Go: Orders per day, COD collected, COD paid out +1 more — enter them: /companies/kiwi-go?tab=numbers&g=day",
+      "Financial Analyst needs October 2026 numbers for Kiwi Go: Orders per day, COD collected, COD paid out +1 more — enter them (the data-source ones by hand or upload until it is connected): /companies/kiwi-go?tab=numbers&g=day",
     ]);
     await days("2026-11-11", "2026-12-01");
     const shownOn = sent.filter((s) => s.userId === t.userIds.nuraaly && aiLines(s.message).length).map((s) => s.day);
@@ -229,6 +231,25 @@ describe("run state machine, data requests and chasing", () => {
       null,
     );
     expect(byPeriod.waiting.map((w) => w.label)).toEqual(["Orders per day"]);
+  });
+
+  it("connector-only numbers: 'enter by hand or upload until the data source is connected', and not in the Monday data-sources line (whole-app review #8)", () => {
+    const item = (missing: AiRequestItem["missing"]): AiRequestItem => ({ requestId: "r1", hireId: "h1", roleName: "Financial Analyst", companyName: "Kiwi Go", companySlug: "kiwi-go", months: ["2026-10-01"], dueToday: true, waitingOnHolding: [], missing });
+    const orders = { metricId: "m-orders", key: "orders_day", label: "Orders per day", granularity: "day" as const, months: ["2026-10-01"], awaitingSource: "Edil's APIs" };
+    const revenue = { metricId: "m-rev", key: "revenue", label: "Revenue", granularity: "month" as const, months: ["2026-10-01"], awaitingSource: null };
+    const waiting = [
+      // Waiting for a November day (another month than the request) — still left out.
+      { metricId: "m-orders", companyName: "Kiwi Go", label: "Orders per day", hasData: false, awaitingSource: "Edil's APIs", waitingFor: "2026-11-15" },
+      { metricId: "m-wms", companyName: "Jobutify", label: "WMS orders processed", hasData: false, awaitingSource: "Edil's APIs", waitingFor: "2026-11-15" },
+    ];
+    const only = composeRequests([item([orders])], waiting, null);
+    expect(only.aiLines[1]!.text).toBe("Financial Analyst needs October 2026 numbers for Kiwi Go: Orders per day — enter by hand or upload until the data source is connected: /companies/kiwi-go?tab=numbers&g=day");
+    expect(only.waiting.map((w) => w.label)).toEqual(["WMS orders processed"]);
+    const lines = numbersWaitingSection(only.waiting, "2026-11-16"); // a Monday
+    expect(lines.map((l) => l.text)).toContain("1 number waits for data sources (Edil's APIs)");
+    const mixed = composeRequests([item([revenue, orders])], waiting, null);
+    expect(mixed.aiLines[1]!.text).toContain("Revenue, Orders per day — enter them (the data-source ones by hand or upload until it is connected): ");
+    expect(composeRequests([item([revenue])], [], null).aiLines[1]!.text).toContain("Revenue — enter them: ");
   });
 
   it("dedupe with Holding: the debt number derived from акты is asked by the Holding section only", () => {
@@ -309,7 +330,7 @@ describe("run state machine, data requests and chasing", () => {
     await link("talant", "222", bishkek("2026-12-11", "07:00"));
     await tick(bishkek("2026-12-11", "08:30"));
     expect(aiLines(morningOf("talant", "2026-12-11"))).toEqual([
-      "Financial Analyst needs October and November 2026 numbers for Kiwi Go: Orders per day, COD collected, COD paid out +1 more — enter them: /companies/kiwi-go?tab=numbers&g=day",
+      "Financial Analyst needs October and November 2026 numbers for Kiwi Go: Orders per day, COD collected, COD paid out +1 more — enter them (the data-source ones by hand or upload until it is connected): /companies/kiwi-go?tab=numbers&g=day",
     ]);
   });
 });

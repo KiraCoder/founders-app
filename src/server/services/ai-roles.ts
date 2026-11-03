@@ -47,6 +47,7 @@ import {
   type AiRunMissing,
   type AiRunStatus,
 } from "@/server/db/schema";
+import { defaultRegistry, type ConnectorRegistry } from "@/server/connectors/registry";
 import { listFounders } from "@/server/notifications/founders";
 import { enqueue } from "@/server/notifications/outbox";
 import type { NeutralMessage } from "@/server/notifications/types";
@@ -290,6 +291,7 @@ interface MetricDef extends CompanyMetricOption {
   direction: "higher_is_better" | "lower_is_better" | "neutral";
   target: string | null;
   sourceKind: "manual" | "upload" | "connector" | "derived";
+  connectorId: string | null;
 }
 
 /**
@@ -299,6 +301,13 @@ interface MetricDef extends CompanyMetricOption {
  */
 export function holdingFed(d: { key: string; sourceKind?: string }): boolean {
   return d.key === DEBT_METRIC_KEY || d.sourceKind === "derived";
+}
+
+/** A connector-only number whose data source is not connected: the source's short reason. */
+function awaitingSourceOf(def: Pick<MetricDef, "sourceKind" | "connectorId">, registry: ConnectorRegistry): string | null {
+  if (def.sourceKind !== "connector") return null;
+  const setup = def.connectorId ? registry.get(def.connectorId)?.setup() : undefined;
+  return setup?.configured ? null : (setup?.shortReason ?? "a data source");
 }
 
 async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]> {
@@ -321,6 +330,7 @@ async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]
     direction: d.direction,
     target: d.target,
     sourceKind: d.sourceKind,
+    connectorId: d.connectorId ?? null,
   }));
 }
 
@@ -723,7 +733,18 @@ export interface AiRequestItem {
    * the months each is missing for (the orchestrator hides only those periods from "Numbers
    * waiting").
    */
-  missing: { metricId: string; key: string; label: string; granularity: Granularity; months?: IsoDate[] }[];
+  missing: {
+    metricId: string;
+    key: string;
+    label: string;
+    granularity: Granularity;
+    months?: IsoDate[];
+    /**
+     * Expected from a data source that is not connected yet (its short reason, "Edil's
+     * APIs"): the founders can only enter it by hand or upload it until it is.
+     */
+    awaitingSource?: string | null;
+  }[];
   /**
    * Missing numbers the Holding computes from акты (never asked by the role; the Holding
    * section asks for the акты). Still listed here so "Numbers waiting" doesn't ask for them.
@@ -748,7 +769,8 @@ export function numbersHref(companySlug: string, g: Granularity): string {
  * orchestrator turns these into morning-summary lines and dedupes them against the other
  * sections (src/server/ai/orchestrator.ts).
  */
-export async function collectAiRequests(ctx: ServiceContext): Promise<AiRequestItem[]> {
+export async function collectAiRequests(ctx: ServiceContext, opts: { registry?: ConnectorRegistry } = {}): Promise<AiRequestItem[]> {
+  const registry = opts.registry ?? defaultRegistry();
   const requests = await ctx.db
     .select({ r: aiDataRequests })
     .from(aiDataRequests)
@@ -791,7 +813,7 @@ export async function collectAiRequests(ctx: ServiceContext): Promise<AiRequestI
         }
         const def = defs.get(m.metricId);
         if (holdingFed({ key: m.key, sourceKind: def?.sourceKind })) waitingOnHolding.push({ metricId: m.metricId, key: m.key, label: m.label, months: [run.period] });
-        else missing.push({ metricId: m.metricId, key: m.key, label: m.label, granularity: def?.granularity ?? "month", months: [run.period] });
+        else missing.push({ metricId: m.metricId, key: m.key, label: m.label, granularity: def?.granularity ?? "month", months: [run.period], awaitingSource: def ? awaitingSourceOf(def, registry) : null });
       }
     }
     out.push({
