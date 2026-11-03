@@ -122,14 +122,14 @@ export async function listIngestLog(ctx: ServiceContext, limit = 20): Promise<In
   const rows = await ctx.db
     .select({ log: extensionIngestLog, keyName: extensionKeys.name, ownerName: users.shortName })
     .from(extensionIngestLog)
-    .innerJoin(extensionKeys, eq(extensionKeys.id, extensionIngestLog.keyId))
+    .leftJoin(extensionKeys, eq(extensionKeys.id, extensionIngestLog.keyId))
     .leftJoin(users, eq(users.id, extensionKeys.userId))
     .orderBy(desc(extensionIngestLog.createdAt))
     .limit(Math.min(Math.max(limit, 1), 100));
   return rows.map(({ log, keyName, ownerName }) => ({
     id: log.id,
     at: log.createdAt.toISOString(),
-    keyName,
+    keyName: keyName ?? "Deleted key",
     ownerName: ownerName ?? null,
     adapterId: log.adapterId,
     status: log.status,

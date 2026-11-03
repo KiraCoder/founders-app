@@ -914,3 +914,29 @@ describe("0025 settings log 'reset' action", () => {
     await expect(client.query(`insert into ai_role_settings_log (scope_key, role_key, version, action, after) values ('role:x', 'x', 2, 'wipe', '{}')`)).rejects.toThrow();
   });
 });
+
+describe("0026 ingest log keeps its rows when a key (or its user) is deleted", () => {
+  it("key_id becomes ON DELETE SET NULL on existing data", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0026") });
+    const U = "66666666-6666-4666-8666-666666666661";
+    const K1 = "66666666-6666-4666-8666-666666666662";
+    const K2 = "66666666-6666-4666-8666-666666666663";
+    await client.exec(`
+      insert into users (id, email, name, short_name, role, password_hash) values ('${U}', 'a@x', 'A', 'A', 'founder', 'x');
+      insert into extension_keys (id, user_id, name, key_hash, key_prefix) values ('${K1}', '${U}', 'k1', 'h1', 'fcx_'), ('${K2}', '${U}', 'k2', 'h2', 'fcx_');
+      insert into extension_ingest_log (key_id, user_id, status) values ('${K1}', '${U}', 'ok'), ('${K2}', '${U}', 'ok');
+    `);
+    // Before 0026 a key with log rows could not be deleted (restrict).
+    await expect(client.query(`delete from extension_keys where id = '${K1}'`)).rejects.toThrow();
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    await client.exec(`delete from extension_keys where id = '${K1}'`);
+    // Deleting the user cascades to its keys; the log stays, unlinked.
+    await client.exec(`delete from users where id = '${U}'`);
+    const rows = await client.query<{ key_id: string | null; user_id: string | null }>("select key_id, user_id from extension_ingest_log");
+    expect(rows.rows).toEqual([
+      { key_id: null, user_id: null },
+      { key_id: null, user_id: null },
+    ]);
+  });
+});

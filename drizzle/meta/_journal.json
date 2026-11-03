@@ -183,6 +183,13 @@
       "when": 1793747883830,
       "tag": "0025_settings_log_reset",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1793748365180,
+      "tag": "0026_ingest_log_key_set_null",
+      "breakpoints": true
     }
   ]
 }

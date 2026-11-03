@@ -731,9 +731,8 @@ export const extensionIngestLog = pgTable(
   "extension_ingest_log",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    keyId: uuid("key_id")
-      .notNull()
-      .references(() => extensionKeys.id, { onDelete: "restrict" }),
+    /** Null once the key is deleted (keys go with their user; the log stays, 0026). */
+    keyId: uuid("key_id").references(() => extensionKeys.id, { onDelete: "set null" }),
     userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
     adapterId: text("adapter_id"),
     /** ok | invalid (the request itself was refused: bad JSON, too many points, …) */

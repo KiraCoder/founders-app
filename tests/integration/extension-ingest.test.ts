@@ -351,3 +351,15 @@ describe("'Source disagrees' survives many later calls (C5b #2)", () => {
     expect(await disagreements()).toEqual([expected[1]]);
   });
 });
+
+describe("deleting a key keeps its log (C5b #9)", () => {
+  it("the log rows stay, shown as 'Deleted key'", async () => {
+    const other = await createExtensionKey(t.ctx("talant"), { name: "Temp" });
+    now = new Date(FIXED_NOW.getTime() + 20_000_000);
+    const r = await send(post(env([]), { authorization: `Bearer ${other.key}` }));
+    expect(r.status).toBe(200);
+    await t.handle.db.delete(extensionKeys).where(eq(extensionKeys.id, other.view.id));
+    const [row] = await listIngestLog(t.ctx("nuraaly"), 1);
+    expect(row).toMatchObject({ keyName: "Deleted key", status: "ok" });
+  });
+});
