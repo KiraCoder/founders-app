@@ -60,6 +60,11 @@ describe("row level security after migrate", () => {
         "ai_role_hires",
         "ai_role_runs",
         "ai_data_requests",
+        "org_charts",
+        "org_divisions",
+        "org_departments",
+        "org_functions",
+        "org_change_log",
       ]),
     );
     expect(tables.filter((t) => !t.rls).map((t) => t.name)).toEqual([]);

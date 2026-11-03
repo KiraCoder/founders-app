@@ -29,7 +29,7 @@ async function run(fn: () => Promise<unknown>): Promise<ActionState> {
   return { ok: true, nonce: Date.now() };
 }
 
-const TASK_FORM_FIELDS = ["title", "notes", "companyId", "projectId", "visibility", "status", "priority", "dueDate"] as const;
+const TASK_FORM_FIELDS = ["title", "notes", "companyId", "projectId", "orgDepartmentId", "visibility", "status", "priority", "dueDate"] as const;
 
 /** Reads task fields from a form. Missing fields are left out so PATCH semantics work. */
 function taskFieldsFromForm(fd: FormData): Record<string, unknown> {

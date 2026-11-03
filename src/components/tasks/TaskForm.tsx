@@ -11,6 +11,7 @@ export interface TaskFormDefaults {
   visibility?: "private" | "shared";
   companyId?: string;
   projectId?: string;
+  orgDepartmentId?: string;
 }
 
 export function TaskForm({
@@ -35,6 +36,7 @@ export function TaskForm({
   const [visibility, setVisibility] = useState(task?.visibility ?? defaults?.visibility ?? "shared");
   const [companyId, setCompanyId] = useState(task?.company?.id ?? defaults?.companyId ?? "");
   const [projectId, setProjectId] = useState(task?.project?.id ?? defaults?.projectId ?? "");
+  const [departmentId, setDepartmentId] = useState(task?.orgDepartment?.id ?? defaults?.orgDepartmentId ?? "");
   const initialAssignee = task?.assignee ? `${task.assignee.kind}:${task.assignee.id}` : "";
   const [assignee, setAssignee] = useState(initialAssignee);
 
@@ -50,6 +52,7 @@ export function TaskForm({
 
   const projects = options.projects.filter((p) => !companyId || p.companyId === companyId);
   const people = companyId ? options.peopleByCompany[companyId] ?? [] : [];
+  const departments = companyId ? (options.departmentsByCompany?.[companyId] ?? []) : [];
   const err = (f: string) => state.fieldErrors?.[f]?.[0];
 
   return (
@@ -102,6 +105,7 @@ export function TaskForm({
             onChange={(e) => {
               setCompanyId(e.target.value);
               setProjectId("");
+              setDepartmentId("");
               if (assignee.startsWith("person:")) setAssignee("");
             }}
           >
@@ -172,6 +176,31 @@ export function TaskForm({
                 </option>
               ))}
             </select>
+          </div>
+        </div>
+      )}
+
+      {!compact && departments.length > 0 && (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="col-span-2">
+            <label className="label" htmlFor={`dept-${task?.id ?? "new"}`}>
+              Department (org chart)
+            </label>
+            <select
+              id={`dept-${task?.id ?? "new"}`}
+              name="orgDepartmentId"
+              className="input"
+              value={departmentId}
+              onChange={(e) => setDepartmentId(e.target.value)}
+            >
+              <option value="">None</option>
+              {departments.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+            {err("orgDepartmentId") && <p className="mt-1 text-[12px] text-risk">{err("orgDepartmentId")}</p>}
           </div>
         </div>
       )}

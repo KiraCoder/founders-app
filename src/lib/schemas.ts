@@ -30,6 +30,8 @@ const taskFields = {
   visibility: z.enum(TASK_VISIBILITY_VALUES),
   assigneeUserId: optionalUuid,
   assigneePersonId: optionalUuid,
+  /** Optional department of the company's org chart (must be of the task's company). */
+  orgDepartmentId: optionalUuid,
   status: z.enum(TASK_STATUS_VALUES),
   priority: z.enum(TASK_PRIORITY_VALUES),
   dueDate: optionalDate,

@@ -120,6 +120,13 @@
       "when": 1793719152263,
       "tag": "0016_founder_decisions",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1793721092049,
+      "tag": "0017_org_structure",
+      "breakpoints": true
     }
   ]
 }

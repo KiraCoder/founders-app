@@ -27,6 +27,7 @@ import {
 import type { IsoDate } from "@/lib/dates";
 import {
   companies,
+  orgDepartments,
   people,
   personCompanies,
   projects,
@@ -43,6 +44,7 @@ import { assertCompanyAccess, assertValidId, visibleEventsWhere, visibleTasksWhe
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { CLOSED_STATUSES, isOverdue, nextCompletedAt, thisWeekRange } from "./tasks-rules";
+import { assertTaskDepartment } from "./org";
 
 /** A task row enriched for display / API output. */
 export interface TaskView {
@@ -60,6 +62,8 @@ export interface TaskView {
   ownerName: string;
   company: { id: string; slug: string; name: string; color: string } | null;
   project: { id: string; name: string } | null;
+  /** Department of the company's org chart ("21 Отдел владельца"), when set. */
+  orgDepartment: { id: string; number: number; name: string } | null;
   assignee:
     | { kind: "user"; id: string; name: string }
     | { kind: "person"; id: string; name: string }
@@ -85,6 +89,7 @@ function baseSelect(ctx: ServiceContext) {
         color: companies.color,
       },
       project: { id: projects.id, name: projects.name },
+      orgDepartment: { id: orgDepartments.id, number: orgDepartments.number, name: orgDepartments.name },
       assigneeUserName: assigneeUser.shortName,
       assigneePersonName: people.fullName,
     })
@@ -92,6 +97,7 @@ function baseSelect(ctx: ServiceContext) {
     .innerJoin(owner, eq(owner.id, tasks.ownerUserId))
     .leftJoin(companies, eq(companies.id, tasks.companyId))
     .leftJoin(projects, eq(projects.id, tasks.projectId))
+    .leftJoin(orgDepartments, eq(orgDepartments.id, tasks.orgDepartmentId))
     .leftJoin(assigneeUser, eq(assigneeUser.id, tasks.assigneeUserId))
     .leftJoin(people, eq(people.id, tasks.assigneePersonId));
 }
@@ -115,6 +121,7 @@ function toView(row: Row, todayIso: IsoDate): TaskView {
     ownerName: row.ownerName,
     company: row.company?.id ? row.company : null,
     project: row.project?.id ? row.project : null,
+    orgDepartment: row.orgDepartment?.id ? row.orgDepartment : null,
     assignee: t.assigneeUserId
       ? { kind: "user", id: t.assigneeUserId, name: row.assigneeUserName ?? "?" }
       : t.assigneePersonId
@@ -237,6 +244,9 @@ interface Relations {
   assigneeUserId: string | null;
   assigneePersonId: string | null;
   ownerUserId: string;
+  /** Department of the org chart; checked only when it is new or the company changed. */
+  orgDepartmentId?: string | null;
+  checkDepartment?: boolean;
 }
 
 /** Validates cross-row rules and returns the (possibly inherited) companyId. */
@@ -295,6 +305,8 @@ async function validateRelations(ctx: ServiceContext, r: Relations): Promise<str
     }
   }
 
+  if (r.orgDepartmentId && r.checkDepartment !== false) await assertTaskDepartment(ctx, r.orgDepartmentId, companyId);
+
   return companyId;
 }
 
@@ -311,6 +323,7 @@ export async function createTask(ctx: ServiceContext, input: TaskCreateInput): P
     assigneeUserId: data.assigneeUserId ?? null,
     assigneePersonId: data.assigneePersonId ?? null,
     ownerUserId: ctx.user.id,
+    orgDepartmentId: data.orgDepartmentId ?? null,
   };
   const companyId = await validateRelations(ctx, rel);
 
@@ -328,6 +341,7 @@ export async function createTask(ctx: ServiceContext, input: TaskCreateInput): P
         projectId: rel.projectId,
         assigneeUserId: rel.assigneeUserId,
         assigneePersonId: rel.assigneePersonId,
+        orgDepartmentId: rel.orgDepartmentId ?? null,
         ownerUserId: ctx.user.id,
         completedAt: data.status === "done" ? ctx.now : null,
       })
@@ -354,6 +368,7 @@ const TRACKED_FIELDS = [
   "visibility",
   "assigneeUserId",
   "assigneePersonId",
+  "orgDepartmentId",
   "status",
   "priority",
   "dueDate",
@@ -379,6 +394,10 @@ export async function updateTask(ctx: ServiceContext, id: string, input: TaskUpd
   if (patch.companyId !== undefined && patch.projectId === undefined && patch.companyId !== current.companyId) {
     next.projectId = null;
   }
+  // Same for the org department: it belongs to one company.
+  if (patch.companyId !== undefined && patch.orgDepartmentId === undefined && patch.companyId !== current.companyId) {
+    next.orgDepartmentId = null;
+  }
 
   const companyId = await validateRelations(ctx, {
     visibility: next.visibility,
@@ -387,6 +406,9 @@ export async function updateTask(ctx: ServiceContext, id: string, input: TaskUpd
     assigneeUserId: next.assigneeUserId,
     assigneePersonId: next.assigneePersonId,
     ownerUserId: current.ownerUserId,
+    orgDepartmentId: next.orgDepartmentId,
+    // An unchanged link to a department archived since stays (only new links are checked).
+    checkDepartment: next.orgDepartmentId !== current.orgDepartmentId || next.companyId !== current.companyId,
   });
   next.companyId = companyId;
   next.completedAt = nextCompletedAt(current, next.status, ctx.now);
@@ -405,6 +427,7 @@ export async function updateTask(ctx: ServiceContext, id: string, input: TaskUpd
         visibility: next.visibility,
         assigneeUserId: next.assigneeUserId,
         assigneePersonId: next.assigneePersonId,
+        orgDepartmentId: next.orgDepartmentId,
         status: next.status,
         priority: next.priority,
         dueDate: next.dueDate,

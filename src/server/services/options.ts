@@ -2,6 +2,7 @@ import "server-only";
 import { listCompanies } from "./companies";
 import type { ServiceContext } from "./context";
 import { assignablePeopleByCompany, listFounders } from "./people";
+import { orgDepartmentOptionsByCompany } from "./org";
 import { listProjects } from "./projects";
 
 /** Everything the task form needs for its pickers (serializable for client components). */
@@ -11,14 +12,17 @@ export interface TaskFormOptions {
   projects: { id: string; name: string; companyId: string }[];
   founders: { id: string; shortName: string }[];
   peopleByCompany: Record<string, { id: string; name: string }[]>;
+  /** Org chart departments per company ("21 Отдел владельца"); companies without a chart have none. */
+  departmentsByCompany: Record<string, { id: string; label: string }[]>;
 }
 
 export async function getTaskFormOptions(ctx: ServiceContext): Promise<TaskFormOptions> {
-  const [companies, projects, founders, peopleByCompany] = await Promise.all([
+  const [companies, projects, founders, peopleByCompany, departmentsByCompany] = await Promise.all([
     listCompanies(ctx),
     listProjects(ctx),
     listFounders(ctx),
     assignablePeopleByCompany(ctx),
+    orgDepartmentOptionsByCompany(ctx),
   ]);
   return {
     currentUserId: ctx.user.id,
@@ -28,5 +32,6 @@ export async function getTaskFormOptions(ctx: ServiceContext): Promise<TaskFormO
       .map((p) => ({ id: p.id, name: p.name, companyId: p.companyId })),
     founders: founders.map((f) => ({ id: f.id, shortName: f.shortName })),
     peopleByCompany,
+    departmentsByCompany,
   };
 }

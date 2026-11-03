@@ -334,6 +334,11 @@ export const tasks = pgTable(
     assigneePersonId: uuid("assignee_person_id").references(() => people.id, {
       onDelete: "set null",
     }),
+    /**
+     * Optional department of the company's org chart (C3b). Must belong to the task's company
+     * (enforced in the service layer). Departments are archived, never deleted.
+     */
+    orgDepartmentId: uuid("org_department_id").references((): AnyPgColumn => orgDepartments.id, { onDelete: "set null" }),
     status: taskStatusEnum("status").notNull().default("todo"),
     priority: taskPriorityEnum("priority").notNull().default("normal"),
     /** Calendar date in APP_TIMEZONE (Asia/Bishkek). */
@@ -348,6 +353,7 @@ export const tasks = pgTable(
     index("tasks_owner_idx").on(t.ownerUserId),
     index("tasks_assignee_user_idx").on(t.assigneeUserId),
     index("tasks_due_idx").on(t.dueDate),
+    index("tasks_org_department_idx").on(t.orgDepartmentId),
     check(
       "tasks_single_assignee",
       sql`${t.assigneeUserId} is null or ${t.assigneePersonId} is null`,
@@ -1016,6 +1022,167 @@ export const aiDataRequests = pgTable(
   },
   (t) => [uniqueIndex("ai_data_requests_round_uq").on(t.hireId, t.userId, t.roundKey)],
 );
+
+// ---------------------------------------------------------------------------
+// Org structure (C3b): Vysotsky model — 7 divisions, 21 departments, functions (posts).
+// One chart per company, optionally per company unit (e.g. Alura Style ХБК). Content is in
+// Russian. Every row is archived, never deleted; every change is written to org_change_log
+// (who / when / before / after), which also drives Undo. company_id is copied onto every row
+// so company isolation is a single column check (src/server/services/org.ts).
+// ---------------------------------------------------------------------------
+export const orgCharts = pgTable(
+  "org_charts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    /** Null = the whole company; set = a chart for one unit (factory). */
+    companyUnitId: uuid("company_unit_id").references(() => companyUnits.id, { onDelete: "restrict" }),
+    /** "vysotsky-7-21" or "kiwi-go-seed". */
+    templateKey: text("template_key").notNull(),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [unique("org_charts_company_unit_uq").on(t.companyId, t.companyUnitId).nullsNotDistinct()],
+);
+
+export const orgDivisions = pgTable(
+  "org_divisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    chartId: uuid("chart_id")
+      .notNull()
+      .references(() => orgCharts.id, { onDelete: "restrict" }),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    /** 1–7 (Vysotsky). Shown in the order 7, 1, 2, 3, 4, 5, 6. */
+    number: integer("number").notNull(),
+    name: text("name").notNull().default(""),
+    /** True while the name is still the template's default (an edit clears it). */
+    nameIsDefault: boolean("name_is_default").notNull().default(false),
+    /** "Руководитель:" — the head's post title (text). */
+    headTitle: text("head_title").notNull().default(""),
+    /** "Подчинение:" — whom the head reports to (text). */
+    reportsTo: text("reports_to").notNull().default(""),
+    /** ЦКП — ценный конечный продукт. */
+    ckp: text("ckp").notNull().default(""),
+    headPersonId: uuid("head_person_id").references(() => people.id, { onDelete: "restrict" }),
+    sort: integer("sort").notNull().default(0),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("org_divisions_chart_idx").on(t.chartId),
+    check("org_divisions_number_range", sql`${t.number} between 1 and 7`),
+  ],
+);
+
+export const orgDepartments = pgTable(
+  "org_departments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    chartId: uuid("chart_id")
+      .notNull()
+      .references(() => orgCharts.id, { onDelete: "restrict" }),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    divisionId: uuid("division_id")
+      .notNull()
+      .references(() => orgDivisions.id, { onDelete: "restrict" }),
+    /** 1–21 in the model; departments added later get the next free number (up to 99). */
+    number: integer("number").notNull(),
+    name: text("name").notNull().default(""),
+    nameIsDefault: boolean("name_is_default").notNull().default(false),
+    ckp: text("ckp").notNull().default(""),
+    /** "Статистика:" (text). */
+    statistic: text("statistic").notNull().default(""),
+    /** Optional link to a company number (C4) that measures the statistic. */
+    metricDefinitionId: uuid("metric_definition_id").references(() => metricDefinitions.id, { onDelete: "restrict" }),
+    headPersonId: uuid("head_person_id").references(() => people.id, { onDelete: "restrict" }),
+    /** Order inside the division (0, 1, 2, … after every change). */
+    sort: integer("sort").notNull().default(0),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("org_departments_chart_idx").on(t.chartId),
+    index("org_departments_division_idx").on(t.divisionId),
+    check("org_departments_number_range", sql`${t.number} between 1 and 99`),
+  ],
+);
+
+export const orgFunctions = pgTable(
+  "org_functions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    chartId: uuid("chart_id")
+      .notNull()
+      .references(() => orgCharts.id, { onDelete: "restrict" }),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    departmentId: uuid("department_id")
+      .notNull()
+      .references(() => orgDepartments.id, { onDelete: "restrict" }),
+    text: text("text").notNull(),
+    responsiblePersonId: uuid("responsible_person_id").references(() => people.id, { onDelete: "restrict" }),
+    /** Order inside the department (0, 1, 2, … after every change). */
+    sort: integer("sort").notNull().default(0),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("org_functions_department_idx").on(t.departmentId), index("org_functions_chart_idx").on(t.chartId)],
+);
+
+/**
+ * Every change to a chart: who, when, what (before / after). The newest 20 changes that are
+ * not undone can be undone one by one (newest first); an undo is logged too (action "undo",
+ * itself not undoable). Append-only apart from `undone_at` / `undone_by`.
+ */
+export const orgChangeLog = pgTable(
+  "org_change_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    chartId: uuid("chart_id")
+      .notNull()
+      .references(() => orgCharts.id, { onDelete: "restrict" }),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** chart | division | department | function */
+    entity: text("entity").notNull(),
+    entityId: uuid("entity_id"),
+    /** apply_template | seed | create | update | move | archive | restore | undo */
+    action: text("action").notNull(),
+    before: jsonb("before").$type<Record<string, unknown> | null>(),
+    after: jsonb("after").$type<Record<string, unknown> | null>(),
+    /** One line for the History list ("Moved function “Testing” to 4 Маркетинг"). */
+    summary: text("summary").notNull(),
+    /** For action = undo: the change it undid. */
+    undoOf: uuid("undo_of"),
+    undoneAt: timestamp("undone_at", { withTimezone: true }),
+    undoneBy: uuid("undone_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    /** Insert order (two changes can share created_at inside one request). */
+    seq: bigint("seq", { mode: "number" }).generatedByDefaultAsIdentity(),
+  },
+  (t) => [index("org_change_log_chart_idx").on(t.chartId, t.seq)],
+);
+
+export type OrgChart = typeof orgCharts.$inferSelect;
+export type OrgDivision = typeof orgDivisions.$inferSelect;
+export type OrgDepartment = typeof orgDepartments.$inferSelect;
+export type OrgFunction = typeof orgFunctions.$inferSelect;
+export type OrgChangeLogRow = typeof orgChangeLog.$inferSelect;
 
 export type AiRoleTemplateRow = typeof aiRoleTemplates.$inferSelect;
 export type AiRoleHire = typeof aiRoleHires.$inferSelect;

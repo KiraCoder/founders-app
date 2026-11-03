@@ -177,3 +177,27 @@ export function canUseAiRoles(ctx: ServiceContext): boolean {
 export function assertAiRolesAccess(ctx: ServiceContext): void {
   if (!canUseAiRoles(ctx)) throw new ServiceError("forbidden", "Only the founders can hire or manage AI roles");
 }
+
+// ---------------------------------------------------------------------------
+// Org structure (charts, divisions, departments, functions, change log)
+// ---------------------------------------------------------------------------
+
+/**
+ * Org rule: a chart is company data, so it follows the company rule — visible to whoever can
+ * access the company (`assertCompanyAccess`), never mixed between companies (every org row
+ * carries company_id and moves are only allowed inside one chart). Editing is founders-only
+ * for now; staff (later) will only read their company's chart.
+ */
+export function canEditOrg(ctx: ServiceContext): boolean {
+  return ctx.user.role === "founder";
+}
+
+export async function assertOrgRead(ctx: ServiceContext, companyId: string): Promise<void> {
+  assertValidId(companyId, "Company");
+  await assertCompanyAccess(ctx, companyId);
+}
+
+export async function assertOrgEdit(ctx: ServiceContext, companyId: string): Promise<void> {
+  if (!canEditOrg(ctx)) throw new ServiceError("forbidden", "Only the founders can change the org structure");
+  await assertOrgRead(ctx, companyId);
+}

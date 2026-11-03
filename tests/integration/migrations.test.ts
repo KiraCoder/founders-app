@@ -633,3 +633,35 @@ describe("0016 the founders' decisions on existing data", () => {
     expect((await client.query("select 1 from salary_viewers")).rows).toHaveLength(0);
   });
 });
+
+describe("0017 org structure on existing data", () => {
+  it("adds the org tables with RLS, keeps tasks (no department) and enforces the number ranges and one chart per company", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0017") });
+    const C1 = "33333333-3333-4333-8333-333333333331";
+    await client.exec(`
+      insert into users (id, email, name, short_name, role) values ('${NURAALY}', 'nuraaly@founders.local', 'Nuraaly', 'Nuraaly', 'founder');
+      insert into companies (id, slug, name) values ('${C1}', 'kiwi-go', 'Kiwi Go');
+      insert into tasks (title, company_id, owner_user_id, visibility) values ('Существующая задача', '${C1}', '${NURAALY}', 'shared');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+
+    const tasks = await client.query<{ title: string; org_department_id: string | null }>("select title, org_department_id from tasks");
+    expect(tasks.rows).toEqual([{ title: "Существующая задача", org_department_id: null }]);
+    const rls = await client.query<{ relname: string; relrowsecurity: boolean }>(
+      "select relname, relrowsecurity from pg_class where relname in ('org_charts','org_divisions','org_departments','org_functions','org_change_log') order by relname",
+    );
+    expect(rls.rows).toEqual(["org_change_log", "org_charts", "org_departments", "org_divisions", "org_functions"].map((relname) => ({ relname, relrowsecurity: true })));
+
+    const chart = (await client.query<{ id: string }>(`insert into org_charts (company_id, template_key) values ('${C1}', 'vysotsky-7-21') returning id`)).rows[0]!.id;
+    await expect(client.query(`insert into org_charts (company_id, template_key) values ('${C1}', 'again')`)).rejects.toThrow();
+    await expect(client.query(`insert into org_divisions (chart_id, company_id, number) values ('${chart}', '${C1}', 8)`)).rejects.toThrow(/org_divisions_number_range/);
+    const div = (await client.query<{ id: string }>(`insert into org_divisions (chart_id, company_id, number, name) values ('${chart}', '${C1}', 7, 'Административное') returning id`)).rows[0]!.id;
+    await expect(client.query(`insert into org_departments (chart_id, company_id, division_id, number) values ('${chart}', '${C1}', '${div}', 100)`)).rejects.toThrow(/org_departments_number_range/);
+    const dep = (await client.query<{ id: string }>(`insert into org_departments (chart_id, company_id, division_id, number, name) values ('${chart}', '${C1}', '${div}', 21, 'Отдел владельца') returning id`)).rows[0]!.id;
+    await client.exec(`update tasks set org_department_id = '${dep}'`);
+    // Departments are never deleted (archived instead): the FK refuses while rows point at it.
+    await client.exec(`insert into org_functions (chart_id, company_id, department_id, text) values ('${chart}', '${C1}', '${dep}', 'Связь с учредителями')`);
+    await expect(client.query(`delete from org_departments where id = '${dep}'`)).rejects.toThrow();
+  });
+});

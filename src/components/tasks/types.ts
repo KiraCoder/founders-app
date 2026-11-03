@@ -11,6 +11,7 @@ export interface TaskItem {
   ownerName: string;
   company: { id: string; slug: string; name: string; color: string } | null;
   project: { id: string; name: string } | null;
+  orgDepartment?: { id: string; number: number; name: string } | null;
   assignee: { kind: "user" | "person"; id: string; name: string } | null;
   isOverdue: boolean;
 }
@@ -29,6 +30,7 @@ export function toTaskItem<T extends TaskItem>(t: T): TaskItem {
     ownerName: t.ownerName,
     company: t.company,
     project: t.project,
+    orgDepartment: t.orgDepartment ?? null,
     assignee: t.assignee,
     isOverdue: t.isOverdue,
   };

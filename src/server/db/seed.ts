@@ -7,10 +7,12 @@
  * Used by `npm run db:seed` and by tests (no "server-only" on purpose).
  */
 import bcrypt from "bcryptjs";
-import { and, eq, like } from "drizzle-orm";
+import { and, eq, isNull, like } from "drizzle-orm";
 import { addDays, todayInTimeZone } from "@/lib/dates";
 import { ROLE_TEMPLATES } from "@/lib/ai-roles";
 import { metricSeedFor, seedAggregation } from "@/lib/kpis";
+import { ORG_SEED } from "@/lib/org";
+import { createChartFromTemplate } from "./org-charts";
 import type { Db } from "./connect";
 import {
   aiRoleTemplates,
@@ -18,6 +20,7 @@ import {
   companyUnits,
   intercompanyFlows,
   metricDefinitions,
+  orgCharts,
   people,
   personCompanies,
   projects,
@@ -245,6 +248,9 @@ export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResul
 
   // --- AI roles: the role catalogue (code is the source of truth) ---------------
   await syncAiTemplates(db);
+
+  // --- Org structure: Kiwi Go's chart from the old cockpit (only when it has none) ----
+  await seedOrgCharts(db, companyIds, options.now ?? new Date());
 
   // --- Holding: the known intercompany flows (only missing ones are added) ------
   await seedIntercompanyFlows(db, companyIds, { sampleSince: options.withSamples === true ? SAMPLE_FLOW_SINCE : null });
@@ -480,5 +486,34 @@ export async function syncAiTemplates(db: Db): Promise<void> {
     const { key: _key, ...rest } = values;
     void _key;
     await db.insert(aiRoleTemplates).values(values).onConflictDoUpdate({ target: aiRoleTemplates.key, set: { ...rest, updatedAt: new Date() } });
+  }
+}
+
+/**
+ * Org charts known from the old cockpit (src/lib/org.ts ORG_SEED; Kiwi Go first). A company
+ * gets one only when it has no whole-company chart yet (archived ones count), so a re-run of
+ * the seed never overwrites the founders' edits. Other companies get no chart until a
+ * founder applies the template.
+ */
+export async function seedOrgCharts(db: Db, companyIds: Record<string, string>, now: Date): Promise<void> {
+  for (const [slug, seedChart] of Object.entries(ORG_SEED)) {
+    const companyId = companyIds[slug];
+    if (!companyId) continue;
+    const existing = await db
+      .select({ id: orgCharts.id })
+      .from(orgCharts)
+      .where(and(eq(orgCharts.companyId, companyId), isNull(orgCharts.companyUnitId)))
+      .limit(1);
+    if (existing.length) continue;
+    await createChartFromTemplate(db, {
+      companyId,
+      companyUnitId: null,
+      templateKey: seedChart.templateKey,
+      divisions: seedChart.divisions,
+      actorUserId: null,
+      action: "seed",
+      summary: "Loaded the chart from the old cockpit",
+      now,
+    });
   }
 }
