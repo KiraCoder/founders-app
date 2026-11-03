@@ -29,6 +29,7 @@ Stop `npm run dev` before running `db:*` scripts: the embedded database allows o
 | `npm run test:e2e` | Playwright smoke test (builds and starts the app on port 3100) |
 | `npm run db:generate` | Create a new SQL migration after editing `src/server/db/schema.ts` |
 | `npm run db:migrate` | Apply migrations (PGlite or `DATABASE_URL`) |
+| `npm run db:migrate:deploy` | Same, but only when `MIGRATE_ON_BUILD=1` (and `DATABASE_URL` set); otherwise prints "skipped". For an optional Vercel build step |
 | `npm run db:seed` | Load founders, companies, people and (local DB only, by default) `[sample]` tasks. Safe to re-run: existing founders keep their password |
 | `npm run db:reset` | **Local only.** Wipe + migrate + seed. Refuses to run against a non-localhost database |
 | `npm run cron:tick` | Run the notification scheduler once against the running app (needs `CRON_SECRET`) |
@@ -37,6 +38,7 @@ Stop `npm run dev` before running `db:*` scripts: the embedded database allows o
 Screenshots: `SCREENSHOTS=1 npx playwright test screenshots` (writes `docs/screenshots/`).
 
 After pulling new code, run `npm run db:migrate` again (new tables are added by new migrations).
+The same is true for the real database: see *Every time you deploy new code* below.
 
 ## Moving to Supabase + Vercel later (for a non-developer)
 
@@ -47,7 +49,7 @@ the Vercel / Supabase dashboards.
    e.g. Frankfurt). Save the database password somewhere safe.
 2. **Copy the connection string.** Supabase → *Project Settings → Database → Connection string →
    Transaction pooler*. It looks like `postgresql://postgres.xxxx:PASSWORD@aws-0-...pooler.supabase.com:6543/postgres`.
-3. **Create the tables once** from your computer:
+3. **Create the tables** (first time; repeat after every deploy, see step 7) from your computer:
    create a file `.env.local` with `DATABASE_URL=<that string>` and `DEV_FOUNDER_PASSWORD=<a strong password>`,
    then run `npm run db:migrate` and `npm run db:seed`. Delete `.env.local` afterwards if you like.
    (The seed refuses the dev password or anything shorter than 12 characters on a real database,
@@ -64,10 +66,25 @@ the Vercel / Supabase dashboards.
    `SESSION_SECRET` or without `DATABASE_URL` (it never falls back to the embedded local
    database in production: on Vercel that disk is temporary and the data would be lost),
    which protects you from an insecure or data-losing setup.
-7. **Already safe by default:** `npm run db:migrate` turns on row-level security for every
+7. **Every time you deploy new code: update the database too.** New versions often add
+   tables or columns (files in `drizzle/`); Vercel deploys the code but **does not** change
+   the Supabase database by itself, and pages that need a new table will fail until you do.
+   After each deploy (or before it), from your computer with `DATABASE_URL=<Supabase string>`
+   in `.env.local`, run:
+   ```bash
+   npm run db:migrate
+   ```
+   It only applies migrations that are not applied yet, so running it again is harmless.
+   **Optional, automatic:** in Vercel → *Settings → Build and Deployment → Build Command* set
+   `npm run db:migrate:deploy && npm run build` and add the environment variable
+   `MIGRATE_ON_BUILD` = `1`. Then every Vercel build applies the migrations first (a failed
+   migration fails the build, so the old version stays live). Default is **off**: without
+   `MIGRATE_ON_BUILD=1` the step prints "skipped" and changes nothing — set it only for the
+   *Production* environment if preview builds should not touch the real database.
+8. **Already safe by default:** `npm run db:migrate` turns on row-level security for every
    table and removes all access for Supabase's public `anon`/`authenticated` roles, so the
    Supabase anon key can read nothing. The app itself is unaffected.
-8. **Later (developer task):** switch to Supabase Auth (`AUTH_MODE=supabase`, see
+9. **Later (developer task):** switch to Supabase Auth (`AUTH_MODE=supabase`, see
    `src/server/auth/supabase.ts`) and, only if a client (e.g. the iOS app) should talk to
    Supabase directly, review and apply `supabase/policies.sql`.
 
