@@ -192,3 +192,18 @@ Open:
   session connection, a separate migration URL would be the next step.
 - Screenshots were not re-taken (no screen changed visibly with the sample data; the dev-inbox
   summary order changes only when Holding / AI lines are present).
+
+### Follow-up: founder switches (defaults unchanged)
+
+Two pending product decisions are now one-click switches whose default keeps the behaviour
+above: **Settings → Notifications → Overdue tasks** (`separate` default / `grouped` /
+`summary_only`, migration 0014) and **Tune → Accept monthly totals for daily numbers** per AI
+role hire (off by default, migration 0015). The simulation above (`SIM_ENTER=1
+SIM_END=2026-11-30`, current code, Talant unchanged at 58 because the sample Elmurat task is
+gone) with Nuraaly on each chase style:
+
+| Nuraaly, 1–30 Nov | separate (default) | grouped | summary_only |
+| --- | --- | --- | --- |
+| Messages in 30 days | 71 | 58 | 39 |
+| Overdue chase pushes | 32 | 19 | 0 |
+| Max per day / days with 4+ | 6 / 4 | 5 / 3 | 4 / 1 |
