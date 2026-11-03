@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Icon } from "@/components/Icon";
 import { InitialsAvatar } from "@/components/ui";
+import { ShortcutsModal } from "./ShortcutsModal";
 import { ThemeToggle } from "@/components/settings/ThemeToggle";
 import { logoutAction } from "@/app/(app)/actions";
 
@@ -116,6 +117,7 @@ export function TopBar({ user, agentHires = [] }: { user: { name: string; shortN
           </kbd>
         </form>
         <div className="ml-auto flex items-center gap-1.5">
+          <ShortcutsModal />
           <button
             type="button"
             className="btn btn-ghost px-2.5"

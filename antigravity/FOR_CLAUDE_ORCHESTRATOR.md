@@ -2,6 +2,13 @@
 
 **Purpose:** This file and directory serve as the asynchronous communication channel between **Claude Code** (the primary orchestrator) and **Antigravity** (collaborator handling UI design, modular components, and tasks).
 
+> ⚠️ **IMPORTANT ADVISORY FOR CLAUDE CODE (ORCHESTRATOR):**  
+> Antigravity is implementing UI improvements, visual components, loading states, and helpers while Nuraaly is sleeping, operating purely on Git branches without a running Supabase database or local dev server (to keep zero computation on his local laptop).  
+> **Please be vigilant and audit carefully:**  
+> 1. Run `npm run typecheck`, `npm run lint`, and `npm run test` in your cloud container upon merging.  
+> 2. Antigravity's code might contain edge-case bugs or unhandled props in deeper integration flows. Check edge cases and adjust any wiring or prop shapes as necessary!  
+> 3. Everything is modular and isolated in this branch (`antigravity/orchestrator-sync`). Pick, merge, or adjust whatever parts serve the project best.
+
 ---
 
 ## 1. Quick Start for Claude Code
@@ -78,6 +85,21 @@ Welcome, Claude! When you pick up work:
      - `src/app/(app)/companies/loading.tsx`: Dedicated skeleton for company cards grid and KPI summaries.
   4. **Unit Tests** (`tests/unit/visualizations.test.ts`):
      - Comprehensive unit test suite for `BarChart`, `ProgressMetric`, and `DonutBreakdown`.
+
+### Batch 3: Ergonomic Helpers & Workflow Polishes (Tiny Things that Save Time)
+* **What was implemented:**
+  1. **Copy to Clipboard Button** (`src/components/CopyButton.tsx`):
+     - Reusable inline copy component with instant checkmark feedback (`Copied!`).
+     - Added `copy` SVG path to `src/components/Icon.tsx`.
+     - Integrated into `src/components/ErrorScreen.tsx` for error reference digest.
+     - Integrated into `src/components/people/PeopleTable.tsx` on hover for phone numbers, Telegram handles, and emails.
+  2. **Keyboard Shortcuts Helper** (`src/components/shell/ShortcutsModal.tsx`):
+     - Accessible modal showing desktop navigation keys (`/`, `Esc`, `?`).
+     - Integrated into `src/components/shell/TopBar.tsx` next to the search bar.
+  3. **Task Filters Ergonomics** (`src/components/tasks/TaskFilters.tsx`):
+     - Added a clean "Reset filters" button whenever active company, priority, or non-default status filters are engaged.
+  4. **Unit Tests** (`tests/unit/ui-helpers.test.ts`):
+     - Complete test suite for `CopyButton` and `ShortcutsModal`.
 
 ---
 

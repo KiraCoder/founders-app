@@ -12,6 +12,12 @@ export function TaskFilters({
   companies: { id: string; name: string }[];
   values: { companyId?: string; status?: string; priority?: string };
 }) {
+  const hasFilters = Boolean(
+    values.companyId ||
+    (values.status && values.status !== "open") ||
+    values.priority
+  );
+
   return (
     <form method="get" className="mb-4 flex flex-wrap items-end gap-2" onChange={(e) => e.currentTarget.requestSubmit()}>
       <input type="hidden" name="view" value={view} />
@@ -49,6 +55,14 @@ export function TaskFilters({
           ))}
         </select>
       </div>
+      {hasFilters && (
+        <a
+          href={`/tasks?view=${encodeURIComponent(view)}`}
+          className="btn btn-ghost btn-sm mb-0.5 text-[12px] text-muted hover:text-ink"
+        >
+          Reset filters
+        </a>
+      )}
       <noscript>
         <button type="submit" className="btn">
           Apply

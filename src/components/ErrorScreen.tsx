@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { CopyButton } from "@/components/CopyButton";
 
 /**
  * The app's error screen: plain English, no stack trace or error text (it can contain
@@ -26,7 +27,12 @@ export function ErrorScreen({ digest, reset }: { digest?: string; reset?: () => 
           Back to Today
         </Link>
       </div>
-      {digest && <p className="text-[12px] text-muted">Reference: {digest}</p>}
+      {digest && (
+        <div className="flex items-center justify-center gap-1.5 text-[12px] text-muted">
+          <span>Reference: {digest}</span>
+          <CopyButton text={digest} title="Copy error reference" />
+        </div>
+      )}
     </main>
   );
 }

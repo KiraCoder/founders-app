@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { CopyButton } from "@/components/CopyButton";
 import { CompanyDot, InitialsAvatar, Tag } from "@/components/ui";
 import { EMPLOYMENT_TYPE_LABELS, PAY_TYPE_LABELS } from "@/lib/people-schemas";
 import { formatMoney } from "@/lib/money";
@@ -70,9 +71,24 @@ export function PeopleTable({
                 </ul>
               </td>
               <td className="px-3 py-2.5 text-[12px] text-muted">
-                {p.phone && <div className="num whitespace-nowrap">{p.phone}</div>}
-                {p.telegramHandle && <div>@{p.telegramHandle}</div>}
-                {p.email && <div className="truncate">{p.email}</div>}
+                {p.phone && (
+                  <div className="group/phone flex items-center gap-1 num whitespace-nowrap">
+                    <span>{p.phone}</span>
+                    <CopyButton text={p.phone} title={`Copy phone for ${p.fullName}`} size={12} className="opacity-0 group-hover/phone:opacity-100 transition-opacity" />
+                  </div>
+                )}
+                {p.telegramHandle && (
+                  <div className="group/tg flex items-center gap-1">
+                    <span>@{p.telegramHandle}</span>
+                    <CopyButton text={`@${p.telegramHandle}`} title={`Copy Telegram handle for ${p.fullName}`} size={12} className="opacity-0 group-hover/tg:opacity-100 transition-opacity" />
+                  </div>
+                )}
+                {p.email && (
+                  <div className="group/email flex items-center gap-1 truncate">
+                    <span className="truncate">{p.email}</span>
+                    <CopyButton text={p.email} title={`Copy email for ${p.fullName}`} size={12} className="opacity-0 group-hover/email:opacity-100 transition-opacity" />
+                  </div>
+                )}
               </td>
               {showSalary && (
                 <td className="px-4 py-2.5 text-right">
