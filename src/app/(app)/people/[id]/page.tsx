@@ -8,6 +8,7 @@ import { formatMoney } from "@/lib/money";
 import { EMPLOYMENT_TYPE_LABELS, PAY_TYPE_LABELS } from "@/lib/people-schemas";
 import { getPageContext } from "@/server/context";
 import { ServiceError } from "@/server/services/errors";
+import { orgPositionsForPerson, type OrgPosition } from "@/server/services/org";
 import { getPerson, listCompanyUnitOptions } from "@/server/services/people";
 import { canViewSalaries } from "@/server/services/salaries";
 
@@ -24,6 +25,7 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
     if (err instanceof ServiceError && err.code === "not_found") notFound();
     throw err;
   }
+  const positions = await orgPositionsForPerson(ctx, person.id);
   const companies = (await listCompanyUnitOptions(ctx)).map((c) => ({ id: c.id, name: c.name, units: c.units.map((u) => ({ id: u.id, name: u.name })) }));
   const left = person.leftAt !== null;
 
@@ -103,6 +105,36 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
         <AddLinkForm personId={person.id} companies={companies} showSalary={showSalary} />
       </Section>
 
+      <Section title="Org positions" count={positions.length}>
+        <ul className="card mb-3 divide-y divide-line" data-testid="person-org-positions">
+          {positions.length === 0 && <li className="px-4 py-4 text-[13px] text-muted">Not on any org chart yet. Assign people on the Org structure board.</li>}
+          {positions.map((p, i) => (
+            <li key={i} className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 py-2.5 text-[13px]" data-testid="person-org-position">
+              <Tag tone={p.kind === "function" ? "neutral" : "ok"}>{POSITION_LABEL[p.kind]}</Tag>
+              <CompanyDot color={p.companyColor} />
+              <Link href={orgHref(p)} className="font-medium hover:underline">
+                {p.companyName}
+                {p.unitName ? ` · ${p.unitName}` : ""}
+              </Link>
+              <span className="text-muted">·</span>
+              <span>{p.division}</span>
+              {p.department && (
+                <>
+                  <span className="text-muted">·</span>
+                  <span>{p.department}</span>
+                </>
+              )}
+              {p.function && (
+                <>
+                  <span className="text-muted">·</span>
+                  <span className="text-muted">{p.function}</span>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      </Section>
+
       <Section title="Details">
         <div className="card p-4 md:p-5">
           <EditPersonForm
@@ -120,4 +152,12 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
       </Section>
     </>
   );
+}
+
+const POSITION_LABEL: Record<OrgPosition["kind"], string> = { division_head: "Head of division", department_head: "Head of department", function: "Function" };
+
+function orgHref(p: OrgPosition): string {
+  const q = new URLSearchParams({ company: p.companySlug });
+  if (p.unitSlug) q.set("unit", p.unitSlug);
+  return `/org?${q.toString()}`;
 }

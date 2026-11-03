@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  closestCenter,
+  closestCorners,
   DndContext,
   DragOverlay,
   KeyboardSensor,
@@ -22,6 +22,7 @@ import { useEffect, useRef, useState, useTransition, type ReactNode } from "reac
 import {
   createDepartmentAction,
   createFunctionAction,
+  createPersonAndAssignAction,
   moveDepartmentAction,
   moveFunctionAction,
   setArchivedAction,
@@ -32,9 +33,12 @@ import {
   type OrgActionState,
 } from "@/app/(app)/org/actions";
 import { formatDisplayDateTime } from "@/lib/dates";
-import { deptLabel, placeAt } from "@/lib/org";
+import { defaultOrgRole, deptLabel, personInitials, placeAt, type OrgAssignTarget } from "@/lib/org";
 import type { OrgChartView, OrgDepartmentView, OrgDivisionView, OrgFunctionView } from "@/server/services/org";
-import { DepartmentPanel, DivisionPanel } from "./OrgPanels";
+import { DepartmentPanel, DivisionPanel, type CreatePersonFor } from "./OrgPanels";
+import { PersonPicker, type NewPersonData, type PersonOption } from "./PersonPicker";
+
+export type { PersonOption };
 
 export interface LinkedMetric {
   label: string;
@@ -42,12 +46,6 @@ export interface LinkedMetric {
   period: string | null;
   freshness: string;
   tone: "ok" | "warn" | "risk";
-}
-
-export interface PersonOption {
-  id: string;
-  name: string;
-  role: string;
 }
 
 type Panel = { kind: "department" | "division"; id: string } | null;
@@ -140,12 +138,20 @@ function InlineText({
 }
 
 /** "+ Функция" / "+ Отдел": a dashed button that turns into a one-line input. */
-function AddInline({ label, placeholder, onAdd, testId }: { label: string; placeholder: string; onAdd: (text: string) => void; testId?: string }) {
+function AddInline({ label, placeholder, onAdd, onStart, testId }: { label: string; placeholder: string; onAdd: (text: string) => void; onStart?: () => void; testId?: string }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   if (!open) {
     return (
-      <button type="button" className="org-add" onClick={() => setOpen(true)} data-testid={testId}>
+      <button
+        type="button"
+        className="org-add"
+        onClick={() => {
+          onStart?.();
+          setOpen(true);
+        }}
+        data-testid={testId}
+      >
         {label}
       </button>
     );
@@ -214,6 +220,88 @@ function MenuButton({ onClick, children, disabled }: { onClick: () => void; chil
   );
 }
 
+/** Responsible person of a function: initials in a small circle, the full name on hover / focus. */
+function Initials({ fullName }: { fullName: string }) {
+  return (
+    <span tabIndex={0} className="org-initials" title={fullName} data-tip={fullName} aria-label={`Responsible: ${fullName}`} data-testid="org-initials">
+      {personInitials(fullName)}
+    </span>
+  );
+}
+
+/**
+ * "+ назначить" (founders, view mode): a small popover with the company's people and
+ * "+ New person". Picking someone saves at once.
+ */
+function AssignPopover({
+  what,
+  target,
+  targetId,
+  defaultRole,
+  h,
+  align = "left",
+}: {
+  /** "head of 1 Найм и ввод в должность" — for screen readers. */
+  what: string;
+  target: OrgAssignTarget;
+  targetId: string;
+  defaultRole: string;
+  h: BoardHandlers;
+  align?: "left" | "right";
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  return (
+    <span ref={ref} className="relative inline-block">
+      <button type="button" className="org-assign" aria-expanded={open} aria-label={`Assign ${what}`} onClick={() => setOpen((v) => !v)}>
+        + назначить
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-label={`Assign ${what}`}
+          className={`card-raised absolute top-6 z-30 flex w-[260px] flex-col gap-1 p-2.5 text-[13px] ${align === "right" ? "right-0" : "left-0"}`}
+          data-testid="org-assign-popover"
+        >
+          <PersonPicker
+            id={`org-assign-${targetId}`}
+            label={`Assign ${what}`}
+            value=""
+            people={h.people}
+            autoFocus
+            defaultRole={defaultRole}
+            onChange={(personId) => {
+              if (!personId) return;
+              if (target === "function") h.saveFunction(targetId, { responsiblePersonId: personId });
+              else if (target === "department") h.saveDepartment(targetId, { headPersonId: personId });
+              else h.saveDivision(targetId, { headPersonId: personId });
+              setOpen(false);
+            }}
+            onCreate={async (data) => {
+              const res = await h.createPerson(target, targetId, data);
+              if (res.ok) setOpen(false);
+              return res;
+            }}
+          />
+        </div>
+      )}
+    </span>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The board
 // ---------------------------------------------------------------------------
@@ -256,27 +344,49 @@ export function OrgBoard({
   const [notice, setNotice] = useState<{ text: string; error?: boolean } | null>(null);
   const editing = editable && editMode;
 
-  const act = (fn: () => Promise<OrgActionState>, optimistic?: OrgChartView) => {
+  // Optimistic concurrency (review #6): every change carries the chart version this board
+  // shows; the server refuses it when the chart changed meanwhile. Changes run one after
+  // another, each with the version the previous one returned.
+  const version = useRef(serverChart.version);
+  useEffect(() => {
+    if (Number(serverChart.version) > Number(version.current)) version.current = serverChart.version;
+  }, [serverChart.version]);
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+
+  const act = (fn: (version: string) => Promise<OrgActionState>, optimistic?: OrgChartView): Promise<OrgActionState> => {
     const before = chart;
     if (optimistic) setChart(optimistic);
-    start(async () => {
-      const res = await fn();
+    const run = queue.current.then(async (): Promise<OrgActionState> => {
+      let res: OrgActionState;
+      try {
+        res = await fn(version.current);
+      } catch {
+        res = { ok: false, error: "Not saved — check the connection and try again" };
+      }
       if (!res.ok) {
         setChart(before);
         setNotice({ text: res.error ?? "Not saved", error: true });
-        return;
+        if (res.conflict) router.refresh();
+        return res;
       }
+      if (res.version) version.current = res.version;
       setNotice(res.message ? { text: res.message } : null);
       router.refresh();
+      return res;
     });
+    queue.current = run;
+    start(async () => {
+      await run;
+    });
+    return run;
   };
 
   const departments = chart.divisions.flatMap((d) => d.departments);
   const deptById = (id: string) => departments.find((d) => d.id === id);
   const moveFunction = (fnId: string, deptId: string, index: number) =>
-    act(() => moveFunctionAction(fnId, deptId, index), moveFunctionLocal(chart, fnId, deptId, index));
+    void act((v) => moveFunctionAction(fnId, deptId, index, v), moveFunctionLocal(chart, fnId, deptId, index));
   const moveDepartment = (deptId: string, divId: string, index: number) =>
-    act(() => moveDepartmentAction(deptId, divId, index), moveDepartmentLocal(chart, deptId, divId, index));
+    void act((v) => moveDepartmentAction(deptId, divId, index, v), moveDepartmentLocal(chart, deptId, divId, index));
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
 
@@ -290,7 +400,11 @@ export function OrgBoard({
       const items = within.filter((c) => (droppableContainers.find((x) => x.id === c.id)?.data.current as DragData | undefined)?.type === type);
       return items.length ? items : within;
     }
-    return closestCenter({ ...args, droppableContainers });
+    // Keyboard drags have no pointer: closest corners (not centres) picks the right neighbour
+    // between cards of different heights; same-type items first, a list's empty zone otherwise.
+    const sameType = droppableContainers.filter((c) => (c.data.current as DragData | undefined)?.type === type);
+    const near = closestCorners({ ...args, droppableContainers: sameType.length ? sameType : droppableContainers });
+    return near.length ? near : closestCorners({ ...args, droppableContainers });
   };
 
   const onDragStart = (e: DragStartEvent) => {
@@ -346,19 +460,25 @@ export function OrgBoard({
     },
   };
 
+  const createPerson: CreatePersonFor = (target, targetId, data: NewPersonData) =>
+    act((v) => createPersonAndAssignAction({ target, targetId, ...data }, v));
+
   const handlers: BoardHandlers = {
     editing,
     editable,
     showArchived,
     departments,
     divisions: chart.divisions,
+    people,
     open: (p) => setPanel(p),
-    saveDivision: (id, patch) => act(() => updateDivisionAction(id, patch)),
-    saveDepartment: (id, patch) => act(() => updateDepartmentAction(id, patch)),
-    saveFunction: (id, patch) => act(() => updateFunctionAction(id, patch)),
-    addFunction: (deptId, text) => act(() => createFunctionAction(deptId, text)),
-    addDepartment: (divId, name) => act(() => createDepartmentAction(divId, name)),
-    archive: (entity, id, archived) => act(() => setArchivedAction(entity, id, archived)),
+    startEditing: () => setEditMode(true),
+    saveDivision: (id, patch) => void act((v) => updateDivisionAction(id, patch, v)),
+    saveDepartment: (id, patch) => void act((v) => updateDepartmentAction(id, patch, v)),
+    saveFunction: (id, patch) => void act((v) => updateFunctionAction(id, patch, v)),
+    addFunction: (deptId, text) => void act((v) => createFunctionAction(deptId, text, v)),
+    addDepartment: (divId, name) => void act((v) => createDepartmentAction(divId, name, v)),
+    archive: (entity, id, archived) => void act((v) => setArchivedAction(entity, id, archived, v)),
+    createPerson,
     moveFunction,
     moveDepartment,
   };
@@ -380,7 +500,7 @@ export function OrgBoard({
             className="btn btn-sm"
             disabled={!chart.undo || pending}
             title={chart.undo ? `Undo: ${chart.undo.summary}` : "Nothing to undo"}
-            onClick={() => act(() => undoAction(chart.id))}
+            onClick={() => void act((v) => undoAction(chart.id, v))}
           >
             Undo{chart.undoAvailable ? ` (${chart.undoAvailable})` : ""}
           </button>
@@ -452,6 +572,7 @@ export function OrgBoard({
           onSave={(patch) => handlers.saveDepartment(panelDept.id, patch)}
           onSaveFunction={handlers.saveFunction}
           onAddFunction={(text) => handlers.addFunction(panelDept.id, text)}
+          onCreatePerson={editable ? createPerson : undefined}
           onArchive={() => {
             handlers.archive("department", panelDept.id, true);
             setPanel(null);
@@ -466,6 +587,7 @@ export function OrgBoard({
           people={people}
           onClose={() => setPanel(null)}
           onSave={(patch) => handlers.saveDivision(panelDiv.id, patch)}
+          onCreatePerson={editable ? createPerson : undefined}
         />
       )}
     </div>
@@ -478,13 +600,17 @@ interface BoardHandlers {
   showArchived: boolean;
   departments: OrgDepartmentView[];
   divisions: OrgDivisionView[];
+  people: PersonOption[];
   open: (p: Panel) => void;
+  /** "+ Функция" / "+ Отдел" in view mode switch the board to edit mode. */
+  startEditing: () => void;
   saveDivision: (id: string, patch: Record<string, string | null>) => void;
   saveDepartment: (id: string, patch: Record<string, string | number | null>) => void;
   saveFunction: (id: string, patch: Record<string, string | null>) => void;
   addFunction: (deptId: string, text: string) => void;
   addDepartment: (divId: string, name: string) => void;
   archive: (entity: "department" | "function", id: string, archived: boolean) => void;
+  createPerson: CreatePersonFor;
   moveFunction: (fnId: string, deptId: string, index: number) => void;
   moveDepartment: (deptId: string, divId: string, index: number) => void;
 }
@@ -496,38 +622,54 @@ function DivisionColumn({ division: d, h, mobileHidden }: { division: OrgDivisio
       aria-label={`Division ${d.number} ${d.name}`}
       data-testid="org-division"
       data-number={d.number}
-      className={`${mobileHidden ? "hidden" : "flex"} card w-full shrink-0 flex-col md:flex md:w-[272px]`}
+      className={`${mobileHidden ? "hidden" : "flex"} card w-full shrink-0 flex-col md:flex md:w-[212px]`}
     >
-      <header className="flex flex-col gap-1.5 p-3 pb-3">
+      <header className="flex flex-col gap-1 p-2.5">
         <div className="flex items-start justify-between gap-2">
-          <span className="num text-[44px] font-bold leading-[44px] text-accent">{d.number}</span>
+          <span className="num text-[34px] font-bold leading-[34px] text-accent">{d.number}</span>
           <button type="button" className="org-icon-btn mt-1" aria-label={`Details of division ${d.number}`} onClick={() => h.open({ kind: "division", id: d.id })}>
             ⓘ
           </button>
         </div>
-        <h3 className="text-[15px] font-semibold leading-5">
+        <h3 className="text-[14px] font-semibold leading-[18px]">
           <InlineText value={d.name} editing={h.editing} label={`Name of division ${d.number}`} multiline={false} onSave={(v) => h.saveDivision(d.id, { name: v })} />
           {d.nameIsDefault && <span className="tag ml-1.5 align-middle" title="The template's name — rename it if it does not fit">default name</span>}
         </h3>
-        <p className="text-[12.5px] leading-[18px]">
+        <p className="text-[12px] leading-[17px]" data-testid="org-division-head">
           <span className="font-semibold">Руководитель:</span>{" "}
           <InlineText value={d.headTitle} editing={h.editing} label={`Head title of division ${d.number}`} multiline={false} className="text-muted" onSave={(v) => h.saveDivision(d.id, { headTitle: v })} />
-          {d.headName && <span className="tag tag-ok ml-1">{d.headName}</span>}
+          {d.headName &&
+            (h.editing ? (
+              <span className="tag tag-ok ml-1">{d.headName}</span>
+            ) : (
+              <>
+                {d.headTitle ? " — " : ""}
+                <span className="font-semibold" title={d.headFullName ?? undefined} data-testid="org-head-name">
+                  {d.headName}
+                </span>
+              </>
+            ))}
+          {!d.headPersonId && h.editable && !h.editing && (
+            <>
+              {" "}
+              <AssignPopover what={`head of division ${deptLabel(d)}`} target="division" targetId={d.id} defaultRole={defaultOrgRole(d.headTitle || d.name)} h={h} />
+            </>
+          )}
         </p>
         {(d.reportsTo || h.editing) && (
-          <p className="rounded-[6px] bg-sunk px-2 py-1 text-[11.5px] text-muted">
+          <p className="rounded-[6px] bg-sunk px-2 py-0.5 text-[11px] text-muted">
             Подчинение:{" "}
             <InlineText value={d.reportsTo} editing={h.editing} label={`Подчинение of division ${d.number}`} multiline={false} onSave={(v) => h.saveDivision(d.id, { reportsTo: v })} />
           </p>
         )}
         {(d.ckp || h.editing) && (
-          <div className="rounded-[8px] bg-accent-soft px-2.5 py-2 text-[12.5px] leading-[18px]">
+          <div className="rounded-[8px] bg-accent-soft px-2 py-1.5 text-[12px] leading-[17px]">
             <span className="font-semibold">ЦКП:</span>{" "}
             <InlineText value={d.ckp} editing={h.editing} label={`ЦКП of division ${d.number}`} onSave={(v) => h.saveDivision(d.id, { ckp: v })} />
           </div>
         )}
       </header>
-      <div ref={setNodeRef} className="flex flex-col gap-2.5 border-t border-line p-2.5">
+      <div ref={setNodeRef} className="flex flex-col gap-2 border-t border-line p-2">
         <SortableContext items={d.departments.map((x) => `d:${x.id}`)} strategy={verticalListSortingStrategy}>
           {d.departments.map((dept, i) => (
             <DepartmentCard key={dept.id} dept={dept} index={i} count={d.departments.length} division={d} h={h} />
@@ -546,7 +688,7 @@ function DivisionColumn({ division: d, h, mobileHidden }: { division: OrgDivisio
               )}
             </div>
           ))}
-        {h.editable && <AddInline label="+ Отдел" placeholder={`Name of a new department in division ${d.number}`} onAdd={(name) => h.addDepartment(d.id, name)} />}
+        {h.editable && <AddInline label="+ Отдел" placeholder={`Name of a new department in division ${d.number}`} onStart={h.startEditing} onAdd={(name) => h.addDepartment(d.id, name)} />}
       </div>
     </section>
   );
@@ -564,7 +706,7 @@ function DepartmentCard({ dept, index, count, division, h }: { dept: OrgDepartme
     <article
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform), transition }}
-      className={`org-dept flex flex-col gap-1.5 rounded-[10px] border border-line p-2.5 ${isDragging ? "opacity-40" : ""}`}
+      className={`org-dept flex flex-col gap-1 rounded-[10px] border border-line p-2 ${isDragging ? "opacity-40" : ""}`}
       aria-label={`Department ${label}`}
       data-testid="org-department"
       data-number={dept.number}
@@ -575,8 +717,8 @@ function DepartmentCard({ dept, index, count, division, h }: { dept: OrgDepartme
             ⠿
           </button>
         )}
-        <span className="num w-6 shrink-0 text-[14px] font-bold leading-5 text-accent">{dept.number}</span>
-        <div className="min-w-0 flex-1 text-[14px] font-semibold leading-5">
+        <span className="num w-5 shrink-0 text-[13px] font-bold leading-[18px] text-accent">{dept.number}</span>
+        <div className="min-w-0 flex-1 text-[13px] font-semibold leading-[18px]">
           {h.editing ? (
             <InlineText value={dept.name} editing label={`Name of department ${dept.number}`} placeholder="Название отдела" multiline={false} onSave={(v) => h.saveDepartment(dept.id, { name: v })} />
           ) : (
@@ -629,20 +771,35 @@ function DepartmentCard({ dept, index, count, division, h }: { dept: OrgDepartme
         )}
       </div>
       {(dept.ckp || h.editing) && (
-        <p className="text-[12.5px] leading-[18px]">
+        <p className="text-[12px] leading-[17px]">
           <span className="font-semibold">ЦКП:</span>{" "}
           <InlineText value={dept.ckp} editing={h.editing} label={`ЦКП of department ${dept.number}`} onSave={(v) => h.saveDepartment(dept.id, { ckp: v })} />
         </p>
       )}
       {(dept.statistic || h.editing) && (
-        <p className="text-[12px] leading-[17px] text-muted">
+        <p className="text-[11.5px] leading-[16px] text-muted">
           Статистика:{" "}
           <InlineText value={dept.statistic} editing={h.editing} label={`Statistic of department ${dept.number}`} onSave={(v) => h.saveDepartment(dept.id, { statistic: v })} />
         </p>
       )}
-      {(dept.headName || dept.openTasks > 0) && (
-        <p className="flex flex-wrap gap-1 text-[11.5px]">
-          {dept.headName && <span className="tag tag-ok">{dept.headName}</span>}
+      {(dept.headName || dept.openTasks > 0 || (h.editable && !h.editing)) && (
+        <p className="flex flex-wrap items-center gap-1 text-[11.5px]" data-testid="org-department-head">
+          {dept.headName ? (
+            <span className="text-[11.5px]">
+              <span className="text-muted">Руководитель:</span>{" "}
+              <span className="font-semibold" title={dept.headFullName ?? undefined} data-testid="org-head-name">
+                {dept.headName}
+              </span>
+            </span>
+          ) : (
+            h.editable &&
+            !h.editing && (
+              <span className="text-[11.5px]">
+                <span className="text-muted">Руководитель:</span>{" "}
+                <AssignPopover what={`head of ${deptLabel(dept)}`} target="department" targetId={dept.id} defaultRole={defaultOrgRole(dept.name || deptLabel(dept))} h={h} />
+              </span>
+            )
+          )}
           {dept.openTasks > 0 && (
             <span className={`tag ${dept.overdueTasks ? "tag-risk" : ""}`}>
               {dept.openTasks} task{dept.openTasks === 1 ? "" : "s"}
@@ -669,7 +826,7 @@ function DepartmentCard({ dept, index, count, division, h }: { dept: OrgDepartme
             )}
           </div>
         ))}
-      {h.editable && <AddInline label="+ Функция" placeholder={`New function in department ${dept.number}`} onAdd={(text) => h.addFunction(dept.id, text)} />}
+      {h.editable && <AddInline label="+ Функция" placeholder={`New function in department ${dept.number}`} onStart={h.startEditing} onAdd={(text) => h.addFunction(dept.id, text)} />}
     </article>
   );
 }
@@ -684,7 +841,7 @@ function FunctionRow({ fn, index, dept, h }: { fn: OrgFunctionView; index: numbe
     <li
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform), transition }}
-      className={`flex items-start gap-1.5 rounded-[6px] bg-surface px-2 py-1.5 text-[12.5px] leading-[18px] ${isDragging ? "opacity-40" : ""}`}
+      className={`flex items-start gap-1.5 rounded-[6px] bg-surface px-1.5 py-1 text-[12px] leading-[17px] ${isDragging ? "opacity-40" : ""}`}
       data-testid="org-function"
       data-text={fn.text}
     >
@@ -699,8 +856,13 @@ function FunctionRow({ fn, index, dept, h }: { fn: OrgFunctionView; index: numbe
       )}
       <div className="min-w-0 flex-1">
         <InlineText value={fn.text} editing={h.editing} label={`Function text: ${fn.text}`} onSave={(v) => v && h.saveFunction(fn.id, { text: v })} />
-        {fn.responsibleName && <span className="mt-0.5 block text-[11px] text-muted">→ {fn.responsibleName}</span>}
+        {!fn.responsiblePersonId && h.editable && !h.editing && (
+          <span className="block">
+            <AssignPopover what={`responsible for ${fn.text}`} target="function" targetId={fn.id} defaultRole={defaultOrgRole(fn.text)} h={h} />
+          </span>
+        )}
       </div>
+      {fn.responsibleFullName && <Initials fullName={fn.responsibleFullName} />}
       {h.editing && (
         <ItemMenu label={`Actions for function ${fn.text}`}>
           {(close) => (

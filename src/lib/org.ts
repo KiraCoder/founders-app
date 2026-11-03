@@ -6,6 +6,7 @@
  * Pure (no DB, no clock). Org content is in Russian; the interface is in English.
  */
 import { z } from "zod";
+import { personCreateSchema } from "./people-schemas";
 
 /** Divisions are shown in this order (the model puts the administrative division 7 first). */
 export const DIVISION_DISPLAY_ORDER = [7, 1, 2, 3, 4, 5, 6] as const;
@@ -288,6 +289,39 @@ export const functionCreateSchema = z
     text: text(500).min(1, "A function needs a text"),
   })
   .strict();
+
+/** Where "+ New person" assigns the person it creates. */
+export const ORG_ASSIGN_TARGETS = ["division", "department", "function"] as const;
+export type OrgAssignTarget = (typeof ORG_ASSIGN_TARGETS)[number];
+
+/**
+ * "+ New person" on the org board: a person (same field rules as the People page) created,
+ * linked to the chart's company with `role` and assigned to a division / department head or
+ * a function in one step.
+ */
+export const orgNewPersonSchema = personCreateSchema
+  .pick({ fullName: true, shortName: true, phone: true, telegramHandle: true })
+  .extend({
+    target: z.enum(ORG_ASSIGN_TARGETS),
+    targetId: z.uuid(),
+    role: z.string().trim().min(1, "Role / title is required").max(120),
+  })
+  .strict();
+export type OrgNewPersonInput = z.input<typeof orgNewPersonSchema>;
+
+/** Default role of a new person: the department's or function's name (role field limit 120). */
+export function defaultOrgRole(text: string): string {
+  const t = text.trim();
+  return t.length > 120 ? `${t.slice(0, 119)}…` : t;
+}
+
+/** "Тест Курьеров" → "ТК"; "Elmurat" → "EL"; "" → "?". */
+export function personInitials(fullName: string): string {
+  const words = fullName.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "?";
+  if (words.length === 1) return words[0]!.slice(0, 2).toUpperCase();
+  return (words[0]![0]! + words[1]![0]!).toUpperCase();
+}
 
 /** Move a function to a department (same or another) at a position (0 = first; past the end = last). */
 export const functionMoveSchema = z.object({ functionId: z.uuid(), departmentId: z.uuid(), index: z.coerce.number().int().min(0).max(10_000) }).strict();

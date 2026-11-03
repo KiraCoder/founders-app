@@ -2,9 +2,14 @@
 
 import Link from "next/link";
 import { useEffect, useState, type ReactNode } from "react";
-import { deptLabel } from "@/lib/org";
+import type { OrgActionState } from "@/app/(app)/org/actions";
+import { defaultOrgRole, deptLabel, type OrgAssignTarget } from "@/lib/org";
 import type { OrgDepartmentView, OrgDivisionView } from "@/server/services/org";
-import type { LinkedMetric, PersonOption } from "./OrgBoard";
+import type { LinkedMetric } from "./OrgBoard";
+import { PersonPicker, type NewPersonData, type PersonOption } from "./PersonPicker";
+
+/** "+ New person" (founders): create, link to the company and assign to this target. */
+export type CreatePersonFor = (target: OrgAssignTarget, targetId: string, data: NewPersonData) => Promise<OrgActionState>;
 
 function Sheet({ title, onClose, children, testId }: { title: ReactNode; onClose: () => void; children: ReactNode; testId: string }) {
   useEffect(() => {
@@ -33,19 +38,6 @@ function Sheet({ title, onClose, children, testId }: { title: ReactNode; onClose
   );
 }
 
-function PersonSelect({ id, value, onChange, people, disabled, label }: { id: string; value: string; onChange: (v: string) => void; people: PersonOption[]; disabled?: boolean; label: string }) {
-  return (
-    <select id={id} aria-label={label} className="input" value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
-      <option value="">Nobody yet</option>
-      {people.map((p) => (
-        <option key={p.id} value={p.id}>
-          {p.name} · {p.role}
-        </option>
-      ))}
-    </select>
-  );
-}
-
 const TONE: Record<LinkedMetric["tone"], string> = { ok: "tag-ok", warn: "tag-warn", risk: "tag-risk" };
 
 /** Right-side panel of a department: head, ЦКП, statistic + linked number, functions with responsible people, tasks. */
@@ -61,6 +53,7 @@ export function DepartmentPanel({
   onSaveFunction,
   onAddFunction,
   onArchive,
+  onCreatePerson,
 }: {
   dept: OrgDepartmentView;
   companySlug: string;
@@ -73,6 +66,7 @@ export function DepartmentPanel({
   onSaveFunction: (id: string, patch: Record<string, string | null>) => void;
   onAddFunction: (text: string) => void;
   onArchive: () => void;
+  onCreatePerson?: CreatePersonFor;
 }) {
   const [form, setForm] = useState({
     name: dept.name,
@@ -117,7 +111,16 @@ export function DepartmentPanel({
           <label className="label" htmlFor="org-p-head">
             Head of the department
           </label>
-          <PersonSelect id="org-p-head" label="Head of the department" value={form.headPersonId} onChange={set("headPersonId")} people={people} disabled={!editable} />
+          <PersonPicker
+            id="org-p-head"
+            label="Head of the department"
+            value={form.headPersonId}
+            onChange={set("headPersonId")}
+            people={people}
+            disabled={!editable}
+            defaultRole={defaultOrgRole(dept.name || deptLabel(dept))}
+            onCreate={onCreatePerson ? (data) => onCreatePerson("department", dept.id, data) : undefined}
+          />
           <p className="mt-1 text-[11.5px] text-muted">People of this company (People page).</p>
         </div>
         <div>
@@ -189,13 +192,15 @@ export function DepartmentPanel({
           {dept.functions.map((f) => (
             <li key={f.id} className="rounded-[8px] border border-line p-2 text-[13px]">
               <p className="mb-1.5">{f.text}</p>
-              <PersonSelect
+              <PersonPicker
                 id={`org-fn-${f.id}`}
                 label={`Responsible for ${f.text}`}
                 value={f.responsiblePersonId ?? ""}
                 onChange={(v) => onSaveFunction(f.id, { responsiblePersonId: v || null })}
                 people={people}
                 disabled={!editable}
+                defaultRole={defaultOrgRole(f.text)}
+                onCreate={onCreatePerson ? (data) => onCreatePerson("function", f.id, data) : undefined}
               />
             </li>
           ))}
@@ -227,12 +232,14 @@ export function DivisionPanel({
   people,
   onClose,
   onSave,
+  onCreatePerson,
 }: {
   division: OrgDivisionView;
   editable: boolean;
   people: PersonOption[];
   onClose: () => void;
   onSave: (patch: Record<string, string | null>) => void;
+  onCreatePerson?: CreatePersonFor;
 }) {
   const original: Record<string, string> = { name: division.name, headTitle: division.headTitle, reportsTo: division.reportsTo, ckp: division.ckp, headPersonId: division.headPersonId ?? "" };
   const [form, setForm] = useState(original);
@@ -268,7 +275,16 @@ export function DivisionPanel({
           <label className="label" htmlFor="org-dv-head">
             Head of the division (person)
           </label>
-          <PersonSelect id="org-dv-head" label="Head of the division" value={form.headPersonId!} onChange={(v) => setForm((f) => ({ ...f, headPersonId: v }))} people={people} disabled={!editable} />
+          <PersonPicker
+            id="org-dv-head"
+            label="Head of the division"
+            value={form.headPersonId!}
+            onChange={(v) => setForm((f) => ({ ...f, headPersonId: v }))}
+            people={people}
+            disabled={!editable}
+            defaultRole={defaultOrgRole(division.headTitle || division.name || deptLabel(division))}
+            onCreate={onCreatePerson ? (data) => onCreatePerson("division", division.id, data) : undefined}
+          />
         </div>
         {field("reportsTo", "Подчинение")}
         {field("ckp", "ЦКП", 3)}

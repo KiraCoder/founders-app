@@ -114,6 +114,11 @@ function TaskRow({
                 <Icon name="folder" size={12} /> {task.project.name}
               </Link>
             )}
+            {task.orgDepartment && (
+              <span className="tag" title={`Department ${task.orgDepartment.number} ${task.orgDepartment.name} (org chart)`} data-testid="task-department">
+                {task.orgDepartment.number} {task.orgDepartment.name}
+              </span>
+            )}
             {task.assignee && <span>→ {task.assignee.name}</span>}
           </div>
         </div>

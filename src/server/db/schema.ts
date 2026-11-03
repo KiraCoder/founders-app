@@ -18,6 +18,7 @@ import {
   boolean,
   check,
   date,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -1080,7 +1081,11 @@ export const orgCharts = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [unique("org_charts_company_unit_uq").on(t.companyId, t.companyUnitId).nullsNotDistinct()],
+  (t) => [
+    unique("org_charts_company_unit_uq").on(t.companyId, t.companyUnitId).nullsNotDistinct(),
+    // Target of the composite foreign keys below (0020): a row's company is its chart's company.
+    unique("org_charts_id_company_uq").on(t.id, t.companyId),
+  ],
 );
 
 export const orgDivisions = pgTable(
@@ -1113,6 +1118,8 @@ export const orgDivisions = pgTable(
   (t) => [
     index("org_divisions_chart_idx").on(t.chartId),
     check("org_divisions_number_range", sql`${t.number} between 1 and 7`),
+    unique("org_divisions_id_chart_uq").on(t.id, t.chartId),
+    foreignKey({ name: "org_divisions_chart_company_fk", columns: [t.chartId, t.companyId], foreignColumns: [orgCharts.id, orgCharts.companyId] }),
   ],
 );
 
@@ -1149,6 +1156,11 @@ export const orgDepartments = pgTable(
     index("org_departments_chart_idx").on(t.chartId),
     index("org_departments_division_idx").on(t.divisionId),
     check("org_departments_number_range", sql`${t.number} between 1 and 99`),
+    /** A number is used by at most one live department of a chart (0020; archived ones keep theirs). */
+    uniqueIndex("org_departments_live_number_uq").on(t.chartId, t.number).where(sql`${t.archivedAt} is null`),
+    unique("org_departments_id_chart_uq").on(t.id, t.chartId),
+    foreignKey({ name: "org_departments_chart_company_fk", columns: [t.chartId, t.companyId], foreignColumns: [orgCharts.id, orgCharts.companyId] }),
+    foreignKey({ name: "org_departments_division_chart_fk", columns: [t.divisionId, t.chartId], foreignColumns: [orgDivisions.id, orgDivisions.chartId] }),
   ],
 );
 
@@ -1173,7 +1185,12 @@ export const orgFunctions = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index("org_functions_department_idx").on(t.departmentId), index("org_functions_chart_idx").on(t.chartId)],
+  (t) => [
+    index("org_functions_department_idx").on(t.departmentId),
+    index("org_functions_chart_idx").on(t.chartId),
+    foreignKey({ name: "org_functions_chart_company_fk", columns: [t.chartId, t.companyId], foreignColumns: [orgCharts.id, orgCharts.companyId] }),
+    foreignKey({ name: "org_functions_department_chart_fk", columns: [t.departmentId, t.chartId], foreignColumns: [orgDepartments.id, orgDepartments.chartId] }),
+  ],
 );
 
 /**
@@ -1209,7 +1226,10 @@ export const orgChangeLog = pgTable(
     /** Insert order (two changes can share created_at inside one request). */
     seq: bigint("seq", { mode: "number" }).generatedByDefaultAsIdentity(),
   },
-  (t) => [index("org_change_log_chart_idx").on(t.chartId, t.seq)],
+  (t) => [
+    index("org_change_log_chart_idx").on(t.chartId, t.seq),
+    foreignKey({ name: "org_change_log_chart_company_fk", columns: [t.chartId, t.companyId], foreignColumns: [orgCharts.id, orgCharts.companyId] }),
+  ],
 );
 
 export type OrgChart = typeof orgCharts.$inferSelect;

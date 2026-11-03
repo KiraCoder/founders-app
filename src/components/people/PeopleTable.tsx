@@ -2,6 +2,7 @@ import Link from "next/link";
 import { CompanyDot, Tag } from "@/components/ui";
 import { EMPLOYMENT_TYPE_LABELS, PAY_TYPE_LABELS } from "@/lib/people-schemas";
 import { formatMoney } from "@/lib/money";
+import type { OrgPosition } from "@/server/services/org";
 import type { PersonView } from "@/server/services/people";
 
 /**
@@ -13,11 +14,14 @@ export function PeopleTable({
   showSalary,
   showCompany = true,
   empty = "No people found.",
+  positions = {},
 }: {
   people: PersonView[];
   showSalary: boolean;
   showCompany?: boolean;
   empty?: string;
+  /** Org chart positions per person id (head of …, functions). */
+  positions?: Record<string, OrgPosition[]>;
 }) {
   if (people.length === 0) {
     return <div className="card px-4 py-6 text-center text-[13px] text-muted">{empty}</div>;
@@ -63,6 +67,19 @@ export function PeopleTable({
                     </li>
                   ))}
                 </ul>
+                {(positions[p.id]?.length ?? 0) > 0 && (
+                  <ul className="mt-1 space-y-0.5 text-[12px] text-muted" data-testid="person-org-positions-short">
+                    {positions[p.id]!.slice(0, 3).map((o, i) => (
+                      <li key={i}>
+                        <span aria-hidden="true">▸ </span>
+                        {o.kind === "division_head" ? `Head of division ${o.division}` : o.kind === "department_head" ? `Head of ${o.department}` : `${o.department}: ${o.function}`}
+                        {showCompany ? ` · ${o.companyName}` : ""}
+                        {o.unitName ? ` · ${o.unitName}` : ""}
+                      </li>
+                    ))}
+                    {positions[p.id]!.length > 3 && <li>+{positions[p.id]!.length - 3} more org positions</li>}
+                  </ul>
+                )}
               </td>
               <td className="px-3 py-2.5 text-[12px] text-muted">
                 {p.phone && <div className="num whitespace-nowrap">{p.phone}</div>}

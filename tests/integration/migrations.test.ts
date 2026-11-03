@@ -753,3 +753,45 @@ describe("0017 org structure on existing data", () => {
     await expect(client.query(`delete from org_departments where id = '${dep}'`)).rejects.toThrow();
   });
 });
+
+describe("0020 org integrity on existing data", () => {
+  it("renumbers duplicate live department numbers (logged), then enforces unique numbers and same-chart / same-company rows", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0020") });
+    const C1 = "33333333-3333-4333-8333-333333333331";
+    const C2 = "33333333-3333-4333-8333-333333333332";
+    const CH = "88888888-8888-4888-8888-888888888881";
+    const CH2 = "88888888-8888-4888-8888-888888888882";
+    const DV = "99999999-9999-4999-8999-999999999991";
+    const DV2 = "99999999-9999-4999-8999-999999999992";
+    await client.exec(`
+      insert into companies (id, slug, name) values ('${C1}', 'kiwi-go', 'Kiwi Go'), ('${C2}', 'jobutify', 'Jobutify');
+      insert into org_charts (id, company_id, template_key) values ('${CH}', '${C1}', 't'), ('${CH2}', '${C2}', 't');
+      insert into org_divisions (id, chart_id, company_id, number, name) values ('${DV}', '${CH}', '${C1}', 7, 'Админ'), ('${DV2}', '${CH2}', '${C2}', 7, 'Админ');
+      insert into org_departments (id, chart_id, company_id, division_id, number, name, sort) values
+        ('a1111111-1111-4111-8111-111111111111', '${CH}', '${C1}', '${DV}', 22, 'Первый', 0),
+        ('a2222222-2222-4222-8222-222222222222', '${CH}', '${C1}', '${DV}', 22, 'Второй', 1),
+        ('a3333333-3333-4333-8333-333333333333', '${CH}', '${C1}', '${DV}', 23, 'Третий', 2),
+        ('a4444444-4444-4444-8444-444444444444', '${CH}', '${C1}', '${DV}', 23, 'Архивный', 3);
+      update org_departments set archived_at = now() where name = 'Архивный';
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rows = await client.query<{ name: string; number: number }>("select name, number from org_departments order by sort");
+    expect(rows.rows).toEqual([
+      { name: "Первый", number: 22 },
+      { name: "Второй", number: 24 },
+      { name: "Третий", number: 23 },
+      { name: "Архивный", number: 23 },
+    ]);
+    const log = await client.query<{ action: string; summary: string }>("select action, summary from org_change_log");
+    expect(log.rows).toEqual([{ action: "renumber", summary: "Renumbered duplicate department 22 Второй to 24" }]);
+    await expect(client.query(`update org_departments set number = 22 where name = 'Третий'`)).rejects.toThrow();
+    // A department of chart 1 in chart 2's division, or with another company: refused.
+    await expect(
+      client.query(`insert into org_departments (chart_id, company_id, division_id, number, name) values ('${CH}', '${C1}', '${DV2}', 30, 'x')`),
+    ).rejects.toThrow();
+    await expect(
+      client.query(`insert into org_departments (chart_id, company_id, division_id, number, name) values ('${CH}', '${C2}', '${DV}', 31, 'x')`),
+    ).rejects.toThrow();
+  });
+});

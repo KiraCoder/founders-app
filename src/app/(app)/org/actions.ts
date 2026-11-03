@@ -1,13 +1,14 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import type { DepartmentPatch, DivisionPatch, FunctionPatch } from "@/lib/org";
+import type { DepartmentPatch, DivisionPatch, FunctionPatch, OrgNewPersonInput } from "@/lib/org";
 import { getPageContext } from "@/server/context";
 import { toServiceError } from "@/server/services/errors";
 import {
   applyVysotskyTemplate,
   createDepartment,
   createFunction,
+  createPersonAndAssign,
   moveDepartment,
   moveFunction,
   setArchived,
@@ -15,87 +16,106 @@ import {
   updateDepartment,
   updateDivision,
   updateFunction,
+  type OrgWriteOpts,
 } from "@/server/services/org";
 
 export interface OrgActionState {
   ok: boolean;
   error?: string;
+  /** The chart changed meanwhile (optimistic concurrency): the board refreshes. */
+  conflict?: boolean;
   fieldErrors?: Record<string, string[]>;
   message?: string;
-  /** Id of a created row (function / department). */
+  /** Id of a created row (function / department / person). */
   id?: string;
+  /** The chart's version after this change (the board sends it with its next change). */
+  version?: string;
 }
 
-/** Every org change goes through the service (access, company isolation, change log). */
-async function run(fn: () => Promise<{ message?: string; id?: string } | void>): Promise<OrgActionState> {
+/**
+ * Every org change goes through the service (access, company isolation, change log). The
+ * board sends the chart `version` it shows; a change made meanwhile is refused (`conflict`).
+ */
+async function run(version: string | null | undefined, fn: (opts: OrgWriteOpts) => Promise<{ message?: string; id?: string } | void>): Promise<OrgActionState> {
+  const opts: OrgWriteOpts = { expectedVersion: typeof version === "string" ? version : null, result: {} };
   try {
-    const res = await fn();
+    const res = await fn(opts);
     revalidatePath("/org");
     revalidatePath("/companies/[slug]", "page");
-    return { ok: true, message: res?.message, id: res?.id };
+    revalidatePath("/people", "layout");
+    return { ok: true, message: res?.message, id: res?.id, version: opts.result?.version };
   } catch (err) {
     const se = toServiceError(err);
     if (!se) throw err;
-    return { ok: false, error: se.message, fieldErrors: se.fields };
+    return { ok: false, error: se.message, fieldErrors: se.fields, conflict: se.code === "conflict" };
   }
 }
 
 export async function applyTemplateAction(companyId: string, companyUnitId: string | null): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(async () => {
+  return run(null, async () => {
     await applyVysotskyTemplate(ctx, { companyId, companyUnitId });
     return { message: "Vysotsky template applied — rename and fill in the departments." };
   });
 }
 
-export async function updateDivisionAction(id: string, patch: DivisionPatch): Promise<OrgActionState> {
+export async function updateDivisionAction(id: string, patch: DivisionPatch, version?: string): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(() => updateDivision(ctx, id, patch));
+  return run(version, (o) => updateDivision(ctx, id, patch, o));
 }
 
-export async function updateDepartmentAction(id: string, patch: DepartmentPatch): Promise<OrgActionState> {
+export async function updateDepartmentAction(id: string, patch: DepartmentPatch, version?: string): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(() => updateDepartment(ctx, id, patch));
+  return run(version, (o) => updateDepartment(ctx, id, patch, o));
 }
 
-export async function updateFunctionAction(id: string, patch: FunctionPatch): Promise<OrgActionState> {
+export async function updateFunctionAction(id: string, patch: FunctionPatch, version?: string): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(() => updateFunction(ctx, id, patch));
+  return run(version, (o) => updateFunction(ctx, id, patch, o));
 }
 
-export async function createFunctionAction(departmentId: string, text: string): Promise<OrgActionState> {
+export async function createFunctionAction(departmentId: string, text: string, version?: string): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(async () => ({ id: await createFunction(ctx, { departmentId, text }) }));
+  return run(version, async (o) => ({ id: await createFunction(ctx, { departmentId, text }, o) }));
 }
 
-export async function createDepartmentAction(divisionId: string, name: string): Promise<OrgActionState> {
+export async function createDepartmentAction(divisionId: string, name: string, version?: string): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(async () => ({ id: await createDepartment(ctx, { divisionId, name }) }));
+  return run(version, async (o) => ({ id: await createDepartment(ctx, { divisionId, name }, o) }));
 }
 
-export async function moveFunctionAction(functionId: string, departmentId: string, index: number): Promise<OrgActionState> {
+export async function moveFunctionAction(functionId: string, departmentId: string, index: number, version?: string): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(() => moveFunction(ctx, { functionId, departmentId, index }));
+  return run(version, (o) => moveFunction(ctx, { functionId, departmentId, index }, o));
 }
 
-export async function moveDepartmentAction(departmentId: string, divisionId: string, index: number): Promise<OrgActionState> {
+export async function moveDepartmentAction(departmentId: string, divisionId: string, index: number, version?: string): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(() => moveDepartment(ctx, { departmentId, divisionId, index }));
+  return run(version, (o) => moveDepartment(ctx, { departmentId, divisionId, index }, o));
 }
 
-export async function setArchivedAction(entity: "department" | "function", id: string, archived: boolean): Promise<OrgActionState> {
+export async function setArchivedAction(entity: "department" | "function", id: string, archived: boolean, version?: string): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(async () => {
+  return run(version, async (o) => {
     if (entity !== "department" && entity !== "function") throw new Error("bad entity");
-    await setArchived(ctx, entity, id, archived);
+    await setArchived(ctx, entity, id, archived, o);
     return { message: archived ? "Archived — “Show archived” brings it back." : "Restored." };
   });
 }
 
-export async function undoAction(chartId: string): Promise<OrgActionState> {
+/** "+ New person" on the board: create, link to the company and assign in one step (founders only). */
+export async function createPersonAndAssignAction(input: OrgNewPersonInput, version?: string): Promise<OrgActionState> {
   const ctx = await getPageContext();
-  return run(async () => {
-    const what = await undoLastChange(ctx, chartId);
+  return run(version, async (o) => {
+    const { personId } = await createPersonAndAssign(ctx, input, o);
+    return { id: personId, message: `${input.fullName} added to People and assigned. Undo takes back the assignment (the person stays).` };
+  });
+}
+
+export async function undoAction(chartId: string, version?: string): Promise<OrgActionState> {
+  const ctx = await getPageContext();
+  return run(version, async (o) => {
+    const what = await undoLastChange(ctx, chartId, o);
     return { message: what ? `Undone: ${what}` : "Nothing to undo." };
   });
 }

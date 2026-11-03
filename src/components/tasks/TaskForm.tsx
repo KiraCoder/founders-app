@@ -56,7 +56,14 @@ export function TaskForm({
   const people = companyId
     ? assigneePeopleOptions(options.peopleByCompany[companyId] ?? [], task?.assignee, { taskCompanyId: task?.company?.id, companyId })
     : [];
-  const departments = companyId ? (options.departmentsByCompany?.[companyId] ?? []) : [];
+  const liveDepartments = companyId ? (options.departmentsByCompany?.[companyId] ?? []) : [];
+  // The task's current department may be archived (not in the live list): keep it as an
+  // option, or the controlled select would show "None" and saving would clear the link.
+  const current = task?.orgDepartment && task.company?.id === companyId ? task.orgDepartment : null;
+  const departments =
+    current && !liveDepartments.some((d) => d.id === current.id)
+      ? [...liveDepartments, { id: current.id, label: `${current.number} ${current.name} (archived)` }]
+      : liveDepartments;
   const err = (f: string) => state.fieldErrors?.[f]?.[0];
 
   return (

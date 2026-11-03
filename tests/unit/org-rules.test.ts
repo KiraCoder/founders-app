@@ -145,3 +145,16 @@ describe("the weekly summary line", () => {
     expect(orgExpertSummaryLine(many, "/org")).toMatch(/; \+2 more companies — \/org$/);
   });
 });
+
+describe("people on the board", () => {
+  it("initials: first letters of the first two words; one word → two letters", async () => {
+    const { personInitials, defaultOrgRole, orgNewPersonSchema } = await import("@/lib/org");
+    expect(personInitials("Тест Курьеров")).toBe("ТК");
+    expect(personInitials("  айгуль  маршрутова  кызы ")).toBe("АМ");
+    expect(personInitials("Elmurat")).toBe("EL");
+    expect(personInitials("")).toBe("?");
+    expect(defaultOrgRole("x".repeat(200))).toHaveLength(120);
+    expect(orgNewPersonSchema.safeParse({ target: "function", targetId: "00000000-0000-4000-8000-000000000000", fullName: "A", role: "r", telegramHandle: "@ab_c" }).success).toBe(true);
+    expect(orgNewPersonSchema.safeParse({ target: "chart", targetId: "00000000-0000-4000-8000-000000000000", fullName: "A", role: "r" }).success).toBe(false);
+  });
+});

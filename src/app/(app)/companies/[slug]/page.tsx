@@ -28,6 +28,7 @@ import { today } from "@/server/services/context";
 import { ServiceError } from "@/server/services/errors";
 import { getTaskFormOptions } from "@/server/services/options";
 import { companyHeadcount, listPeople } from "@/server/services/people";
+import { orgPositionsForPeople } from "@/server/services/org";
 import { canViewSalaries } from "@/server/services/salaries";
 import { listProjects } from "@/server/services/projects";
 import { listTasks } from "@/server/services/tasks";
@@ -279,6 +280,9 @@ async function ProjectsTab({ ctx, companyId }: { ctx: Awaited<ReturnType<typeof 
 async function PeopleTab({ ctx, companyId, slug }: { ctx: Awaited<ReturnType<typeof getPageContext>>; companyId: string; slug: string }) {
   const [showSalary, headcount] = await Promise.all([canViewSalaries(ctx), companyHeadcount(ctx, companyId)]);
   const people = await listPeople(ctx, { companyId }, { salaryScope: `company:${slug}` });
+  const allPositions = await orgPositionsForPeople(ctx, people.map((p) => p.id));
+  // On a company's tab: only this company's positions.
+  const positions = Object.fromEntries(Object.entries(allPositions).map(([id, list]) => [id, list.filter((o) => o.companySlug === slug)]));
   return (
     <>
       <Section
@@ -301,7 +305,7 @@ async function PeopleTab({ ctx, companyId, slug }: { ctx: Awaited<ReturnType<typ
         <p className="mt-2 text-[12px] text-muted">Active people; founders are not counted.</p>
       </Section>
       <Section title="People">
-        <PeopleTable people={people} showSalary={showSalary} showCompany={false} empty="No active people in this company." />
+        <PeopleTable people={people} showSalary={showSalary} showCompany={false} positions={positions} empty="No active people in this company." />
         <p className="mt-2 text-[12px] text-muted">
           <Link href={`/people?companyId=${companyId}&status=left`} className="hover:underline">
             People who left
