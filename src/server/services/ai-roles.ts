@@ -1046,7 +1046,7 @@ export async function buildReportReadyMessage(ctx: ServiceContext, runId: string
 export async function reportParkedLine(ctx: ServiceContext, runId: string): Promise<string | null> {
   const run = await getRun(ctx, runId).catch(() => null);
   if (!run) return null;
-  return `Report ready: ${run.hire.roleName} · ${run.hire.companyName} · ${run.periodLabel} (${run.summary})`;
+  return `Report ready: ${run.hire.roleName} · ${run.hire.companyName} · ${run.periodLabel} (${run.summary}) — ${appUrl(`/ai-roles/runs/${run.id}`)}`;
 }
 
 // ---------------------------------------------------------------------------

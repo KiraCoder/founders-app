@@ -474,12 +474,19 @@ describe("report-ready push respects budget, quiet hours and not linked", () => 
     await planTick(tt.handle.db, bishkek("2026-11-03", "08:30"));
     await dispatch(tt.handle.db, bishkek("2026-11-03", "08:30"), { registry: reg, clock: () => new Date() });
     const morning = out.find((s) => s.message.title.startsWith("Good morning"))!.message;
-    expect(sectionLines(morning, "Parked reminders")).toEqual(["Report ready: Financial Analyst · Alura Brand · October 2026 (No findings)"]);
+    expect(sectionLines(morning, "Parked reminders")).toEqual([expect.stringMatching(/^Report ready: Financial Analyst · Alura Brand · October 2026 \(No findings\) — \/ai-roles\/runs\/[0-9a-f-]+$/)]);
     // Talant links: his push goes out once.
     const { code } = await createLinkCode(tt.handle.db, tt.userIds.talant, bishkek("2026-11-03", "09:00"));
     await consumeLinkCode(tt.handle.db, code, { chatId: "2", telegramUserId: "2" }, bishkek("2026-11-03", "09:00"));
     await dispatch(tt.handle.db, bishkek("2026-11-03", "09:05"), { registry: reg, clock: () => new Date() });
     await dispatch(tt.handle.db, bishkek("2026-11-03", "09:35"), { registry: reg, clock: () => new Date() });
+    // His morning summary (held until he linked) goes out in the same run, so the report is
+    // folded into it instead of arriving as a second message (whole-app review #7).
+    expect(out.filter((s) => s.userId === tt.userIds.talant).map((s) => s.message.title)).toEqual(["Good morning, Talant"]);
+    expect(sectionLines(out.find((s) => s.userId === tt.userIds.talant)!.message, "Parked reminders")).toEqual([expect.stringMatching(/^Report ready: Financial Analyst/)]);
+    // Later the same day (no summary waiting) a report push goes out on its own as before.
+    await tt.handle.db.update(notificationsOutbox).set({ status: "pending", bundledIntoId: null, parkedAt: null, lastError: null, sentAt: null }).where(and(eq(notificationsOutbox.userId, tt.userIds.talant), eq(notificationsOutbox.kind, "ai_report_ready")));
+    await dispatch(tt.handle.db, bishkek("2026-11-03", "11:00"), { registry: reg, clock: () => new Date() });
     expect(out.filter((s) => s.userId === tt.userIds.talant && s.message.title === "Financial Analyst: report ready")).toHaveLength(1);
     expect(out.filter((s) => s.userId === tt.userIds.nuraaly && s.message.title === "Financial Analyst: report ready")).toHaveLength(0);
   });

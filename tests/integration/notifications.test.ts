@@ -230,9 +230,18 @@ describe("quiet hours", () => {
     expect(sent[0]!.message.title).toBe("Urgent");
     expect((await outbox(t.userIds.nuraaly)).find((r) => r.dedupeKey === "n1")?.status).toBe("pending");
 
-    // After quiet hours the normal item is sent.
+    // After quiet hours, before the 08:30 summary, the normal item is folded into the summary
+    // instead of being pushed on its own (whole-app review #7).
     const morning = at("2026-11-03T02:05:00Z");
-    expect((await dispatch(db, morning, { registry })).sent).toBe(1);
+    expect((await dispatch(db, morning, { registry })).sent).toBe(0);
+    expect((await outbox(t.userIds.nuraaly)).find((r) => r.dedupeKey === "n1")).toMatchObject({ status: "parked", lastError: "folded_into_summary" });
+    const summaryAt = at("2026-11-03T02:30:00Z");
+    await planTick(db, summaryAt);
+    const before = sent.length;
+    await dispatch(db, summaryAt, { registry });
+    const mine = sent.slice(before).filter((s) => s.userId === t.userIds.nuraaly);
+    expect(mine.map((s) => s.message.title)).toEqual(["Good morning, Nuraaly"]);
+    expect(text(mine[0]!.message)).toContain("Night task");
   });
 });
 
@@ -574,5 +583,65 @@ describe("Telegram buttons", () => {
 describe("dev channel", () => {
   it("delivers without leaving the server", async () => {
     expect((await new DevChannel().send({ userId: t.userIds.nuraaly })).ok).toBe(true);
+  });
+});
+
+describe("pushes just before the morning summary are folded into it (whole-app review #7)", () => {
+  const PREFS = {
+    morningSummaryTime: "08:30",
+    eveningCheckEnabled: false,
+    eveningCheckTime: "19:00",
+    quietStart: "21:00",
+    quietEnd: "05:00",
+    maxOtherPerDay: 3,
+    urgentAtNight: false,
+  };
+  /** Bishkek local time on 3 Nov. */
+  const local = (hm: string) => new Date(`2026-11-03T${hm}:00+06:00`);
+
+  it("folds non-urgent pushes from quiet-hours end until the summary; urgent ones and later pushes go on their own", async () => {
+    const db = t.handle.db;
+    await updateMyPreferences(t.ctx("nuraaly"), PREFS);
+    const a = await overdueTask("nuraaly", "Folded at 06:30", "2026-11-25");
+    const b = await overdueTask("nuraaly", "Folded at 08:00", "2026-11-25");
+    const u = await overdueTask("nuraaly", "Urgent at 08:00", "2026-11-05", { priority: "urgent" });
+    const late = await overdueTask("nuraaly", "After the summary", "2026-11-05");
+    await enqueue(db, { userId: t.userIds.nuraaly, kind: "task_reminder", taskId: a.id, scheduledFor: local("06:30"), dedupeKey: "f1" });
+    await enqueue(db, { userId: t.userIds.nuraaly, kind: "task_reminder", taskId: b.id, scheduledFor: local("08:00"), dedupeKey: "f2" });
+    await enqueue(db, { userId: t.userIds.nuraaly, kind: "task_reminder", taskId: u.id, scheduledFor: local("08:00"), dedupeKey: "f3", priority: "urgent" });
+    await enqueue(db, { userId: t.userIds.nuraaly, kind: "task_reminder", taskId: late.id, scheduledFor: local("10:00"), dedupeKey: "f4" });
+    const { sent, registry } = recordingRegistry();
+    const mine = () => sent.filter((s) => s.userId === t.userIds.nuraaly).map((s) => s.message.title);
+
+    await dispatch(db, local("06:30"), { registry, userIds: [t.userIds.nuraaly] });
+    await dispatch(db, local("08:00"), { registry, userIds: [t.userIds.nuraaly] });
+    expect(mine()).toEqual(["Reminder"]); // only the urgent one
+    const rows = await outbox(t.userIds.nuraaly);
+    for (const k of ["f1", "f2"]) expect(rows.find((r) => r.dedupeKey === k)).toMatchObject({ status: "parked", lastError: "folded_into_summary" });
+
+    await planTick(db, local("08:30"), { userIds: [t.userIds.nuraaly] });
+    await dispatch(db, local("08:30"), { registry, userIds: [t.userIds.nuraaly] });
+    const summary = sent.filter((s) => s.userId === t.userIds.nuraaly).at(-1)!.message;
+    expect(summary.title).toBe("Good morning, Nuraaly");
+    expect(text(summary)).toContain("Reminder: Folded at 06:30");
+    expect(text(summary)).toContain("Reminder: Folded at 08:00");
+    const summaryRow = (await outbox(t.userIds.nuraaly)).find((r) => r.dedupeKey === "morning:2026-11-03")!;
+    expect((await outbox(t.userIds.nuraaly)).filter((r) => r.bundledIntoId === summaryRow.id).map((r) => r.dedupeKey).sort()).toEqual(["f1", "f2"]);
+
+    // After the summary, pushes go out on their own (budget applies as before).
+    await dispatch(db, local("10:00"), { registry, userIds: [t.userIds.nuraaly] });
+    expect(mine()).toEqual(["Reminder", "Good morning, Nuraaly", "Reminder"]);
+  });
+
+  it("a report-ready push 30 minutes before the summary becomes a summary line with the link", async () => {
+    const db = t.handle.db;
+    await updateMyPreferences(t.ctx("nuraaly"), { ...PREFS, quietEnd: "08:00" });
+    await planTick(db, local("08:00"), { userIds: [t.userIds.nuraaly] });
+    // An unknown run: the dispatcher folds it first; the summary then drops it (report gone).
+    await enqueue(db, { userId: t.userIds.nuraaly, kind: "ai_report_ready", scheduledFor: local("08:00"), dedupeKey: "rep", payload: { runId: "00000000-0000-4000-8000-000000000000" } });
+    const { sent, registry } = recordingRegistry();
+    await dispatch(db, local("08:00"), { registry, userIds: [t.userIds.nuraaly] });
+    expect(sent).toHaveLength(0);
+    expect((await outbox(t.userIds.nuraaly)).find((r) => r.dedupeKey === "rep")).toMatchObject({ status: "parked", lastError: "folded_into_summary" });
   });
 });

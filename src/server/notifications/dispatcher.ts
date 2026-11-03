@@ -119,6 +119,36 @@ function budgetFilter(cls: Exclude<BudgetClass, "urgent">, item: OutboxItem): SQ
   )!;
 }
 
+/** A non-urgent push due this close before the morning summary is folded into it. */
+export const FOLD_BEFORE_SUMMARY_MINUTES = 60;
+
+/**
+ * Should this non-urgent push wait for today's morning summary instead of arriving on its
+ * own just before it? Yes when today's summary has not gone out yet and now is within
+ * FOLD_BEFORE_SUMMARY_MINUTES before it, or anywhere between the end of quiet hours and the
+ * summary (everything held overnight lands in the summary). Also in the same run as the
+ * summary: once it is due and still waiting (a tick a little late), for up to the same window
+ * after its time.
+ */
+async function shouldFoldIntoSummary(db: Db, item: OutboxItem, now: Date, tz: string, prefs: Preferences): Promise<boolean> {
+  if (budgetClass(item) !== "normal") return false;
+  const today = todayInTimeZone(now, tz);
+  const summaryAt = zonedTimeToUtc(today, prefs.morningSummaryTime, tz).getTime();
+  const window = FOLD_BEFORE_SUMMARY_MINUTES * 60_000;
+  let foldFrom = summaryAt - window;
+  const quietEnd = zonedTimeToUtc(today, prefs.quietEnd, tz).getTime();
+  if (quietEnd <= summaryAt) foldFrom = Math.min(foldFrom, quietEnd);
+  const t = now.getTime();
+  if (t < foldFrom || t >= summaryAt + window) return false;
+  const [summary] = await db
+    .select({ status: notificationsOutbox.status })
+    .from(notificationsOutbox)
+    .where(and(eq(notificationsOutbox.userId, item.userId), eq(notificationsOutbox.dedupeKey, `morning:${today}`)));
+  if (t < summaryAt) return !summary || ["pending", "sending", "not_linked"].includes(summary.status);
+  // Due now: fold only if it is still waiting and goes out in this run (it is claimable).
+  return !!summary && (summary.status === "pending" || summary.status === "sending");
+}
+
 /**
  * Parked items not yet listed in a summary, re-checked and re-rendered from the tasks'
  * CURRENT state. Items whose task is closed, gone, or no longer due/overdue (deadline
@@ -381,6 +411,14 @@ async function processItem(
   if (isWithinWindow(now, prefs.quietStart, prefs.quietEnd, tz) && !(isUrgentItem(item) && prefs.urgentAtNight)) {
     await finish({ status: "pending", nextAttemptAt: windowEndAfter(now, prefs.quietStart, prefs.quietEnd, tz) });
     report.held++;
+    return;
+  }
+
+  // Just before the morning summary (or held overnight until it): no separate push, the
+  // summary lists it (as a parked line, no budget used).
+  if (await shouldFoldIntoSummary(db, item, now, tz, prefs)) {
+    await finish({ status: "parked", parkedAt: now, nextAttemptAt: null, lastError: "folded_into_summary" });
+    report.parked++;
     return;
   }
 
