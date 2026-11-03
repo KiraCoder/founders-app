@@ -10,7 +10,7 @@ import { connectDb, type DbHandle } from "@/server/db/connect";
 import { runMigrations } from "@/server/db/migrate";
 import { DEV_PASSWORD_DEFAULT } from "@/server/db/seed";
 import { runDeploySeed, seedOnBuildDecision } from "@/server/db/seed-deploy";
-import { companies, salaryViewers, tasks, users } from "@/server/db/schema";
+import { companies, salaryAccessLog, salaryViewers, tasks, users } from "@/server/db/schema";
 
 const SUPABASE = "postgresql://postgres.abc:pw@aws-0-eu-central-1.pooler.supabase.com:6543/postgres";
 
@@ -76,6 +76,12 @@ describe("runDeploySeed", () => {
     expect(founders.map((f) => f.email).sort()).toEqual(["nuraaly@founders.local", "talant@founders.local"]);
     expect(await bcrypt.compare("a-private-pass-123", founders[0]!.passwordHash!)).toBe(true);
     expect(await h.db.select().from(salaryViewers)).toHaveLength(2);
+    // Audit: the system's grant is logged and labelled (deploy review #5).
+    const grants = await h.db.select().from(salaryAccessLog);
+    expect(grants.map((g) => [g.action, g.scope, g.actorUserId])).toEqual([
+      ["grant_viewer", "system:seed", null],
+      ["grant_viewer", "system:seed", null],
+    ]);
     expect(await h.db.select().from(tasks).where(like(tasks.title, "[sample]%"))).toHaveLength(0);
 
     // A later deploy changes nothing: not the password, not a changed email (no re-created founder).

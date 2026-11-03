@@ -24,6 +24,7 @@ import {
   people,
   personCompanies,
   projects,
+  salaryAccessLog,
   salaryViewers,
   sessions,
   tasks,
@@ -172,10 +173,23 @@ async function seedInTransaction(db: Db, hash: string, options: SeedOptions): Pr
   // Only when nobody has access yet, so a choice made in Settings → Access is kept.
   const viewers = await db.select({ userId: salaryViewers.userId }).from(salaryViewers).limit(1);
   if (viewers.length === 0) {
-    await db
+    const granted = await db
       .insert(salaryViewers)
       .values([{ userId: userIds.nuraaly }, { userId: userIds.talant }])
-      .onConflictDoNothing();
+      .onConflictDoNothing()
+      .returning({ userId: salaryViewers.userId });
+    // Audit: the system granted it (no person did), clearly labelled (deploy review #5).
+    if (granted.length > 0) {
+      await db.insert(salaryAccessLog).values(
+        granted.map((g) => ({
+          actorUserId: null,
+          action: "grant_viewer",
+          scope: "system:seed",
+          targetUserId: g.userId,
+          details: { by: "system", source: "seed", note: "Salary access was granted by the system (the founders' decision: both founders see salaries), not by a person in Settings." },
+        })),
+      );
+    }
   }
 
   // --- Companies & units -----------------------------------------------------

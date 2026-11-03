@@ -222,14 +222,16 @@ describe("salary audit log", () => {
     expect(await isSalaryViewer(n)).toBe(true);
 
     const log = await listSalaryAccessLog(n);
-    const toggles = log.filter((l) => l.action === "grant_viewer" || l.action === "revoke_viewer");
+    // The seed's own grants are logged as the system (scope system:seed); here only Settings toggles.
+    expect(log.filter((l) => l.scope === "system:seed").every((l) => l.actor === "System")).toBe(true);
+    const toggles = log.filter((l) => (l.action === "grant_viewer" || l.action === "revoke_viewer") && l.scope === "settings");
     expect(toggles.map((l) => [l.action, l.actor, l.targetName])).toEqual([
       ["revoke_viewer", "Talant", "Talant"],
       ["grant_viewer", "Nuraaly", "Talant"],
     ]);
     // Granting twice does not add a second log row.
     await setSalaryViewer(n, t.userIds.nuraaly, true);
-    expect((await listSalaryAccessLog(n)).filter((l) => l.action === "grant_viewer")).toHaveLength(1);
+    expect((await listSalaryAccessLog(n)).filter((l) => l.action === "grant_viewer" && l.scope === "settings")).toHaveLength(1);
   });
 });
 

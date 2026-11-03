@@ -455,7 +455,9 @@ Search ignores case and treats ё and е as the same letter.
   preview (the key is not even sent), and any salary change is refused (403).
 - **Audit:** `salary_access_log` records every change (who, which person, when), every
   grant/revoke of access, and one row per page/API view that showed salaries (not per row).
-  Viewers see the latest entries under Settings → Access.
+  Viewers see the latest entries under Settings → Access. Access granted by the system (the
+  seed, migration 0016) shows actor **System** (scope `system:seed` / `system:migration`;
+  migration 0018 added the rows missing for grants made before this was logged).
 
 **Import from Excel / CSV** (`/people/import`):
 

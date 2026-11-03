@@ -275,6 +275,8 @@ export async function listSalaryAccessLog(ctx: ServiceContext, limit = 50): Prom
   );
   return rows.map(({ targetUserId, ...r }) => ({
     ...r,
+    // Grants made by a migration or the seed have no person behind them: say so.
+    actor: r.actor ?? (r.scope.startsWith("system:") ? "System" : null),
     at: r.at.toISOString(),
     targetName: targetUserId ? (names.get(targetUserId) ?? null) : null,
   }));

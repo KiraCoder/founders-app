@@ -634,6 +634,38 @@ describe("0016 the founders' decisions on existing data", () => {
   });
 });
 
+describe("0018 audit rows for system salary grants on existing data", () => {
+  it("adds one labelled grant_viewer row per viewer granted without a person and without a log row; idempotent", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0018") });
+    const STAFF = "77777777-7777-4777-8777-777777777777";
+    await client.exec(`
+      insert into users (id, email, name, short_name, role) values
+        ('${NURAALY}', 'nuraaly@founders.local', 'Nuraaly', 'Nuraaly', 'founder'),
+        ('${TALANT}', 'talant@founders.local', 'Talant', 'Talant', 'founder'),
+        ('${STAFF}', 'staff@x', 'Staff', 'Staff', 'staff');
+      -- Nuraaly: granted earlier and logged; Talant: granted by 0016 (no log row); Staff: granted by Nuraaly in Settings, logged.
+      insert into salary_viewers (user_id, granted_by, created_at) values
+        ('${NURAALY}', null, '2026-10-01T00:00:00Z'), ('${TALANT}', null, '2026-11-02T00:00:00Z'), ('${STAFF}', '${NURAALY}', '2026-11-03T00:00:00Z');
+      insert into salary_access_log (actor_user_id, action, scope, target_user_id) values
+        (null, 'grant_viewer', 'seed', '${NURAALY}'), ('${NURAALY}', 'grant_viewer', 'settings', '${STAFF}'),
+        ('${NURAALY}', 'view', 'people_list', null);
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rows = await client.query<{ actor_user_id: string | null; action: string; scope: string; target_user_id: string; details: { by: string; source: string }; created_at: Date }>(
+      "select actor_user_id, action, scope, target_user_id, details, created_at from salary_access_log where scope = 'system:migration'",
+    );
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0]).toMatchObject({ actor_user_id: null, action: "grant_viewer", target_user_id: TALANT, details: { by: "system" } });
+    expect(rows.rows[0]!.details.source).toContain("0016");
+    expect(new Date(rows.rows[0]!.created_at).toISOString()).toBe("2026-11-02T00:00:00.000Z");
+    // Re-running the SQL adds nothing.
+    await client.exec(readFileSync(path.join(MIGRATIONS_FOLDER, "0018_salary_grant_audit.sql"), "utf8"));
+    expect((await client.query("select 1 from salary_access_log where scope = 'system:migration'")).rows).toHaveLength(1);
+    expect((await client.query("select 1 from salary_access_log")).rows).toHaveLength(4);
+  });
+});
+
 describe("0017 org structure on existing data", () => {
   it("adds the org tables with RLS, keeps tasks (no department) and enforces the number ranges and one chart per company", async () => {
     const { client, db } = await newPglite();
