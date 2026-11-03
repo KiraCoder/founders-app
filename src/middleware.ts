@@ -7,7 +7,9 @@ import { checkMutatingApiRequest } from "@/server/http/request-guard";
  * ingest route a browser extension key (Bearer), and it answers its own CORS preflight, so it
  * is exempt from the same-origin guard below too.
  */
-const PUBLIC_PATHS = ["/login", "/api/telegram/webhook", "/api/cron/tick", "/api/health", "/api/v1/ingest"];
+const PUBLIC_PATHS = ["/login", "/api/telegram/webhook", "/api/cron/tick", "/api/health"];
+/** Public on this exact path only (nothing below it is exempt). */
+const PUBLIC_EXACT = new Set(["/api/v1/ingest"]);
 
 /**
  * First gate: every route except /login needs a validly signed session cookie.
@@ -17,7 +19,7 @@ const PUBLIC_PATHS = ["/login", "/api/telegram/webhook", "/api/cron/tick", "/api
  */
 export async function middleware(req: NextRequest) {
   const { pathname, search } = req.nextUrl;
-  if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
+  if (PUBLIC_EXACT.has(pathname) || PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return NextResponse.next();
   }
   // CSRF: mutating REST calls must come from this site and carry JSON.

@@ -263,6 +263,14 @@ describe("POST /api/v1/ingest", () => {
     expect(pass(await middleware(new NextRequest(`${base}/api/v1/ingest`, { method: "OPTIONS", headers: { origin: EXT } })))).toBe(true);
     // Other API routes still need the session and the same-origin guard.
     expect((await middleware(new NextRequest(`${base}/api/v1/ingestx`, { method: "POST", headers: { origin: EXT, "content-type": "application/json" } }))).status).toBe(403);
+    // Exactly /api/v1/ingest: nothing below it is exempt (C5b #7).
+    for (const path of ["/api/v1/ingest/anything", "/api/v1/ingest/v2/x"]) {
+      const r = await middleware(new NextRequest(`${base}${path}`, { method: "POST", headers: { origin: EXT, "content-type": "application/json" } }));
+      expect(pass(r), path).toBe(false);
+      expect(r.status, path).toBe(403);
+      const get = await middleware(new NextRequest(`${base}${path}`, { method: "GET" }));
+      expect(get.status, path).toBe(401);
+    }
     expect((await middleware(new NextRequest(`${base}/api/v1/tasks`, { method: "POST", headers: { origin: EXT, "content-type": "application/json" } }))).status).toBe(403);
   });
 });
