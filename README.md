@@ -29,7 +29,9 @@ Stop `npm run dev` before running `db:*` scripts: the embedded database allows o
 | `npm run test:e2e` | Playwright smoke test (builds and starts the app on port 3100) |
 | `npm run db:generate` | Create a new SQL migration after editing `src/server/db/schema.ts` |
 | `npm run db:migrate` | Apply migrations (PGlite or `DATABASE_URL`) |
-| `npm run db:migrate:deploy` | Same, but only when `MIGRATE_ON_BUILD=1` (and `DATABASE_URL` set); otherwise prints "skipped". For an optional Vercel build step |
+| `npm run db:migrate:deploy` | Same, but only when `MIGRATE_ON_BUILD=1` (and `DATABASE_URL` set); otherwise prints "skipped". Uses `MIGRATION_DATABASE_URL` when set. Part of `vercel-build` |
+| `npm run db:seed:deploy` | Seed during a deploy: only with `SEED_ON_BUILD=1` + `DATABASE_URL`, and only while the database has **no founders** (first deploy); same guards as `db:seed`. Otherwise prints "skipped". Part of `vercel-build` |
+| `npm run vercel-build` | What Vercel runs (`vercel.json`): `db:migrate:deploy` → `db:seed:deploy` → `next build`. `next build` itself never touches the database |
 | `npm run db:seed` | Load founders, companies, people and (local DB only, by default) `[sample]` tasks. Safe to re-run: existing founders keep their password |
 | `npm run db:reset` | **Local only.** Wipe + migrate + seed. Refuses to run against a non-localhost database |
 | `npm run cron:tick` | Run the notification scheduler once against the running app (needs `CRON_SECRET`) |
@@ -38,55 +40,115 @@ Stop `npm run dev` before running `db:*` scripts: the embedded database allows o
 Screenshots: `SCREENSHOTS=1 npx playwright test screenshots` (writes `docs/screenshots/`).
 
 After pulling new code, run `npm run db:migrate` again (new tables are added by new migrations).
-The same is true for the real database: see *Every time you deploy new code* below.
+On Vercel this happens on every deploy (`MIGRATE_ON_BUILD=1`, see below).
 
-## Moving to Supabase + Vercel later (for a non-developer)
+## Moving to Supabase + Vercel (click by click, for a non-developer)
 
-Nothing here costs money on the free tiers. Never paste keys into the code or chat: put them only in
-the Vercel / Supabase dashboards.
+Decided: hosting **Vercel Hobby** (free), database **Supabase** (free), sign-in **email +
+password**. Nothing below costs money. Keys go **only** into Vercel → *Environment Variables*
+(and Supabase's own dashboard) — never into the code, a chat, an email or a screenshot.
 
-1. **Create the database.** Sign in at supabase.com → *New project* (region close to Kyrgyzstan,
-   e.g. Frankfurt). Save the database password somewhere safe.
-2. **Copy the connection string.** Supabase → *Project Settings → Database → Connection string →
-   Transaction pooler*. It looks like `postgresql://postgres.xxxx:PASSWORD@aws-0-...pooler.supabase.com:6543/postgres`.
-3. **Create the tables** (first time; repeat after every deploy, see step 7) from your computer:
-   create a file `.env.local` with `DATABASE_URL=<that string>` and `DEV_FOUNDER_PASSWORD=<a strong password>`,
-   then run `npm run db:migrate` and `npm run db:seed`. Delete `.env.local` afterwards if you like.
-   (The seed refuses the dev password or anything shorter than 12 characters on a real database,
-   adds no `[sample]` tasks there unless `SEED_SAMPLES=1`, and never changes an existing founder's
-   password unless `SEED_RESET_PASSWORDS=1`, which also signs them out everywhere.)
-4. **Create the website.** Sign in at vercel.com with GitHub → *Add New → Project* → pick this repository.
-5. **Add environment variables** in Vercel → *Settings → Environment Variables*:
-   - `DATABASE_URL` = the Supabase connection string from step 2
-   - `SESSION_SECRET` = a long random text (on a Mac/Linux: `openssl rand -base64 48`)
-   - `AUTH_MODE` = `local`
-   - `APP_TIMEZONE` = `Asia/Bishkek`
-   - Telegram and scheduler variables: see *Telegram setup* below
-6. **Deploy.** Vercel builds automatically on every push. The app refuses to start without
-   `SESSION_SECRET` or without `DATABASE_URL` (it never falls back to the embedded local
-   database in production: on Vercel that disk is temporary and the data would be lost),
-   which protects you from an insecure or data-losing setup.
-7. **Every time you deploy new code: update the database too.** New versions often add
-   tables or columns (files in `drizzle/`); Vercel deploys the code but **does not** change
-   the Supabase database by itself, and pages that need a new table will fail until you do.
-   After each deploy (or before it), from your computer with `DATABASE_URL=<Supabase string>`
-   in `.env.local`, run:
-   ```bash
-   npm run db:migrate
-   ```
-   It only applies migrations that are not applied yet, so running it again is harmless.
-   **Optional, automatic:** in Vercel → *Settings → Build and Deployment → Build Command* set
-   `npm run db:migrate:deploy && npm run build` and add the environment variable
-   `MIGRATE_ON_BUILD` = `1`. Then every Vercel build applies the migrations first (a failed
-   migration fails the build, so the old version stays live). Default is **off**: without
-   `MIGRATE_ON_BUILD=1` the step prints "skipped" and changes nothing — set it only for the
-   *Production* environment if preview builds should not touch the real database.
-8. **Already safe by default:** `npm run db:migrate` turns on row-level security for every
-   table and removes all access for Supabase's public `anon`/`authenticated` roles, so the
-   Supabase anon key can read nothing. The app itself is unaffected.
-9. **Later (developer task):** switch to Supabase Auth (`AUTH_MODE=supabase`, see
-   `src/server/auth/supabase.ts`) and, only if a client (e.g. the iOS app) should talk to
-   Supabase directly, review and apply `supabase/policies.sql`.
+**0. Rotate anything that was ever exposed.** If a bot token, the database password or a
+secret was ever pasted anywhere (chat, email, code, screenshot), make a new one first:
+Telegram **@BotFather** → `/revoke` → pick the bot → it gives a new token; Supabase →
+*Project Settings → Database → Reset database password*; secrets below are new random texts.
+
+**1. Supabase: create the database.** supabase.com → *New project* → name `founders-app`,
+a strong database password (save it in a password manager), region **Central EU
+(Frankfurt)** → *Create new project*. Wait until it is ready (~2 minutes).
+
+**2. Supabase: copy the pooler connection string.** In the project press **Connect** (top
+bar) → *Connection String* → *Type: URI* → **Transaction pooler** (port **6543**). It looks
+like `postgresql://postgres.abcd1234:[YOUR-PASSWORD]@aws-0-eu-central-1.pooler.supabase.com:6543/postgres`.
+Replace `[YOUR-PASSWORD]` (brackets too) with the database password. This is `DATABASE_URL`.
+(Use the pooler, not the "Direct connection": Vercel needs the pooler. The app turns prepared
+statements off itself, which the Transaction pooler requires.)
+
+**3. Make the secrets** (on a Mac: Terminal; or a password manager's generator, letters and
+digits only): `SESSION_SECRET` = `openssl rand -base64 48`; `TELEGRAM_WEBHOOK_SECRET` and
+`CRON_SECRET` = `openssl rand -hex 32` each (different values); `DEV_FOUNDER_PASSWORD` = a
+private password of **12+ characters** (both founders' first password). Telegram bot token:
+see *Telegram setup* step 1 below.
+
+**4. Vercel: import the project.** vercel.com → sign in with GitHub → *Add New… → Project* →
+*Import* `founders-app` (if it is not listed: *Adjust GitHub App Permissions* and allow it).
+Framework: Next.js (detected). Leave *Build Command* alone — `vercel.json` sets it to
+`npm run vercel-build`. Open *Environment Variables* on the same screen and add:
+
+| Name | Value | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | the pooler string from step 2 | required |
+| `SESSION_SECRET` | from step 3 | required |
+| `AUTH_MODE` | `local` | |
+| `APP_TIMEZONE` | `Asia/Bishkek` | |
+| `MIGRATE_ON_BUILD` | `1` | every deploy applies new migrations first; a failed migration fails the deploy and the old version stays live |
+| `SEED_ON_BUILD` | `1` | the first deploy creates the founders, companies and people; later deploys skip it (the database already has founders) |
+| `DEV_FOUNDER_PASSWORD` | from step 3 | needed for the first deploy only; you may delete it afterwards |
+| `TELEGRAM_BOT_TOKEN` | from @BotFather | |
+| `TELEGRAM_WEBHOOK_SECRET` | from step 3 | |
+| `TELEGRAM_BOT_USERNAME` | the bot's username without `@` | |
+| `CRON_SECRET` | from step 3 | |
+| `APP_URL` | optional: `https://<your-project>.vercel.app` | empty = Vercel's production address is used (Settings shows which); set it once you add your own domain |
+
+Press **Deploy**. This first deploy builds the `main` branch, which holds only the brief, so
+it may fail or show an empty site — that is expected.
+
+**5. Vercel: deploy the app's branch as production.** Project → *Settings → Environments →
+Production → Branch Tracking* (older screens: *Settings → Git → Production Branch*) → set
+the branch to `claude/adoring-brown-rriwam` → *Save*. Then *Deployments* → **…** (top right)
+→ *Create Deployment* → type `claude/adoring-brown-rriwam` → *Create Deployment*. From now
+on every push to that branch deploys production by itself. The build log shows
+`[db:migrate:deploy] … done`, `[db:seed:deploy] seeded …` and then the Next.js build.
+(Because the database variables are set for *Production* only by default — keep it that
+way: preview builds of other branches then never touch the real database.)
+
+**6. Sign in.** Open the site (*Visit*). Sign in as **`nuraaly@founders.local`** or
+**`talant@founders.local`** with `DEV_FOUNDER_PASSWORD`. The emails can be changed later
+(Supabase → *Table Editor* → `users` → edit `email`; sign in with the new one afterwards —
+then do not run `npm run db:seed` by hand any more, it would re-create the old addresses).
+
+**7. Settings → Telegram bot · setup → Connect Telegram.** One press: tells Telegram to
+deliver the bot's messages to this site (with the webhook secret) and sets the bot's menu
+(/today, /tasks, /help). The card shows the address used and the status (URL set, pending
+updates, last error). If a variable is missing it names it — add it in Vercel, *Redeploy*,
+press again.
+
+**8. Settings → Reminder clock · setup → Start reminder clock.** One press: the Supabase
+database calls the site every 10 minutes (pg_cron + pg_net; the address and `CRON_SECRET`
+are stored in Supabase Vault), so reminders and the morning summary go out on time. Press
+*Check status* after 10–20 minutes: the job, its last runs and the last answers (200 = fine;
+401 = `CRON_SECRET` changed in Vercel → press Start again). Details and fallbacks:
+*Scheduler (cron)* below.
+
+**9. Each founder links Telegram.** Each founder: Settings → *Generate link code* → send
+`/start CODE` to the bot within 15 minutes.
+
+**Later.** Every push to `claude/adoring-brown-rriwam` redeploys and migrates by itself.
+Changed `CRON_SECRET` or the address? Press *Start reminder clock* again. Changed the bot
+token or the address? Press *Connect Telegram* again.
+
+**Good to know**
+- The app refuses to start without `SESSION_SECRET` or `DATABASE_URL` (it never falls back
+  to the embedded local database in production: on Vercel that disk is temporary).
+- `next build` never touches the database; only `db:migrate:deploy` / `db:seed:deploy` do,
+  and only with their `…_ON_BUILD=1` flag.
+- **Migrations through the pooler:** they run through the Transaction pooler (each migration
+  is one transaction, no prepared statements). If a future migration ever needs a
+  session-level feature, add `MIGRATION_DATABASE_URL` = Supabase *Connect → Session pooler*
+  string (same pooler host, port **5432**); migrations then use it, the app keeps
+  `DATABASE_URL`.
+- **Manual alternative to steps 4–5's automatic migrate/seed:** from your computer with
+  `DATABASE_URL=<pooler string>` and `DEV_FOUNDER_PASSWORD=<12+ characters>` in `.env.local`:
+  `npm run db:migrate && npm run db:seed` (the seed refuses the dev password or anything
+  shorter than 12 characters on a real database, adds no `[sample]` tasks there unless
+  `SEED_SAMPLES=1`, and never changes an existing founder's password unless
+  `SEED_RESET_PASSWORDS=1`, which also signs them out everywhere). Both are safe to re-run.
+- **Already safe by default:** migrations turn on row-level security for every table and
+  remove all access for Supabase's public `anon`/`authenticated` roles, so the Supabase anon
+  key can read nothing. The app itself is unaffected.
+- **Later (developer task):** Supabase Auth (`AUTH_MODE=supabase`, see
+  `src/server/auth/supabase.ts`) and, only if a client (e.g. the iOS app) should talk to
+  Supabase directly, review and apply `supabase/policies.sql`.
 
 ## Environment variables (all of them)
 
@@ -101,9 +163,11 @@ feature stays off without it.
 | `SESSION_SECRET` | **Required in production** | Signs the sign-in cookie; 32+ random characters (`openssl rand -base64 48`) |
 | `AUTH_MODE` | No | `local` (default, the only one implemented); `supabase` is a stub |
 | `APP_TIMEZONE` | No | Business timezone for "today", overdue, schedules and shown times. Default `Asia/Bishkek` |
-| `APP_URL` | Recommended | The site's address, e.g. `https://<your-app>.vercel.app`: makes links in Telegram messages clickable and is an allowed `Origin` for the API; scripts use it to find the app |
-| `MIGRATE_ON_BUILD` | No | `1` makes `npm run db:migrate:deploy` (optional Vercel build step) apply migrations. Default off |
-| `DEV_FOUNDER_PASSWORD`, `SEED_RESET_PASSWORDS`, `SEED_SAMPLES` | Seeding only | Used by `npm run db:seed` on your computer (see step 3 above), not by the website |
+| `APP_URL` | Recommended | The site's address, e.g. `https://<your-app>.vercel.app`: links in Telegram messages, the webhook *Connect Telegram* sets, the URL *Start reminder clock* calls, an allowed `Origin` for the API; scripts use it to find the app. Empty on Vercel: Vercel's own `VERCEL_PROJECT_PRODUCTION_URL` (then `VERCEL_URL`) is used, with `https://` |
+| `MIGRATE_ON_BUILD` | On Vercel: `1` | `1` makes `npm run db:migrate:deploy` (in `vercel-build`) apply migrations. Default off ("skipped") |
+| `MIGRATION_DATABASE_URL` | No | Optional URL for migrations only (Supabase *Session pooler*, port 5432 on the pooler host). Empty: migrations use `DATABASE_URL` |
+| `SEED_ON_BUILD` | On Vercel: `1` | `1` makes `npm run db:seed:deploy` (in `vercel-build`) seed a database that has no founders yet (the first deploy). Default off ("skipped") |
+| `DEV_FOUNDER_PASSWORD`, `SEED_RESET_PASSWORDS`, `SEED_SAMPLES` | Seeding only | Used by `npm run db:seed` / `db:seed:deploy` (first deploy), not by the running website. `DEV_FOUNDER_PASSWORD` can be deleted from Vercel after the first deploy |
 | `TELEGRAM_BOT_TOKEN` | For Telegram | Bot token from @BotFather. Empty: messages go to the dev inbox only |
 | `TELEGRAM_WEBHOOK_SECRET` | For Telegram | Random text; Telegram sends it back with every update |
 | `TELEGRAM_BOT_USERNAME` | For Telegram | Bot username without `@` (shown on Settings) |
@@ -116,7 +180,7 @@ feature stays off without it.
 | `WMS_API_URL`, `WMS_API_TOKEN` | Not used yet | WMS (wms.jobutify.com) data source, same as above |
 | `ALURA_ERP_API_URL`, `ALURA_ERP_API_TOKEN` | Not used yet | Alura Style ERP data source, same as above |
 | `WB_API_TOKEN` | Not used yet | Wildberries seller API token (read-only), same as above |
-| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Not used yet | For the future Supabase Auth / direct-client mode. The anon key can read nothing today (row-level security, step 8) |
+| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Not used yet | For the future Supabase Auth / direct-client mode. The anon key can read nothing today (row-level security, see *Good to know* above) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Not used yet | For the future Supabase Storage adapter. Server-only: never prefix it with `NEXT_PUBLIC_` |
 
 ## How access works
@@ -190,8 +254,9 @@ How it works (all in `src/server/notifications/`):
      have their own cap of **2 per day**; beyond that they are parked too. Only a notification
      of kind `urgent` (none is created automatically today) skips the budget entirely.
    - **Overdue tasks** (Settings → Notifications → *Overdue tasks*, per founder): how the
-     chase-day pushes go out. **One push per task** (`separate`, the default — the behaviour
-     described above). **One grouped push** (`grouped`): every overdue task due a chase that
+     chase-day pushes go out. **One push per task** (`separate`, the behaviour described
+     above). **One grouped push** (`grouped`, **the default for both founders** — their
+     decision; migration 0016 moved saved rows from `separate`): every overdue task due a chase that
      day goes into ONE 10:00 push, "3 tasks need a new deadline", numbered, with a keyboard row
      per task (*1 · Done*, *1 · +1 day*, *1 · +3 days*; at most 10 tasks, then "+N more — open
      the app"). It counts as **one** push against the budget (or against the urgent cap of 2
@@ -260,16 +325,21 @@ The dev inbox is on in development only; a production build shows it only with `
    - `CRON_SECRET` = another random text (protects the scheduler, see below)
 
    Then redeploy (Vercel → *Deployments → … → Redeploy*).
-4. **Tell Telegram where to deliver messages** (once, from any computer; replace the three
-   values):
+4. **Tell Telegram where to deliver messages:** sign in → **Settings → Telegram bot · setup
+   → Connect Telegram** (founders only). It calls Telegram's `setWebhook` with
+   `<APP_URL>/api/telegram/webhook`, the webhook secret and
+   `allowed_updates=["message","callback_query"]`, sets the bot's menu (`setMyCommands`:
+   /today, /tasks, /help) and shows `getWebhookInfo`: the URL set, pending updates and the
+   last delivery error. It names any missing variable (`APP_URL` — or Vercel's address —
+   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`). Pressing it again is harmless; press it
+   again after changing the token or the site's address. *Check status* only reads.
+   Without the button (e.g. another host), the same by hand:
    ```bash
    curl -sS "https://api.telegram.org/bot<TOKEN>/setWebhook" \
      -d "url=https://<your-app>.vercel.app/api/telegram/webhook" \
      -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>" \
      -d 'allowed_updates=["message","callback_query"]'
    ```
-   It should answer `{"ok":true,"result":true,"description":"Webhook was set"}`.
-   Check any time with `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`.
 5. **Link each founder.** Each founder signs in → **Settings** → *Generate link code* →
    sends `/start CODE` to the bot within 15 minutes. The code works once. *Unlink* is on the
    same page.
@@ -279,37 +349,55 @@ The dev inbox is on in development only; a production build shows it only with `
 in `.env.local`, then run `npm run dev` in one terminal and `npm run telegram:poll` in another.
 The poller fetches updates from Telegram and forwards them to the same webhook handler.
 
-### Scheduler (cron)
+### Scheduler (cron) — the reminder clock
 
 `POST /api/cron/tick` runs plan + dispatch. It needs the header
-`Authorization: Bearer <CRON_SECRET>`; anything else gets 401. Call it every 5–15 minutes:
+`Authorization: Bearer <CRON_SECRET>`; anything else gets 401. It must be called every 5–15
+minutes. Vercel Hobby's own cron runs only **once a day** (too rare, so `vercel.json` has no
+crons); the database calls the app instead:
 
-- **Locally:** add `CRON_SECRET=…` to `.env.local`, run the app, then `npm run cron:tick`
-  (or use the buttons on `/dev/notifications`).
-- **Supabase pg_cron (free):** in Supabase → *Database → Extensions* enable `pg_cron` and
-  `pg_net`, store the secret in *Vault* (`select vault.create_secret('<CRON_SECRET>', 'cron_secret');`),
-  then in the SQL editor:
+- **Settings → Reminder clock · setup → Start reminder clock** (founders only; the normal
+  way). Using the app's own database connection it runs `create extension if not exists
+  pg_cron` / `pg_net`, stores the tick URL (`founders_tick_url`) and `CRON_SECRET`
+  (`founders_cron_secret`) in **Supabase Vault** (created, or updated when they exist), and
+  schedules — or reschedules — the job **`founders-tick`** every 10 minutes. The job's SQL
+  only names the Vault entries (neither value is in `cron.job`). *Check status* shows the job,
+  its last 5 runs (`cron.job_run_details`) and the last 5 HTTP answers (`net._http_response`).
+  Press it again after changing `CRON_SECRET` or the site's address. On a database without
+  pg_cron / pg_net / Vault (the local embedded database, a plain Postgres) it says so and
+  changes nothing.
+- **Manual SQL (same result)** — Supabase → *SQL Editor*, replace the two values once:
   ```sql
+  create extension if not exists pg_cron;
+  create extension if not exists pg_net;
+  select vault.create_secret('https://<your-app>.vercel.app/api/cron/tick', 'founders_tick_url');
+  select vault.create_secret('<CRON_SECRET>', 'founders_cron_secret');
   select cron.schedule('founders-tick', '*/10 * * * *', $$
     select net.http_post(
-      url := 'https://<your-app>.vercel.app/api/cron/tick',
-      headers := jsonb_build_object('Authorization', 'Bearer ' ||
-        (select decrypted_secret from vault.decrypted_secrets where name = 'cron_secret')),
+      url := (select decrypted_secret from vault.decrypted_secrets where name = 'founders_tick_url' limit 1),
+      headers := jsonb_build_object('Content-Type', 'application/json', 'Authorization', 'Bearer ' ||
+        (select decrypted_secret from vault.decrypted_secrets where name = 'founders_cron_secret' limit 1)),
+      body := '{}'::jsonb,
       timeout_milliseconds := 60000
     );
   $$);
   ```
-  **Timeouts:** pg_net gives up after **5 seconds** unless told otherwise
-  (`timeout_milliseconds`); a tick can take longer on a busy morning (several Telegram
-  messages, AI roles), so the snippet waits up to 60 s. The route itself may run up to
-  **60 s** on Vercel (`export const maxDuration = 60` in `src/app/api/cron/tick/route.ts`).
-  A tick that is cut short is safe: whatever was not sent goes out on the next tick.
-  (Already scheduled with the old snippet? Run the same `cron.schedule('founders-tick', …)`
-  again: it replaces the job with the same name.)
-- **Or a free external cron** such as cron-job.org: URL `https://<your-app>.vercel.app/api/cron/tick`,
-  method POST, header `Authorization: Bearer <CRON_SECRET>`, every 10 minutes.
-  (Vercel's own cron on the free plan runs only once a day, too rare for reminders; the
-  endpoint also accepts its GET request if you upgrade later.)
+  (Vault entries already exist? `select vault.update_secret(id, '<new value>') from
+  vault.secrets where name = 'founders_cron_secret';`. Running `cron.schedule('founders-tick', …)`
+  again replaces the job; `select cron.unschedule('founders-tick');` stops it.)
+- **Or a free external cron**, no database involved: cron-job.org → *Create cronjob* → URL
+  `https://<your-app>.vercel.app/api/cron/tick`, every 10 minutes, *Advanced*: request method
+  **POST**, header `Authorization` = `Bearer <CRON_SECRET>`, timeout 60 s. (Do not use both
+  this and the database clock; it is harmless, just double the calls.)
+- **Locally:** add `CRON_SECRET=…` to `.env.local`, run the app, then `npm run cron:tick`
+  (or use the buttons on `/dev/notifications`).
+
+**Timeouts:** pg_net gives up after **5 seconds** unless told otherwise
+(`timeout_milliseconds`); a tick can take longer on a busy morning (several Telegram
+messages, AI roles), so the job waits up to 60 s. The route itself may run up to **60 s** on
+Vercel (`export const maxDuration = 60` in `src/app/api/cron/tick/route.ts`). A tick that is
+cut short is safe: whatever was not sent goes out on the next tick. The endpoint also accepts
+Vercel Cron's GET, if you ever upgrade.
 
 ## People and salaries
 
@@ -336,8 +424,8 @@ Search ignores case and treats ё and е as the same letter.
   the **current** salary is the latest *effective from* on or before today (same date: the row
   entered last). History is on the person page. A salary row and its audit row are written
   together or not at all.
-- Only **salary viewers** see them. **Default: only Nuraaly** (pending the founders'
-  decision). Change it in **Settings → Access**: one switch per founder, only an existing
+- Only **salary viewers** see them. **Default: both founders** (their decision; the seed adds
+  both on a new database, migration 0016 added Talant on an existing one). Change it in **Settings → Access**: one switch per founder, only an existing
   salary viewer can flip it, and the last viewer cannot be removed (also when two viewers
   revoke each other at the same moment: the rows are locked, so one of the two is refused).
   A viewer must also still be a founder in the database.
@@ -609,8 +697,9 @@ it at once). A failure while re-analysing a run that already has a report keeps 
    (no new 7 days of daily chasing). No separate pushes — so no budget use, and quiet hours / "not linked" work like the
    summary itself.
    **Monthly totals for daily numbers** (Tune → *Data it needs* → *Accept monthly totals for
-   daily numbers*, per hire, **off by default**). Off: a daily number counts only with every
-   day of the month (today's behaviour). On: when its days are incomplete, the role uses a
+   daily numbers*, per hire; **on by default for a new Financial Analyst** (the founders'
+   decision; migration 0016 switched it on for existing ones), off for other roles). Off: a
+   daily number counts only with every day of the month. On: when its days are incomplete, the role uses a
    **month total** a founder entered for that number and month — an **average** for averaged
    numbers (on-time %), the **end-of-month value** for "last" numbers. Complete days always
    win; otherwise the month total; otherwise it is missing. Month totals are entered under the
@@ -720,7 +809,8 @@ src/
       holding/             Holding: акты grid + cell panel, Ask Elmurat, debts, договоры, flows (+ server actions)
       ai-roles/            AI roles: catalogue, Hire/Tune wizard, hired roles; runs/[id] report page (+ server actions)
       search/ more/ org/
-      settings/            Own notification preferences + Telegram link; Access (salary viewers)
+      settings/            Own notification preferences + Telegram link; Access (salary viewers);
+                           founders: Connect Telegram, Start reminder clock (services/app-setup.ts)
       dev/notifications/   Dev inbox (dev tools only)
       actions.ts           Server actions (call the service layer)
     api/v1/                REST API (thin, calls the service layer)
@@ -732,7 +822,9 @@ src/
                            holding.ts + holding-schemas.ts (акты, debts, contracts rules)
   server/
     auth/                  AuthProvider: local (now) and supabase (stub), session cookie, login rate limit
-    db/                    schema.ts, connect.ts (PGlite or Postgres), migrate.ts, seed.ts
+    db/                    schema.ts, connect.ts (PGlite or Postgres; pooler-safe options), migrate.ts, seed.ts,
+                           seed-deploy.ts (first-deploy seed)
+    app-url.ts             The site's address (APP_URL, else Vercel's)
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
                            people-import, metrics, metrics-import, connectors, search, notifications,
                            holding, holding-asks, holding-files, ai-roles)
@@ -741,11 +833,13 @@ src/
     storage/               FileStorage for documents: local .data/uploads, Supabase placeholder
     import/parse-table.ts  .xlsx/.csv parsing for the people and numbers imports (in memory, 2 MB limit)
     connectors/            Data sources: Connector interface, registry, stubs (no network), runner
-    notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot
+    notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot,
+                           telegram-setup.ts (setWebhook / setMyCommands), reminder-clock.ts (pg_cron + Vault)
     http/request-guard.ts  Same-origin + JSON check for mutating /api/v1 calls
   middleware.ts            Redirects signed-out users to /login (401 JSON for /api), CSRF guard
 drizzle/                   SQL migrations (generated by drizzle-kit)
-scripts/                   db:migrate / db:seed / db:reset / cron:tick / telegram:poll
+scripts/                   db:migrate(:deploy) / db:seed(:deploy) / db:reset / cron:tick / telegram:poll
+vercel.json                Vercel build command (npm run vercel-build); no crons (Hobby: daily only)
 supabase/policies.sql      RLS policies for a future direct-client mode (applied by hand)
 tests/                     Vitest unit + service tests
 e2e/                       Playwright smoke test + screenshots

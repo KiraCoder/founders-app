@@ -173,7 +173,7 @@ async function readStatus(db: Db, unavailable: string[]): Promise<ReminderClockS
 
 const UNAVAILABLE_HINT =
   "This database has no {what}. The local embedded database never has them; on Supabase they are built in. " +
-  "Alternatives: the manual SQL or a free cron-job.org job (README → Reminder clock).";
+  "Alternatives: the manual SQL or a free cron-job.org job (README → Scheduler (cron)).";
 
 async function upsertVaultSecret(db: Db, name: string, value: string, description: string): Promise<void> {
   const [existing] = await query<{ id: string }>(db, buildVaultLookup(name));
