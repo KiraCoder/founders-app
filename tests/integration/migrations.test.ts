@@ -828,3 +828,23 @@ describe("0021 AI role editor on existing data", () => {
     await expect(client.query(`insert into ai_role_configs (key, kind) values ('custom-x', 'custom')`)).rejects.toThrow();
   });
 });
+
+describe("0022 browser extension ingest", () => {
+  it("adds the 'extension' number source and the key / log tables with RLS; keys are unique by hash", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const vals = await client.query<{ v: string }>("select unnest(enum_range(null::metric_source))::text as v");
+    expect(vals.rows.map((r) => r.v)).toEqual(["manual", "upload", "connector", "derived", "extension"]);
+    const rls = await client.query<{ relname: string; relrowsecurity: boolean }>(
+      "select relname, relrowsecurity from pg_class where relname in ('extension_keys', 'extension_ingest_log') order by relname",
+    );
+    expect(rls.rows).toEqual([
+      { relname: "extension_ingest_log", relrowsecurity: true },
+      { relname: "extension_keys", relrowsecurity: true },
+    ]);
+    const U = "44444444-4444-4444-8444-444444444441";
+    await client.exec(`insert into users (id, email, name, short_name, role, password_hash) values ('${U}', 'a@x', 'A', 'A', 'founder', 'x')`);
+    await client.exec(`insert into extension_keys (user_id, name, key_hash, key_prefix) values ('${U}', 'k', 'h1', 'fcx_')`);
+    await expect(client.query(`insert into extension_keys (user_id, name, key_hash, key_prefix) values ('${U}', 'k2', 'h1', 'fcx_')`)).rejects.toThrow();
+  });
+});

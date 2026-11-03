@@ -201,3 +201,21 @@ export async function assertOrgEdit(ctx: ServiceContext, companyId: string): Pro
   if (!canEditOrg(ctx)) throw new ServiceError("forbidden", "Only the founders can change the org structure");
   await assertOrgRead(ctx, companyId);
 }
+
+// ---------------------------------------------------------------------------
+// Browser extension (personal API keys, ingest log)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extension rule: personal keys for the founders' Chrome extension are founders-only (each
+ * founder sees and revokes only their own keys). A key acts as its owner: it can write only
+ * numbers of companies its owner can access (`accessibleCompaniesWhere`). The ingest log is
+ * shared between the founders, like company numbers.
+ */
+export function canUseExtension(ctx: ServiceContext): boolean {
+  return ctx.user.role === "founder";
+}
+
+export function assertExtensionAccess(ctx: ServiceContext): void {
+  if (!canUseExtension(ctx)) throw new ServiceError("forbidden", "Only the founders can use the browser extension");
+}

@@ -237,7 +237,9 @@ Security notes:
 - **Sign-in limit:** after 10 failed attempts for an email (or 20 from one IP) within 15 minutes,
   sign-in is refused for 15 minutes. Stored in the `login_attempts` table (hashes only).
 - **REST API:** changes (`POST/PATCH/DELETE /api/v1/...`) must come from this site (`Origin`) or
-  `APP_URL`, and bodies must be JSON. Session cookies are `httpOnly`, `SameSite=Lax`, `Secure` in production.
+  `APP_URL`, and bodies must be JSON. The one exception is `POST /api/v1/ingest` (the browser
+  extension): it takes no session cookie, only a personal bearer key, and allows
+  `chrome-extension://` origins (see *Browser extension*). Session cookies are `httpOnly`, `SameSite=Lax`, `Secure` in production.
 - **After sign-in** the app only redirects to its own pages.
 
 ## Notifications and the Telegram bot
@@ -961,6 +963,67 @@ Session-cookie auth for now; JSON errors look like `{ "error": { "code", "messag
 
 Input shapes are the Zod schemas in `src/lib/schemas.ts`, `src/lib/people-schemas.ts`, `src/lib/metric-schemas.ts`, `src/lib/holding-schemas.ts` and `src/lib/ai-roles.ts`.
 
+## Browser extension
+
+The founders' Chrome extension reads numbers from web pages (seller cabinets, dashboards) and
+sends them here. Founders only. Logic in `src/server/services/extension.ts` and
+`src/server/http/ingest.ts`; tables `extension_keys` and `extension_ingest_log` (migration
+`0022_extension_ingest.sql`, additive, RLS + revoke; it also adds the number source
+`extension`).
+
+**Create a key.** *Settings → Browser extension* → name it ("Laptop Chrome") → **Create key**.
+The key (`fcx_…`) is shown **once** — copy it into the extension's settings. Only its SHA-256
+is stored, with the name, when it was created and last used. Each founder sees and revokes only
+their own keys (at most 10 active); **Revoke** stops it at once. A key acts as its owner. The
+same card lists the latest calls of both founders' keys (key, adapter, accepted / rejected,
+the first reasons).
+
+**API contract** (given to the extension's developer):
+
+```
+POST /api/v1/ingest
+Authorization: Bearer fcx_…
+Content-Type: application/json
+
+{ "source": "extension",
+  "adapterId": "wb-seller",                      // letters, digits . _ : -  (≤ 64)
+  "points": [                                    // at most 500; body at most 256 KB
+    { "companySlug": "kiwi-go", "metricKey": "revenue", "periodStart": "2026-10-01", "value": "1234567.89" },
+    { "companySlug": "alura-style", "metricKey": "output_pcs", "unitSlug": "hbk", "periodStart": "2026-10-30", "value": "800" }
+  ] }
+
+200 { "accepted": 1, "rejected": [{ "index": 1, "reason": "This month isn't finished yet" }] }
+```
+
+- Each point is accepted or rejected **on its own**, with a reason; the rest is written. Every
+  point goes through the same write path as typed / uploaded / connector numbers (C4 rules):
+  - `periodStart` is `YYYY-MM-DD` and must be the **first day of the number's period** (the day,
+    the Monday of a week, the 1st of a month); no future periods; weekly / monthly numbers only
+    for a **finished** week / month.
+  - `value` is a **string** with an exact decimal ("1234567.89", "1 250", "95.5%" for %
+    numbers); ambiguous text ("85.000") is refused like everywhere.
+  - Company isolation: only companies the key's owner can access; anything else is "Unknown
+    company". A number tracked per factory needs `unitSlug` (e.g. `hbk`, `osh-rayon`).
+    Numbers the Holding computes from акты (intercompany debt) are refused.
+  - A number a founder **typed or uploaded is never replaced**: a different value is rejected
+    ("A founder entered 100 for this period — kept") and recorded, so the card shows "Source
+    disagrees: Browser extension (wb-seller) says …" until the values agree; the same value is
+    accepted (nothing written). Among automatic values (extension, data sources) the **latest
+    wins**, with history kept. The card says "via the browser extension".
+  - Two points for the same number and period in one request are both rejected.
+- Errors: 401 missing / wrong / revoked key; 403 a web page origin; 415 not JSON; 400 bad JSON
+  or envelope (`source`, `adapterId`, more than 500 points); 413 over 256 KB; **429** over 60
+  requests per key per minute (`Retry-After: 60`). Error bodies are
+  `{ "error": { "code", "message" } }`.
+- **CORS:** this route only, for `chrome-extension://…` origins (preflight answered:
+  `POST, OPTIONS`, headers `Authorization, Content-Type`). Other web origins get 403; calls
+  without an `Origin` (scripts, curl) are fine. The route is exempt from the session cookie and
+  the same-origin guard (`src/middleware.ts`) because the bearer key is the proof.
+- Each authenticated call is logged (`extension_ingest_log`: key, owner, adapter, counts, the
+  first 50 rejections); rate-limited calls are not. Each call that writes creates a
+  connector-like run per company (`connector_runs`, `extension:<adapterId>`) that records
+  conflicts.
+
 ## Folder map
 
 ```
@@ -981,7 +1044,7 @@ src/
                            founders: Connect Telegram, Start reminder clock (services/app-setup.ts)
       dev/notifications/   Dev inbox (dev tools only)
       actions.ts           Server actions (call the service layer)
-    api/v1/                REST API (thin, calls the service layer)
+    api/v1/                REST API (thin, calls the service layer); api/v1/ingest: the browser extension (Bearer key)
     api/telegram/webhook/  Telegram webhook (secret header)
     api/cron/tick/         Scheduler tick (CRON_SECRET)
   components/              UI: shell (sidebar, top bar, tabs), tasks, projects, people, settings
@@ -995,7 +1058,8 @@ src/
     app-url.ts             The site's address (APP_URL, else Vercel's)
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
                            people-import, metrics, metrics-import, connectors, search, notifications,
-                           holding, holding-asks, holding-files, ai-roles, ai-role-defs, ai-role-editor, org, org-expert)
+                           holding, holding-asks, holding-files, ai-roles, ai-role-defs, ai-role-editor, org, org-expert,
+                           extension)
     ai/                    AI roles: provider.ts (LlmProvider, NoneProvider), finance-rules.ts, month-values.ts,
                            narrative.ts (prompt builder, no salaries), orchestrator.ts (tick + morning-summary dedupe)
     storage/               FileStorage for documents: local .data/uploads, Supabase placeholder
@@ -1004,6 +1068,7 @@ src/
     notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot,
                            telegram-setup.ts (setWebhook / setMyCommands), reminder-clock.ts (pg_cron + Vault)
     http/request-guard.ts  Same-origin + JSON check for mutating /api/v1 calls
+    http/ingest.ts         POST /api/v1/ingest: key auth, CORS for chrome-extension://, limits, log
   middleware.ts            Redirects signed-out users to /login (401 JSON for /api), CSRF guard
 drizzle/                   SQL migrations (generated by drizzle-kit)
 scripts/                   db:migrate(:deploy) / db:seed(:deploy) / db:reset / cron:tick / telegram:poll
@@ -1011,7 +1076,7 @@ vercel.json                Vercel build command (npm run vercel-build); no crons
 supabase/policies.sql      RLS policies for a future direct-client mode (applied by hand)
 tests/                     Vitest unit + service tests
 e2e/                       Playwright smoke test + screenshots
-docs/screenshots/          UI screenshots (org-desktop.png, org-edit-mode.png, org-phone.png, ai-roles-hire-wizard.png, ai-report.png, holding-desktop.png, holding-act-panel.png, holding-ask-card.png, numbers-grid.png, people-list-salaries.png, …)
+docs/screenshots/          UI screenshots (ai-role-editor.png, ai-custom-role-report.png, extension-keys.png, org-desktop.png, org-edit-mode.png, org-phone.png, ai-roles-hire-wizard.png, ai-report.png, holding-desktop.png, holding-act-panel.png, holding-ask-card.png, numbers-grid.png, people-list-salaries.png, …)
 docs/samples/              people-sample.csv, kiwi-go-numbers-sample.csv (fake data) for the importers
 docs/reviews/              Independent reviews and how each finding was resolved
 ```

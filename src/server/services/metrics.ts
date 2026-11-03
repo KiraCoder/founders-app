@@ -237,7 +237,22 @@ async function loadDisagreements(db: Db, defs: MetricView[]): Promise<Map<string
   const defIds = new Set(defs.map((d) => d.id));
   const conflicts: (ConnectorRunConflict & { connectorId: string; at: Date })[] = [];
   for (const r of latestRun.values()) {
+    if (r.connectorId.startsWith("extension:")) continue;
     for (const c of r.details?.conflicts ?? []) if (defIds.has(c.metricId)) conflicts.push({ ...c, connectorId: r.connectorId, at: r.at });
+  }
+  // Browser extension calls each carry a few points, so every recent call counts (not only the
+  // latest): per number and period the newest call that mentions it decides — a conflict, or an
+  // agreement with the founder's number that clears it.
+  const decided = new Set<string>();
+  for (const r of runs) {
+    if (!r.connectorId.startsWith("extension:")) continue;
+    for (const a of r.details?.agreed ?? []) decided.add(`${a.metricId}|${a.period}`);
+    for (const c of r.details?.conflicts ?? []) {
+      const k = `${c.metricId}|${c.period}`;
+      if (decided.has(k) || !defIds.has(c.metricId)) continue;
+      decided.add(k);
+      conflicts.push({ ...c, connectorId: r.connectorId, at: r.at });
+    }
   }
   if (conflicts.length === 0) return out;
   const current = await currentValues(db, [...new Set(conflicts.map((c) => c.metricId))]);
@@ -415,7 +430,9 @@ export async function writeMetricValueTx(
     return { action: "unchanged", id: current.id, previous, previousSource };
   }
   // Automatic sources (a connector, a value derived by the app) never replace a founder's number.
-  const automatic = (src: MetricSource) => src === "connector" || src === "derived";
+  // The browser extension (POST /api/v1/ingest) counts as automatic too: latest wins among
+  // automatic values, a founder's typed or uploaded number is never replaced.
+  const automatic = (src: MetricSource) => src === "connector" || src === "derived" || src === "extension";
   if (current && automatic(meta.source) && !automatic(current.source)) {
     return { action: sameNumber(previous!, value) ? "unchanged" : "conflict", id: current.id, previous, previousSource };
   }

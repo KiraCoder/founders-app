@@ -555,7 +555,8 @@ export const reminderSnoozes = pgTable(
 export const metricGranularityEnum = pgEnum("metric_granularity", ["day", "week", "month"]);
 export const metricDirectionEnum = pgEnum("metric_direction", ["higher_is_better", "lower_is_better", "neutral"]);
 /** derived = computed by the app from other data (e.g. the intercompany debt from the Holding ledger). */
-export const metricSourceEnum = pgEnum("metric_source", ["manual", "upload", "connector", "derived"]);
+/** extension = sent by the founders' Chrome extension through POST /api/v1/ingest (0022). */
+export const metricSourceEnum = pgEnum("metric_source", ["manual", "upload", "connector", "derived", "extension"]);
 export const connectorRunStatusEnum = pgEnum("connector_run_status", ["ok", "not_configured", "error", "running"]);
 /**
  * How finer-grained connector points (e.g. days) become one value of a coarser metric
@@ -686,9 +687,60 @@ export interface ConnectorRunConflict {
 
 export interface ConnectorRunDetails {
   conflicts?: ConnectorRunConflict[];
+  /**
+   * Browser extension calls: points that matched a founder's number (nothing written) — they
+   * clear an older "source disagrees" of the same number and period.
+   */
+  agreed?: { metricId: string; period: string }[];
   /** Points not written, with the reason (capped). */
   skippedReasons?: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Browser extension (0022): personal API keys of the founders and a log of every ingest call.
+// Only the key's SHA-256 is stored (the key itself is shown once). Founders only.
+// ---------------------------------------------------------------------------
+export const extensionKeys = pgTable(
+  "extension_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    /** sha256 (hex) of the whole key. */
+    keyHash: text("key_hash").notNull(),
+    /** The first characters of the key, to recognise it ("fcx_Ab3d…"). */
+    keyPrefix: text("key_prefix").notNull(),
+    createdAt: createdAt(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => [uniqueIndex("extension_keys_hash_uq").on(t.keyHash)],
+);
+
+/** Every authenticated ingest call (key, adapter, counts); also the per-key rate limit's source. */
+export const extensionIngestLog = pgTable(
+  "extension_ingest_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    keyId: uuid("key_id")
+      .notNull()
+      .references(() => extensionKeys.id, { onDelete: "restrict" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    adapterId: text("adapter_id"),
+    /** ok | invalid (the request itself was refused: bad JSON, too many points, …) */
+    status: text("status").notNull(),
+    points: integer("points").notNull().default(0),
+    accepted: integer("accepted").notNull().default(0),
+    rejected: integer("rejected").notNull().default(0),
+    conflicts: integer("conflicts").notNull().default(0),
+    /** { message?, rejected: [{ index, reason }] (first 50) } */
+    details: jsonb("details").$type<{ message?: string; rejected?: { index: number; reason: string }[] }>(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("extension_ingest_log_key_idx").on(t.keyId, t.createdAt), check("extension_ingest_log_status", sql`${t.status} in ('ok', 'invalid')`)],
+);
 
 // ---------------------------------------------------------------------------
 // Holding: intercompany flows, contracts, monthly акты, the debt ledger and the

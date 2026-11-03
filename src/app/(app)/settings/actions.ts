@@ -11,6 +11,7 @@ import {
 import type { NotificationPrefsInput } from "@/lib/schemas";
 import type { TelegramSetupResult } from "@/server/notifications/telegram-setup";
 import type { ReminderClockResult } from "@/server/notifications/reminder-clock";
+import { createExtensionKey, revokeExtensionKey } from "@/server/services/extension";
 import { connectTelegramBot, getReminderClockStatus, getTelegramBotStatus, startAppReminderClock } from "@/server/services/app-setup";
 
 export interface PrefsState {
@@ -83,4 +84,42 @@ export async function startReminderClockAction(): Promise<ReminderClockResult> {
 export async function reminderClockStatusAction(): Promise<ReminderClockResult> {
   const ctx = await getPageContext();
   return getReminderClockStatus(ctx);
+}
+
+// ---------------------------------------------------------------------------
+// Browser extension keys (founders)
+// ---------------------------------------------------------------------------
+
+export interface ExtensionKeyState {
+  ok?: boolean;
+  error?: string;
+  /** The new key, shown once. */
+  key?: string;
+  nonce?: number;
+}
+
+export async function createExtensionKeyAction(name: string): Promise<ExtensionKeyState> {
+  const ctx = await getPageContext();
+  try {
+    const { key } = await createExtensionKey(ctx, { name });
+    revalidatePath("/settings");
+    return { ok: true, key, nonce: Date.now() };
+  } catch (err) {
+    const se = toServiceError(err);
+    if (!se) throw err;
+    return { ok: false, error: se.message };
+  }
+}
+
+export async function revokeExtensionKeyAction(id: string): Promise<ExtensionKeyState> {
+  const ctx = await getPageContext();
+  try {
+    await revokeExtensionKey(ctx, id);
+    revalidatePath("/settings");
+    return { ok: true, nonce: Date.now() };
+  } catch (err) {
+    const se = toServiceError(err);
+    if (!se) throw err;
+    return { ok: false, error: se.message };
+  }
 }

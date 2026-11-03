@@ -356,7 +356,7 @@ interface MetricDef extends CompanyMetricOption {
   aggregation: "sum" | "avg" | "last";
   direction: "higher_is_better" | "lower_is_better" | "neutral";
   target: string | null;
-  sourceKind: "manual" | "upload" | "connector" | "derived";
+  sourceKind: "manual" | "upload" | "connector" | "derived" | "extension";
   connectorId: string | null;
 }
 

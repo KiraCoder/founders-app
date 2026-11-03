@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { DataSources } from "@/components/metrics/DataSources";
+import { ExtensionKeysCard } from "@/components/settings/ExtensionKeysCard";
 import { PreferencesForm } from "@/components/settings/PreferencesForm";
 import { SalaryAccessCard } from "@/components/settings/SalaryAccessCard";
 import { ReminderClockCard } from "@/components/settings/ReminderClockCard";
@@ -9,6 +10,9 @@ import { PageHeader } from "@/components/ui";
 import { getPageContext } from "@/server/context";
 import { devToolsEnabled, telegramBotToken, telegramBotUsername } from "@/server/notifications/config";
 import { canSetUpApp, getReminderClockConfig, getTelegramSetupConfig } from "@/server/services/app-setup";
+import { resolveAppBaseUrl } from "@/server/app-url";
+import { canUseExtension } from "@/server/services/access";
+import { listExtensionKeys, listIngestLog } from "@/server/services/extension";
 import { listConnectorStatuses } from "@/server/services/connectors";
 import { getMyPreferences, getMyTelegramLink } from "@/server/services/notifications";
 import { canViewSalaries, listSalaryAccessLog, listSalaryViewers } from "@/server/services/salaries";
@@ -26,6 +30,7 @@ export default async function SettingsPage() {
   ]);
   const log = isViewer ? await listSalaryAccessLog(ctx, 15) : [];
   const founder = canSetUpApp(ctx);
+  const [extKeys, ingestLog] = canUseExtension(ctx) ? await Promise.all([listExtensionKeys(ctx), listIngestLog(ctx, 15)]) : [[], []];
   const fmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: ctx.timeZone });
   const linkedAt = link
     ? new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: ctx.timeZone }).format(link.createdAt)
@@ -94,6 +99,26 @@ export default async function SettingsPage() {
           </details>
         )}
       </section>
+
+      {canUseExtension(ctx) && (
+        <section className="card mb-5 p-4 md:p-5" aria-labelledby="extension-heading">
+          <h2 id="extension-heading" className="eyebrow mb-3">
+            Browser extension
+          </h2>
+          <ExtensionKeysCard
+            endpoint={`${resolveAppBaseUrl()?.url ?? ""}/api/v1/ingest`}
+            keys={extKeys.map((k) => ({
+              id: k.id,
+              name: k.name,
+              prefix: k.prefix,
+              created: fmt.format(new Date(k.createdAt)),
+              lastUsed: k.lastUsedAt ? fmt.format(new Date(k.lastUsedAt)) : null,
+              revoked: k.revokedAt ? fmt.format(new Date(k.revokedAt)) : null,
+            }))}
+            log={ingestLog.map((l) => ({ ...l, at: fmt.format(new Date(l.at)) }))}
+          />
+        </section>
+      )}
 
       <section className="card mb-5 p-4 md:p-5" aria-labelledby="sources-heading">
         <h2 id="sources-heading" className="eyebrow mb-1">

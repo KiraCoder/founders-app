@@ -2,8 +2,12 @@ import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE, verifySessionToken } from "@/server/auth/session-token";
 import { checkMutatingApiRequest } from "@/server/http/request-guard";
 
-/** No session cookie needed. The two API routes check their own secrets (constant-time). */
-const PUBLIC_PATHS = ["/login", "/api/telegram/webhook", "/api/cron/tick", "/api/health"];
+/**
+ * No session cookie needed. These API routes check their own secrets (constant-time) — the
+ * ingest route a browser extension key (Bearer), and it answers its own CORS preflight, so it
+ * is exempt from the same-origin guard below too.
+ */
+const PUBLIC_PATHS = ["/login", "/api/telegram/webhook", "/api/cron/tick", "/api/health", "/api/v1/ingest"];
 
 /**
  * First gate: every route except /login needs a validly signed session cookie.

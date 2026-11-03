@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import { login } from "./helpers";
 
 /** Generates docs/screenshots/*.png. Run with: SCREENSHOTS=1 npx playwright test screenshots */
@@ -140,4 +140,36 @@ test("org structure screenshots", async ({ page, browser }) => {
   await phone.getByTestId("org-board").waitFor();
   await phone.screenshot({ path: "docs/screenshots/org-phone.png" });
   await context.close();
+});
+
+test("AI role editor and browser extension screenshots", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await login(page, "nuraaly");
+  // The role editor (template level) of the Financial Analyst.
+  await page.goto("/ai-roles");
+  await page.locator('[data-testid="role-template"][data-role="financial-analyst"]').getByRole("button", { name: "Edit role" }).click();
+  await page.getByRole("dialog").waitFor();
+  await page.getByRole("dialog").getByTestId("editor-checks").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "docs/screenshots/ai-role-editor.png" });
+  await page.keyboard.press("Escape");
+  // A custom role's report (made by e2e/ai-custom-roles.spec.ts).
+  const custom = page.locator('[data-testid="hire-card"]', { hasText: "Revenue watcher" }).first();
+  await custom.getByRole("link", { name: /Latest/ }).click();
+  await page.waitForURL(/\/ai-roles\/runs\//);
+  // Numbers may have been corrected by later e2e runs: check them again first.
+  const again = page.getByRole("button", { name: "Run again" });
+  if (await page.getByText("Numbers changed").count()) {
+    await again.click();
+    await expect(page.getByText("Numbers changed")).toHaveCount(0);
+  }
+  await page.screenshot({ path: "docs/screenshots/ai-custom-role-report.png", fullPage: true });
+  // Settings → Browser extension (a key just created; the key itself hidden again with Done).
+  await page.goto("/settings");
+  const card = page.getByTestId("extension-card");
+  await card.getByLabel("Key name").fill("Laptop Chrome");
+  await card.getByRole("button", { name: "Create key" }).click();
+  await card.getByTestId("new-extension-key").waitFor();
+  await card.getByRole("button", { name: "Done" }).click();
+  await card.scrollIntoViewIfNeeded();
+  await page.locator("section", { has: card }).screenshot({ path: "docs/screenshots/extension-keys.png" });
 });

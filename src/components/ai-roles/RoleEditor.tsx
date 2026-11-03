@@ -496,7 +496,7 @@ export function RoleEditor({
                           <label key={p.key} className="text-[12px]">
                             <span className="text-muted">{p.label}</span>
                             <input
-                              className="input mt-0.5 w-28"
+                              className={`input mt-0.5 block ${p.nullLabel ? "w-60" : "w-28"}`}
                               inputMode="numeric"
                               value={typeof c[p.key] === "number" ? String(c[p.key]) : ""}
                               placeholder={p.nullLabel ?? ""}

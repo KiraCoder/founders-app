@@ -20,6 +20,11 @@ const CARD_TONE: Record<string, string> = {
   risk: "border-risk-line bg-risk-soft",
 };
 
+/** "extension:wb-seller" (an ingest call of the browser extension) → "Browser extension (wb-seller)". */
+export function sourceName(connectorId: string): string {
+  return connectorId.startsWith("extension:") ? `Browser extension (${connectorId.slice("extension:".length)})` : connectorId;
+}
+
 export function sourceLabel(m: Pick<MetricCard, "sourceKind" | "connectorId">, connectorNames: Record<string, string>): string {
   if (m.sourceKind === "connector") return m.connectorId ? (connectorNames[m.connectorId] ?? m.connectorId) : "Connector";
   return m.sourceKind === "upload" ? "Upload" : "Manual entry";
@@ -80,7 +85,7 @@ export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: Is
       </div>
       {m.disagreements[0] && (
         <p className="text-[11px] text-warn" data-testid="kpi-disagrees">
-          Source disagrees: {connectorNames[m.disagreements[0].connectorId] ?? m.disagreements[0].connectorId} says {formatMetricValue(m.disagreements[0].reported, m.unit)} for{" "}
+          Source disagrees: {connectorNames[m.disagreements[0].connectorId] ?? sourceName(m.disagreements[0].connectorId)} says {formatMetricValue(m.disagreements[0].reported, m.unit)} for{" "}
           {formatPeriod(m.disagreements[0].period, m.granularity)} (kept {formatMetricValue(m.disagreements[0].kept, m.unit)}{" "}
           {m.disagreements[0].keptSource === "upload" ? "from the upload" : "entered by hand"})
           {m.disagreements.length > 1 && ` +${m.disagreements.length - 1} more`}
@@ -91,7 +96,9 @@ export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: Is
           ? `Updated ${agoText(m.latest.enteredDay, today)}${m.latest.enteredByName ? ` by ${m.latest.enteredByName}` : ""} · ${
               m.latest.source === "connector"
                 ? `via ${sourceLabel(m, connectorNames)}`
-                : m.latest.source === "derived"
+                : m.latest.source === "extension"
+                  ? "via the browser extension"
+                  : m.latest.source === "derived"
                   ? "computed from the Holding page"
                   : m.latest.source === "upload"
                     ? "via upload"
