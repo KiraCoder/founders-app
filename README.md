@@ -760,6 +760,49 @@ and the run records `narrative_skipped:salary` — the report itself never fails
 Only the factory's piecework pay **total** (`piecework_total`) is allowed, by explicit key.
 Without a provider no prompt is built at all.
 
+## Org structure (Vysotsky model)
+
+`/org` (sidebar → Org structure; company switcher, Kiwi Go first) and each company's **Org
+structure** tab. Logic in `src/server/services/org.ts`, pure rules / templates in `src/lib/org.ts`.
+
+- **Model.** One chart per company, optionally per company unit (Alura Style ХБК / Ош Район get
+  their own chart via *Chart for:*). Tables (migration `0017_org_structure.sql`, RLS + revoke):
+  `org_charts`, `org_divisions` (1–7, shown 7, 1, 2 … 6; name, Руководитель title,
+  Подчинение, ЦКП, head person), `org_departments` (number, name, ЦКП, Статистика, optional
+  linked company number, head person, order), `org_functions` (text, responsible person,
+  order), `org_change_log` (who / when / before / after). Nothing is deleted: departments and
+  functions are **archived** (*Show archived* → *Restore*, back where they were).
+- **Kiwi Go** is seeded from the old cockpit (divisions 7, 1, 2, 3 complete; division 4
+  "Операции" with the visible department names marked "(уточнить)"; 5 and 6 template names,
+  departments 13–18 empty). `db:seed` creates it only when Kiwi Go has no chart, so edits are
+  never overwritten. Other companies: **Apply Vysotsky template** (7/21, standard Russian
+  names marked "default name" until renamed).
+- **Editing (founders).** *Edit mode*: click any text to edit it in place (saved on blur),
+  drag ⠿ to move functions within / between departments and departments within / between
+  divisions (dnd-kit; also keyboard: focus ⠿, Space, arrows, Space), or use ⋯ → Move up /
+  down / *Move to department* / *Move to division* / Archive (keyboard and phone path).
+  Click a department (or ⓘ) for the right-hand panel: head (people of **that** company
+  only), ЦКП, statistic, linked number with its latest value and freshness, functions with
+  responsible people, open / overdue tasks of the department. Division ⓘ: head person,
+  Руководитель, Подчинение, ЦКП. Phone: one division at a time (tabs), text and people
+  editing; dragging only on a laptop.
+- **Undo / history.** Every change is one logged transaction (the chart row is locked; order
+  rewritten 0, 1, 2 …). *Undo* takes back the newest change not yet undone, one at a time,
+  among the last 20 changes (undos are logged too). *History* lists the last 20 entries.
+- **Isolation.** Moves stay inside one chart; a department / division / person / number of
+  another company is "not found" or refused, also with forged ids.
+- **Tasks.** Company tasks have an optional *Department (org chart)* picker
+  (`tasks.org_department_id`, must be of the task's company; changing the company clears it).
+- **Org Structure Expert** (AI roles, rule-based, no AI provider): divisions / departments
+  without a head, one person heading more than N departments (default 4, tunable), no ЦКП,
+  no statistic, linked number not up to date, 5+ overdue tasks, functions without a
+  responsible person (info). Shown as a strip above every board and as a section on
+  `/ai-roles`. Hire it per company (*Hire Org Structure Expert*: company → limit → who gets
+  it): no monthly runs, no pushes; on **Mondays** its recipients get **one** grouped line in
+  the morning summary (all hired companies, warnings only, stale numbers left to *Numbers
+  waiting*), computed when the summary is built so nothing piles up. Brainstorming / advice
+  waits for the AI provider.
+
 ## REST API (for the future iOS app)
 
 Session-cookie auth for now; JSON errors look like `{ "error": { "code", "message", "fields?" } }`.
@@ -808,7 +851,8 @@ src/
       people/              People list, person page, new person, import wizard (+ server actions)
       holding/             Holding: акты grid + cell panel, Ask Elmurat, debts, договоры, flows (+ server actions)
       ai-roles/            AI roles: catalogue, Hire/Tune wizard, hired roles; runs/[id] report page (+ server actions)
-      search/ more/ org/
+      org/                 Org structure board (+ server actions); components/org/ holds the board, panels, expert strip
+      search/ more/
       settings/            Own notification preferences + Telegram link; Access (salary viewers);
                            founders: Connect Telegram, Start reminder clock (services/app-setup.ts)
       dev/notifications/   Dev inbox (dev tools only)
@@ -827,7 +871,7 @@ src/
     app-url.ts             The site's address (APP_URL, else Vercel's)
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
                            people-import, metrics, metrics-import, connectors, search, notifications,
-                           holding, holding-asks, holding-files, ai-roles)
+                           holding, holding-asks, holding-files, ai-roles, org, org-expert)
     ai/                    AI roles: provider.ts (LlmProvider, NoneProvider), finance-rules.ts, month-values.ts,
                            narrative.ts (prompt builder, no salaries), orchestrator.ts (tick + morning-summary dedupe)
     storage/               FileStorage for documents: local .data/uploads, Supabase placeholder
@@ -843,7 +887,7 @@ vercel.json                Vercel build command (npm run vercel-build); no crons
 supabase/policies.sql      RLS policies for a future direct-client mode (applied by hand)
 tests/                     Vitest unit + service tests
 e2e/                       Playwright smoke test + screenshots
-docs/screenshots/          UI screenshots (ai-roles-hire-wizard.png, ai-report.png, holding-desktop.png, holding-act-panel.png, numbers-grid.png, people-list-salaries.png, …)
+docs/screenshots/          UI screenshots (org-desktop.png, org-edit-mode.png, org-phone.png, ai-roles-hire-wizard.png, ai-report.png, holding-desktop.png, holding-act-panel.png, numbers-grid.png, people-list-salaries.png, …)
 docs/samples/              people-sample.csv, kiwi-go-numbers-sample.csv (fake data) for the importers
 docs/reviews/              Independent reviews and how each finding was resolved
 ```

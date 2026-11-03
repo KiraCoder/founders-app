@@ -120,3 +120,20 @@ test("AI roles screenshots", async ({ page }) => {
   await page.goto("/ai-roles");
   await page.screenshot({ path: "docs/screenshots/ai-roles-desktop.png", fullPage: true });
 });
+
+test("org structure screenshots", async ({ page, browser }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await login(page, "nuraaly");
+  await page.goto("/org?company=kiwi-go");
+  await page.getByTestId("org-board").waitFor();
+  await page.screenshot({ path: "docs/screenshots/org-desktop.png" });
+  await page.getByRole("button", { name: "Edit mode" }).click();
+  await page.screenshot({ path: "docs/screenshots/org-edit-mode.png" });
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+  const phone = await context.newPage();
+  await login(phone, "nuraaly");
+  await phone.goto("/org?company=kiwi-go");
+  await phone.getByTestId("org-board").waitFor();
+  await phone.screenshot({ path: "docs/screenshots/org-phone.png" });
+  await context.close();
+});
