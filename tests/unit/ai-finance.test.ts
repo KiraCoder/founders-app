@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chaseDueToday, firstPeriodFor, monthsLabel, runDueOn, scheduledPeriod, scheduleLabel, hireSettingsSchema } from "@/lib/ai-roles";
 import { changeAtLeast, dec, div, divInt, formatDec, pctChange, pctOf, sum, toFixed, toText } from "@/lib/decimal";
 import { analyseFinance, severitySummary, type FinanceInput, type MonthSeries } from "@/server/ai/finance-rules";
-import { monthValue, periodsInMonth } from "@/server/ai/month-values";
+import { monthlyName, monthValue, periodsInMonth } from "@/server/ai/month-values";
 
 const P = "2026-10-01";
 const MONTHS = ["2026-07-01", "2026-08-01", "2026-09-01", "2026-10-01"];
@@ -75,6 +75,14 @@ describe("month values from daily / weekly / monthly numbers", () => {
     const days = periodsInMonth("2026-10-01", "day");
     const vals = new Map(days.map((d) => [d, "1234567.89"]));
     expect(monthValue({ granularity: "day", aggregation: "sum" }, vals, "2026-10-01")).toEqual({ value: "38271604.59" });
+  });
+  it("month values are labelled as what they are (total, average, end of month)", () => {
+    expect(monthlyName({ name: "Orders per day", granularity: "day", aggregation: "sum" })).toBe("Orders (month total)");
+    expect(monthlyName({ name: "On-time delivery", granularity: "day", aggregation: "avg" })).toBe("Average on-time delivery");
+    expect(monthlyName({ name: "WMS orders processed", granularity: "day", aggregation: "avg" })).toBe("Average WMS orders processed");
+    expect(monthlyName({ name: "Active couriers", granularity: "week", aggregation: "last" })).toBe("Active couriers (end of month)");
+    expect(monthlyName({ name: "COD collected", granularity: "day", aggregation: "sum" })).toBe("COD collected (month total)");
+    expect(monthlyName({ name: "Revenue", granularity: "month", aggregation: "sum" })).toBe("Revenue");
   });
   it("weeks belong to the month of their Monday", () => {
     expect(periodsInMonth("2026-10-01", "week")).toEqual(["2026-10-05", "2026-10-12", "2026-10-19", "2026-10-26"]);

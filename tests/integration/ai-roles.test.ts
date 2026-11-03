@@ -331,6 +331,11 @@ describe("analysis and the report-ready push", () => {
     );
     expect(view.inputs!.months).toEqual(["2026-07-01", "2026-08-01", "2026-09-01", "2026-10-01"]);
     expect(view.inputs!.metrics.find((m) => m.key === "revenue")!.values).toEqual([null, "1000000", "1200000", "810000"]);
+    // "Numbers used" labels month values as what they are (31 daily values summed).
+    expect(view.inputs!.metrics.map((m) => m.label)).toContain("Orders (month total)");
+    expect(view.inputs!.metrics.map((m) => m.label)).not.toContain("Orders per day");
+    expect(view.inputs!.metrics.find((m) => m.key === "orders_day")!.values.at(-1)).toBe("3100");
+    expect(view.inputs!.metrics.find((m) => m.key === "on_time_pct")!.label).toBe("Average on-time delivery");
     // November still waits: Talant's request now asks only for November.
     const nov = (await t.handle.db.select().from(aiRoleRuns)).find((r) => r.period === "2026-11-01");
     expect(nov?.status).toBe("waiting_for_data");

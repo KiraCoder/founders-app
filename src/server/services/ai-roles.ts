@@ -26,7 +26,7 @@ import {
 } from "@/lib/ai-roles";
 import { addDays, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import { analyseFinance, countBySeverity, severitySummary, type Finding, type MonthSeries, type Severity } from "@/server/ai/finance-rules";
-import { monthValue, periodsInMonth, type Granularity } from "@/server/ai/month-values";
+import { monthlyName, monthValue, periodsInMonth, type Granularity } from "@/server/ai/month-values";
 import { generateNarrative, salaryLikeFinding } from "@/server/ai/narrative";
 import { getLlmProvider, type LlmProvider } from "@/server/ai/provider";
 import type { Db } from "@/server/db/connect";
@@ -283,6 +283,8 @@ export interface CompanyMetricOption {
 
 interface MetricDef extends CompanyMetricOption {
   name: string;
+  /** Factory / unit name ("ХБК"), null for the whole company. */
+  unitName: string | null;
   unitSlug: string | null;
   aggregation: "sum" | "avg" | "last";
   direction: "higher_is_better" | "lower_is_better" | "neutral";
@@ -311,6 +313,7 @@ async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]
     key: d.key,
     name: d.name,
     label: unitName ? `${d.name} · ${unitName}` : d.name,
+    unitName: unitName ?? null,
     unit: d.unit,
     unitSlug: unitSlug ?? null,
     granularity: d.granularity,
@@ -402,11 +405,15 @@ function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: rea
         missing.push({ metricId: d.id, key: d.key, label: d.label, detail });
       }
     }
+    // Reports show MONTH values: label them as such ("Orders (month total)", not "Orders per
+    // day"). The missing list above keeps the entry name (what the founders fill in).
+    const mName = monthlyName(d);
+    const mLabel = d.unitName ? `${mName} · ${d.unitName}` : mName;
     series.push({
       metricId: d.id,
       key: d.key,
-      name: d.name,
-      label: d.label,
+      name: mName,
+      label: mLabel,
       unitSlug: d.unitSlug,
       unit: d.unit,
       direction: d.direction,
@@ -414,7 +421,7 @@ function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: rea
       months: monthVals,
       everHadData: numbers.hadEarlier.has(d.id) || vals.size > 0,
     });
-    inputs.metrics.push({ metricId: d.id, key: d.key, label: d.label, unit: d.unit, values: months.map((m) => monthVals[m] ?? null) });
+    inputs.metrics.push({ metricId: d.id, key: d.key, label: mLabel, unit: d.unit, values: months.map((m) => monthVals[m] ?? null) });
   }
   return { missing, inputs, series };
 }

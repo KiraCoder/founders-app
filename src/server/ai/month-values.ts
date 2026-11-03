@@ -51,3 +51,20 @@ export function monthValue(
 export function isComplete(v: MonthValue): v is { value: string } {
   return "value" in v;
 }
+
+/**
+ * What a month value of this metric IS, for reports: a daily "Orders per day" summed over a
+ * month is "Orders (month total)", an averaged "On-time delivery" is "Average on-time
+ * delivery", a "last" balance is "… (end of month)". Monthly numbers keep their name.
+ */
+export function monthlyName(d: { name: string; granularity: Granularity; aggregation: Aggregation }): string {
+  if (d.granularity === "month") return d.name;
+  const base = d.name.replace(/\s+(per|a)\s+(day|week)$/i, "").trim() || d.name;
+  if (d.aggregation === "avg") {
+    // Keep acronyms ("WMS …") as written; lower-case an ordinary first word.
+    const lowered = /^[A-ZА-ЯЁ][a-zа-яё]/.test(base) ? base[0]!.toLowerCase() + base.slice(1) : base;
+    return `Average ${lowered}`;
+  }
+  if (d.aggregation === "last") return `${base} (end of month)`;
+  return `${base} (month total)`;
+}

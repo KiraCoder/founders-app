@@ -220,7 +220,8 @@ export default async function RunPage({ params }: Props) {
                 </table>
               </div>
               <p className="mt-2 text-[12px] text-muted">
-                Monthly totals; a daily number counts only when every day of the month is in (— = incomplete or no value). Exact to the tyiyn.
+                One value per month: a daily or weekly number is shown as its month total, average or end-of-month value (as labelled), and counts only when every
+                day of the month is in (— = incomplete or no value). Exact to the tyiyn.
               </p>
             </Section>
           )}
