@@ -817,15 +817,27 @@ structure** tab. Logic in `src/server/services/org.ts`, pure rules / templates i
   linked company number, head person, order), `org_functions` (text, responsible person,
   order), `org_change_log` (who / when / before / after). Nothing is deleted: departments and
   functions are **archived** (*Show archived* → *Restore*, back where they were).
+  Migration `0020_org_integrity.sql` (additive) lets the database itself keep every division /
+  department / function / log row inside its chart and company (composite foreign keys) and
+  allows a department number only once among a chart's **live** departments (partial unique
+  index; old duplicates, if any, were renumbered to the next free number and logged). A new
+  department gets the next number (22, 23, …; past 99 the lowest free one; none left →
+  refused); renumbering, restoring or undoing onto a number in use is refused with the
+  department that holds it.
 - **Kiwi Go** is seeded from the old cockpit (divisions 7, 1, 2, 3 complete; division 4
   "Операции" with the visible department names marked "(уточнить)"; 5 and 6 template names,
   departments 13–18 empty). `db:seed` creates it only when Kiwi Go has no chart, so edits are
   never overwritten. Other companies: **Apply Vysotsky template** (7/21, standard Russian
   names marked "default name" until renamed).
-- **Editing (founders).** *Edit mode*: click any text to edit it in place (saved on blur),
-  drag ⠿ to move functions within / between departments and departments within / between
-  divisions (dnd-kit; also keyboard: focus ⠿, Space, arrows, Space), or use ⋯ → Move up /
-  down / *Move to department* / *Move to division* / Archive (keyboard and phone path).
+- **Editing (founders).** *Edit mode* (also opened by *+ Функция* / *+ Отдел*, shown in view
+  mode too): click any text to edit it in place (saved on blur), drag ⠿ with the mouse to move
+  functions within / between departments and departments within / between divisions
+  (dnd-kit), or use ⋯ → Move up / down / *Move to department* / *Move to division* / Archive —
+  **the ⋯ menu is the keyboard and phone path** (dnd-kit's keyboard drag — focus ⠿, Space,
+  arrows, Space — also works, but between cards of very different heights it can pick an
+  unexpected neighbour). Every change carries the chart version the board shows; if the chart
+  changed meanwhile (the other founder, another tab) the change is refused, the board
+  refreshes and says so — nothing is applied from a stale copy.
   Click a department (or ⓘ) for the right-hand panel: head (people of **that** company
   only), ЦКП, statistic, linked number with its latest value and freshness, functions with
   responsible people, open / overdue tasks of the department. Division ⓘ: head person,
@@ -836,10 +848,27 @@ structure** tab. Logic in `src/server/services/org.ts`, pure rules / templates i
   among the last 20 changes (undos are logged too). *History* lists the last 20 entries.
 - **Isolation.** Moves stay inside one chart; a department / division / person / number of
   another company is "not found" or refused, also with forged ids.
+- **People on the board.** View mode reads like an org chart: a division shows
+  "Руководитель: Генеральный директор — Нуралы" (post title and the head's name), a department
+  its head's name, each function the responsible person's initials in a small circle (full
+  name on hover / keyboard focus). Empty places show **+ назначить** (founders) — a small
+  picker of the company's people. Every person picker (that popover, the department and
+  division panels, each function in the panel) has **+ New person**: full name, short name,
+  phone, Telegram, role / title (default: the department's / function's name, editable) →
+  the person is created on People, linked to this company (and the chart's unit, if any) and
+  assigned, in one transaction and one change-log line. Founders only. *Undo* takes back the
+  assignment; the person and their company link stay (people are never deleted).
+- **Org positions on People.** The person page has an *Org positions* section (company · unit ·
+  division · department · function, head of division / department or function), and the
+  People list and a company's People tab show them under the roles.
 - **Tasks.** Company tasks have an optional *Department (org chart)* picker
   (`tasks.org_department_id`, must be of the task's company; changing the company clears it).
+  A task whose department was archived keeps it: the form lists it as "… (archived)", so
+  editing the task does not drop the link. Task rows show their department.
 - **Org Structure Expert** (AI roles, rule-based, no AI provider): divisions / departments
-  without a head, one person heading more than N departments (default 4, tunable), no ЦКП,
+  without a head, one person heading more than N departments (default 4, tunable; counted on
+  real people — a head who left the company or whose link to it ended counts as no head; the
+  strip is recomputed on every board load, so it follows each assignment at once), no ЦКП,
   no statistic, linked number not up to date, 5+ overdue tasks, functions without a
   responsible person (info). Shown as a strip above every board and as a section on
   `/ai-roles`. Hire it per company (*Hire Org Structure Expert*: company → limit → who gets

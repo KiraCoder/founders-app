@@ -710,6 +710,7 @@ function DepartmentCard({ dept, index, count, division, h }: { dept: OrgDepartme
       aria-label={`Department ${label}`}
       data-testid="org-department"
       data-number={dept.number}
+      data-id={dept.id}
     >
       <div className="flex items-start gap-1.5">
         {h.editing && (
