@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { usePathname, useSearchParams } from "next/navigation";
 import { Icon } from "@/components/Icon";
 import { logoutAction } from "@/app/(app)/actions";
 
@@ -14,7 +15,68 @@ function initials(name: string) {
     .toUpperCase();
 }
 
-export function TopBar({ user }: { user: { name: string; shortName: string; email: string } }) {
+export interface AgentHire {
+  id: string;
+  roleName: string;
+  companySlug: string;
+  companyName: string;
+  status: "active" | "paused";
+  latestRun: { id: string; periodLabel: string; status: string; summary: string } | null;
+}
+
+const RUN_LABEL: Record<string, string> = {
+  waiting_for_data: "Waiting for data",
+  ready: "Ready",
+  analysed: "Analysed",
+  reported: "Report ready",
+  failed: "Failed",
+};
+
+/** Hired AI roles in the agent panel: this company's first (on a company page), then the rest. */
+function AgentHires({ hires, onNavigate }: { hires: AgentHire[]; onNavigate: () => void }) {
+  const pathname = usePathname();
+  const slug = /^\/companies\/([^/?#]+)/.exec(pathname)?.[1] ?? null;
+  const here = slug ? hires.filter((h) => h.companySlug === slug) : [];
+  const rest = hires.filter((h) => !here.includes(h));
+  const row = (h: AgentHire) => (
+    <li key={h.id} className="card px-3 py-2 text-[13px]" data-testid="agent-hire">
+      <div className="flex items-center gap-2">
+        <span className="font-medium">{h.roleName}</span>
+        <span className="text-muted">· {h.companyName}</span>
+        {h.status === "paused" && <span className="tag ml-auto">Paused</span>}
+      </div>
+      {h.latestRun ? (
+        <Link href={`/ai-roles/runs/${h.latestRun.id}`} onClick={onNavigate} className="mt-0.5 block text-accent hover:underline">
+          {h.latestRun.periodLabel}: {RUN_LABEL[h.latestRun.status] ?? h.latestRun.status} — {h.latestRun.summary}
+        </Link>
+      ) : (
+        <p className="mt-0.5 text-muted">No report yet</p>
+      )}
+    </li>
+  );
+  return (
+    <div className="flex flex-col gap-3 p-4">
+      {slug && (
+        <div>
+          <p className="eyebrow mb-1.5">Working for this company</p>
+          {here.length ? <ul className="flex flex-col gap-2">{here.map(row)}</ul> : <p className="text-[13px] text-muted">No AI role hired here yet.</p>}
+        </div>
+      )}
+      {rest.length > 0 && (
+        <div>
+          <p className="eyebrow mb-1.5">{slug ? "Other hired roles" : "Hired AI roles"}</p>
+          <ul className="flex flex-col gap-2">{rest.map(row)}</ul>
+        </div>
+      )}
+      {hires.length === 0 && <p className="text-[13px] text-muted">No AI roles hired yet.</p>}
+      <Link href="/ai-roles" onClick={onNavigate} className="text-[13px] text-accent hover:underline">
+        Hire or tune AI roles →
+      </Link>
+    </div>
+  );
+}
+
+export function TopBar({ user, agentHires = [] }: { user: { name: string; shortName: string; email: string }; agentHires?: AgentHire[] }) {
   const [agentOpen, setAgentOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -119,12 +181,14 @@ export function TopBar({ user }: { user: { name: string; shortName: string; emai
             <Icon name="close" />
           </button>
         </div>
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
-          <span className="tag tag-info">Not connected</span>
-          <p className="text-[15px] font-semibold">AI agents arrive after the AI provider is chosen</p>
-          <p className="text-[13px] text-muted">
-            Each page will have an agent you can talk to. Nuraaly picks the provider first; nothing is sent anywhere yet.
-          </p>
+        <div className="flex-1 overflow-y-auto">
+          <AgentHires hires={agentHires} onNavigate={() => setAgentOpen(false)} />
+          <div className="mx-4 mb-4 flex flex-col gap-1.5 rounded-[10px] border border-line bg-sunk p-3 text-[12px]">
+            <span className="tag tag-info self-start">Chat not connected</span>
+            <p className="text-muted">
+              Talking to the page&apos;s agent arrives after the AI provider is chosen (Nuraaly picks it). Hired roles already run without it; nothing is sent anywhere.
+            </p>
+          </div>
         </div>
       </aside>
     </>

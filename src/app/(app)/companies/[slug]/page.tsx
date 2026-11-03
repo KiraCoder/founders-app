@@ -17,6 +17,10 @@ import { STUB_SPECS } from "@/server/connectors/stubs";
 import { listConnectorStatuses } from "@/server/services/connectors";
 import { currentValues, listCompanyMetricCards, listMetricDefinitions } from "@/server/services/metrics";
 import { getPageContext } from "@/server/context";
+import { RunStatusTag } from "@/components/ai-roles/AiRolesBoard";
+import { FINANCIAL_ANALYST } from "@/lib/ai-roles";
+import { canUseAiRoles } from "@/server/services/access";
+import { listHireRuns, listHires } from "@/server/services/ai-roles";
 import { getCompanyBySlug } from "@/server/services/companies";
 import { today } from "@/server/services/context";
 import { ServiceError } from "@/server/services/errors";
@@ -96,9 +100,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         </ComingSoon>
       )}
       {tab === "documents" && <ComingSoon title="Documents">Contracts, акты and uploaded files for this company.</ComingSoon>}
-      {tab === "ai" && (
-        <ComingSoon title="AI roles">AI agents hired for this company. They arrive after the AI provider is chosen.</ComingSoon>
-      )}
+      {tab === "ai" && <AiRolesTab ctx={ctx} company={company} />}
     </>
   );
 }
@@ -292,5 +294,55 @@ async function TasksTab({ ctx, companyId }: { ctx: Awaited<ReturnType<typeof get
         empty="No open tasks for this company."
       />
     </>
+  );
+}
+
+async function AiRolesTab({ ctx, company }: { ctx: Ctx; company: CompanyFull }) {
+  if (!canUseAiRoles(ctx)) {
+    return <div className="card px-4 py-6 text-center text-[13px] text-muted">Only the founders can see AI roles.</div>;
+  }
+  const hires = await listHires(ctx, { companyId: company.id });
+  const runs = new Map(await Promise.all(hires.map(async (h) => [h.id, await listHireRuns(ctx, h.id, 6)] as const)));
+  const hiredAnalyst = hires.some((h) => h.templateKey === FINANCIAL_ANALYST);
+  return (
+    <Section
+      title="AI roles working for this company"
+      count={hires.length}
+      action={
+        <Link href={`/ai-roles?hire=${FINANCIAL_ANALYST}&company=${company.id}`} className="btn btn-sm">
+          {hiredAnalyst ? "Tune the Financial Analyst" : "Hire the Financial Analyst"}
+        </Link>
+      }
+    >
+      {hires.length === 0 ? (
+        <div className="card px-4 py-6 text-center text-[13px] text-muted">
+          No AI role works for {company.name} yet. The Financial Analyst checks the month&apos;s numbers, chases what is missing and reports what needs attention.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {hires.map((h) => (
+            <div key={h.id} className="card p-4" data-testid="company-hire">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold">{h.roleName}</span>
+                <Tag tone={h.status === "active" ? "ok" : "neutral"}>{h.status === "active" ? "Active" : "Paused"}</Tag>
+                <span className="text-[12px] text-muted">
+                  {h.scheduleLabel} · reports to {h.recipientNames.join(" and ")}
+                </span>
+              </div>
+              <ul className="mt-2 flex flex-col gap-1 text-[13px]">
+                {(runs.get(h.id) ?? []).map((r) => (
+                  <li key={r.id}>
+                    <Link href={`/ai-roles/runs/${r.id}`} className="flex flex-wrap items-center gap-2 hover:underline">
+                      <span className="font-medium">{r.periodLabel}</span> <RunStatusTag status={r.status} /> <span className="text-muted">{r.summary}</span>
+                    </Link>
+                  </li>
+                ))}
+                {(runs.get(h.id) ?? []).length === 0 && <li className="text-muted">No report yet — it runs {h.scheduleLabel.toLowerCase()}.</li>}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
+    </Section>
   );
 }
