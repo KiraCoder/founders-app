@@ -76,6 +76,8 @@ export function postgresClientOptions(databaseUrl: string): {
   prepare: false;
   max: number;
   connect_timeout: number;
+  idle_timeout: number;
+  max_lifetime: number;
   onnotice: () => void;
 } {
   return {
@@ -83,6 +85,10 @@ export function postgresClientOptions(databaseUrl: string): {
     // Serverless (Vercel): every instance opens its own pool; the pooler multiplexes them.
     max: isTransactionPoolerUrl(databaseUrl) ? 3 : 5,
     connect_timeout: 15,
+    // Close idle sockets quickly: a serverless instance that was frozen between requests can
+    // otherwise wake up holding a dead connection and hang the next query.
+    idle_timeout: 20,
+    max_lifetime: 60 * 10,
     // "relation already exists, skipping" and similar notices are noise in build logs.
     onnotice: () => {},
   };
