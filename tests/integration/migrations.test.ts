@@ -848,3 +848,18 @@ describe("0022 browser extension ingest", () => {
     await expect(client.query(`insert into extension_keys (user_id, name, key_hash, key_prefix) values ('${U}', 'k2', 'h1', 'fcx_')`)).rejects.toThrow();
   });
 });
+
+describe("0023 ingest rate counters", () => {
+  it("adds the counter table with RLS; the atomic upsert counts per bucket and window", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rls = await client.query<{ relrowsecurity: boolean }>("select relrowsecurity from pg_class where relname = 'ingest_rate_counters'");
+    expect(rls.rows).toEqual([{ relrowsecurity: true }]);
+    const hit = () =>
+      client.query<{ n: number }>(
+        "insert into ingest_rate_counters (bucket, window_start, n) values ('key:x', '2026-11-02T06:00:00Z', 1) on conflict (bucket, window_start) do update set n = ingest_rate_counters.n + 1 returning n",
+      );
+    expect((await hit()).rows[0]!.n).toBe(1);
+    expect((await hit()).rows[0]!.n).toBe(2);
+  });
+});

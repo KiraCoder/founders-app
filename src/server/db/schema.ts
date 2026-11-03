@@ -25,6 +25,7 @@ import {
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -719,7 +720,7 @@ export const extensionKeys = pgTable(
   (t) => [uniqueIndex("extension_keys_hash_uq").on(t.keyHash)],
 );
 
-/** Every authenticated ingest call (key, adapter, counts); also the per-key rate limit's source. */
+/** Every authenticated ingest call (key, adapter, counts). The rate limit has its own counters (ingest_rate_counters). */
 export const extensionIngestLog = pgTable(
   "extension_ingest_log",
   {
@@ -740,6 +741,23 @@ export const extensionIngestLog = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("extension_ingest_log_key_idx").on(t.keyId, t.createdAt), check("extension_ingest_log_status", sql`${t.status} in ('ok', 'invalid')`)],
+);
+
+/**
+ * Fixed one-minute windows for the ingest route's limits (0023), counted atomically
+ * (INSERT … ON CONFLICT DO UPDATE SET n = n + 1 RETURNING n) BEFORE a request is processed,
+ * so parallel requests cannot all see "under the limit". Buckets: `key:<key id>` (every
+ * authenticated call) and `authfail:<ip>` (failed authentication). Rows older than an hour are
+ * deleted as new windows start.
+ */
+export const ingestRateCounters = pgTable(
+  "ingest_rate_counters",
+  {
+    bucket: text("bucket").notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    n: integer("n").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.bucket, t.windowStart] }), index("ingest_rate_counters_window_idx").on(t.windowStart)],
 );
 
 // ---------------------------------------------------------------------------

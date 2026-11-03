@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { middleware } from "@/middleware";
-import { companies, extensionIngestLog, extensionKeys, metricDefinitions, metricValues } from "@/server/db/schema";
+import { companies, extensionIngestLog, extensionKeys, ingestRateCounters, metricDefinitions, metricValues } from "@/server/db/schema";
 import { handleIngestPreflight, handleIngestRequest } from "@/server/http/ingest";
 import type { ServiceContext } from "@/server/services/context";
 import { createExtensionKey, hashKey, INGEST_RATE_LIMIT, listExtensionKeys, listIngestLog, revokeExtensionKey } from "@/server/services/extension";
@@ -192,17 +192,46 @@ describe("POST /api/v1/ingest", () => {
     expect(refused.length).toBe(6);
   });
 
-  it(`rate limit: ${INGEST_RATE_LIMIT} calls per key per minute`, async () => {
-    now = new Date(FIXED_NOW.getTime() + 3_600_000);
-    await t.handle.db.insert(extensionIngestLog).values(
-      Array.from({ length: INGEST_RATE_LIMIT - 1 }, (_, i) => ({ keyId, status: "ok", createdAt: new Date(now.getTime() - 1000 * (i + 1)) })),
-    );
+  it(`rate limit: ${INGEST_RATE_LIMIT} calls per key per minute, counted before processing (refused calls count too)`, async () => {
+    now = new Date(FIXED_NOW.getTime() + 3_600_000 + 15_000);
+    for (let i = 0; i < INGEST_RATE_LIMIT - 2; i++) expect((await send(post(env([])))).status).toBe(200);
+    expect((await send(post(null, {}, "{not json"))).status).toBe(400); // the 59th: refused, still counts
     expect((await send(post(env([])))).status).toBe(200); // the 60th
     const limited = await send(post(env([])));
     expect(limited.status).toBe(429);
-    expect(limited.headers.get("retry-after")).toBe("60");
-    now = new Date(now.getTime() + 61_000);
+    expect(limited.headers.get("retry-after")).toBe("45"); // until the minute ends
+    now = new Date(now.getTime() + 45_000);
     expect((await send(post(env([])))).status).toBe(200);
+  });
+
+  it("rate limit holds under parallel requests: 150 at once → exactly 60 pass", async () => {
+    now = new Date(FIXED_NOW.getTime() + 7_200_000);
+    const before = (await t.handle.db.select().from(extensionIngestLog)).length;
+    const res = await Promise.all(Array.from({ length: 150 }, () => send(post(env([pt("kiwi-go", "orders_day", "2026-10-29", "7")])))));
+    const codes = res.map((r) => r.status);
+    expect(codes.filter((c) => c === 200)).toHaveLength(INGEST_RATE_LIMIT);
+    expect(codes.filter((c) => c === 429)).toHaveLength(150 - INGEST_RATE_LIMIT);
+    expect((await t.handle.db.select().from(extensionIngestLog)).length - before).toBe(INGEST_RATE_LIMIT);
+    const [counter] = await t.handle.db.select().from(ingestRateCounters).where(eq(ingestRateCounters.bucket, `key:${keyId}`)).orderBy(desc(ingestRateCounters.windowStart)).limit(1);
+    expect(counter!.n).toBe(150);
+  });
+
+  it("a call that fails inside (500) still used its slot", async () => {
+    now = new Date(FIXED_NOW.getTime() + 10_800_000);
+    const real = t.handle.db;
+    const broken = new Proxy(real, {
+      get: (target, prop) => (prop === "transaction" ? () => Promise.reject(new Error("boom")) : Reflect.get(target, prop, target)),
+    });
+    const err = console.error;
+    console.error = () => undefined;
+    try {
+      const res = await handleIngestRequest(post(env([pt("kiwi-go", "orders_day", "2026-10-28", "7")])), { db: broken, now: () => now });
+      expect(res.status).toBe(500);
+    } finally {
+      console.error = err;
+    }
+    const [counter] = await t.handle.db.select().from(ingestRateCounters).where(eq(ingestRateCounters.bucket, `key:${keyId}`)).orderBy(desc(ingestRateCounters.windowStart)).limit(1);
+    expect(counter!.n).toBe(1);
   });
 
   it("CORS: chrome-extension origins only, with preflight; other web origins are refused", async () => {
@@ -214,7 +243,7 @@ describe("POST /api/v1/ingest", () => {
     const evil = handleIngestPreflight(new Request("http://app.test/api/v1/ingest", { method: "OPTIONS", headers: { origin: "https://evil.example" } }));
     expect(evil.status).toBe(403);
     expect(evil.headers.get("access-control-allow-origin")).toBeNull();
-    now = new Date(now.getTime() + 120_000);
+    now = new Date(now.getTime() + 3_600_000);
     const fromExt = await send(post(env([]), { origin: EXT }));
     expect(fromExt.status).toBe(200);
     expect(fromExt.headers.get("access-control-allow-origin")).toBe(EXT);

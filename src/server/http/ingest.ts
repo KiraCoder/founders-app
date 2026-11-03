@@ -5,10 +5,11 @@ import { toServiceError } from "@/server/services/errors";
 import {
   authenticateKey,
   INGEST_MAX_BYTES,
+  INGEST_RATE_LIMIT,
   ingestEnvelopeSchema,
   ingestPoints,
   logIngest,
-  rateLimited,
+  takeIngestSlot,
   type KeyAuth,
 } from "@/server/services/extension";
 import { allowedOrigins } from "./request-guard";
@@ -22,7 +23,8 @@ import { allowedOrigins } from "./request-guard";
  * - CORS for this route only: `chrome-extension://…` origins get Access-Control-Allow-Origin
  *   (and a preflight answer); any other web origin is refused (403). Calls without an Origin
  *   (scripts, curl) are fine.
- * - Limits: 60 requests per key per minute (429), 256 KB body (413), 500 points (400).
+ * - Limits: 60 requests per key per minute (429; counted atomically before processing, every
+ *   authenticated call counts), 256 KB body (413), 500 points (400).
  * - Body: { source: "extension", adapterId, points: [{ companySlug, metricKey, periodStart,
  *   value (string), unitSlug? }] } → 200 { accepted, rejected: [{ index, reason }] }.
  * Every authenticated call (except rate-limited ones) is logged for Settings.
@@ -98,8 +100,11 @@ export async function handleIngestRequest(req: Request, deps: { db: Db; now?: ()
 
   const auth = await authenticateKey(deps.db, req.headers.get("authorization"));
   if (!auth) return error(401, "unauthorized", "A valid browser extension key is required (Settings → Browser extension)", origin);
-  if (await rateLimited(deps.db, auth.keyId, now())) {
-    return error(429, "rate_limited", "Too many requests for this key — at most 60 per minute", origin, { "Retry-After": "60" });
+  // Counted before anything else is done, so parallel calls can't all pass (and refused or
+  // failing calls count too).
+  const slot = await takeIngestSlot(deps.db, auth.keyId, now());
+  if (slot.limited) {
+    return error(429, "rate_limited", `Too many requests for this key — at most ${INGEST_RATE_LIMIT} per minute`, origin, { "Retry-After": String(slot.retryAfter) });
   }
 
   const invalid = async (status: number, code: string, message: string, adapterId: string | null = null, points = 0) => {

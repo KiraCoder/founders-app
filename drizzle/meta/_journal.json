@@ -162,6 +162,13 @@
       "when": 1793745982556,
       "tag": "0022_extension_ingest",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793747307005,
+      "tag": "0023_ingest_rate_counters",
+      "breakpoints": true
     }
   ]
 }

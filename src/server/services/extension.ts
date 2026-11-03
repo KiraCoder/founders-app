@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash, randomBytes } from "node:crypto";
-import { and, asc, count, desc, eq, gt, inArray, isNull } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { parseMetricInput } from "@/lib/metrics";
 import type { Db } from "@/server/db/connect";
@@ -10,6 +10,7 @@ import {
   connectorRuns,
   extensionIngestLog,
   extensionKeys,
+  ingestRateCounters,
   metricDefinitions,
   users,
   type ConnectorRunConflict,
@@ -34,7 +35,7 @@ import { byMetricThenPeriod, resolvePeriod, writeMetricValueTx } from "./metrics
 export const KEY_PREFIX = "fcx_";
 export const INGEST_MAX_POINTS = 500;
 export const INGEST_MAX_BYTES = 256 * 1024;
-/** Requests per key per rolling minute. */
+/** Requests per key per minute (fixed one-minute windows, counted before processing). */
 export const INGEST_RATE_LIMIT = 60;
 const LOG_REJECTED_MAX = 50;
 
@@ -163,13 +164,36 @@ export async function authenticateKey(db: Db, authorization: string | null): Pro
   return { keyId: row.keyId, user: { id: row.id, email: row.email, name: row.name, shortName: row.shortName, role: row.role } };
 }
 
-/** True when the key made INGEST_RATE_LIMIT calls in the last minute (logged calls count). */
-export async function rateLimited(db: Db, keyId: string, now: Date): Promise<boolean> {
+/** Start of the fixed one-minute window `now` falls in. */
+function windowStart(now: Date): Date {
+  return new Date(Math.floor(now.getTime() / 60_000) * 60_000);
+}
+
+/**
+ * Counts one hit in `bucket`'s current one-minute window, atomically
+ * (INSERT … ON CONFLICT DO UPDATE SET n = n + 1 RETURNING n), and returns the new count and
+ * the seconds until the window ends. Parallel requests each get their own number, so no more
+ * than the limit can ever pass. A new window also deletes windows older than an hour.
+ */
+export async function hitRateCounter(db: Db, bucket: string, now: Date): Promise<{ n: number; retryAfter: number }> {
+  const start = windowStart(now);
   const [row] = await db
-    .select({ n: count() })
-    .from(extensionIngestLog)
-    .where(and(eq(extensionIngestLog.keyId, keyId), gt(extensionIngestLog.createdAt, new Date(now.getTime() - 60_000))));
-  return (row?.n ?? 0) >= INGEST_RATE_LIMIT;
+    .insert(ingestRateCounters)
+    .values({ bucket, windowStart: start, n: 1 })
+    .onConflictDoUpdate({ target: [ingestRateCounters.bucket, ingestRateCounters.windowStart], set: { n: sql`${ingestRateCounters.n} + 1` } })
+    .returning({ n: ingestRateCounters.n });
+  const n = Number(row?.n ?? 1);
+  if (n === 1) await db.delete(ingestRateCounters).where(lt(ingestRateCounters.windowStart, new Date(start.getTime() - 3_600_000)));
+  return { n, retryAfter: Math.max(1, Math.ceil((start.getTime() + 60_000 - now.getTime()) / 1000)) };
+}
+
+/**
+ * Takes one of the key's INGEST_RATE_LIMIT requests of this minute BEFORE the request is
+ * processed (refused, failed and rate-limited calls count too). `limited` when none is left.
+ */
+export async function takeIngestSlot(db: Db, keyId: string, now: Date): Promise<{ limited: boolean; retryAfter: number }> {
+  const { n, retryAfter } = await hitRateCounter(db, `key:${keyId}`, now);
+  return { limited: n > INGEST_RATE_LIMIT, retryAfter };
 }
 
 export async function logIngest(
