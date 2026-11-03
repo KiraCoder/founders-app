@@ -5,7 +5,7 @@
  * Supabase's cron / net / vault schemas (the real flow, idempotent).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { connectDb, type DbHandle } from "@/server/db/connect";
 import {
@@ -90,6 +90,29 @@ describe("a database without pg_cron / pg_net / Vault (local PGlite)", () => {
     expect((schemas as unknown as { rows: unknown[] }).rows).toHaveLength(0);
     const status = await reminderClockStatus(h.db, ENV);
     expect(status).toMatchObject({ ok: false, step: "unavailable", status: { jobExists: false } });
+  });
+
+  it("passes the database's own reason for a failed create extension through, without the secret (deploy review #4)", async () => {
+    const r = await startReminderClock(h.db, ENV);
+    expect(r.message).toContain("The database said");
+    expect(r.message).toMatch(/pg_cron: .*pg_cron/);
+    // A permission error that (hypothetically) echoes the secret is shown scrubbed.
+    const dialect = new PgDialect();
+    const wrapped = new Proxy(h.db, {
+      get(target, prop, recv) {
+        if (prop !== "execute") return Reflect.get(target, prop, recv);
+        return async (q: SQL) => {
+          if (/create extension/i.test(dialect.sqlToQuery(q).sql)) {
+            throw new Error(`permission denied to create extension "pg_cron" (${SECRET})`);
+          }
+          return target.execute(q);
+        };
+      },
+    });
+    const r2 = await startReminderClock(wrapped, ENV);
+    expect(r2).toMatchObject({ ok: false, step: "unavailable" });
+    expect(r2.message).toContain('pg_cron: permission denied to create extension "pg_cron" (***)');
+    expect(r2.message).not.toContain(SECRET);
   });
 
   it("missing env: names the variables and touches nothing", async () => {

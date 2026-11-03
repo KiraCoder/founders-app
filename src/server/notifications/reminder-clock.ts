@@ -120,9 +120,15 @@ async function schemaExists(db: Db, name: string): Promise<boolean> {
   return row?.ok === true;
 }
 
-/** Makes sure pg_cron, pg_net and Vault exist (creating the extensions when allowed). Returns what is still missing. */
-async function ensureExtensions(db: Db): Promise<string[]> {
+/**
+ * Makes sure pg_cron, pg_net and Vault exist (creating the extensions when allowed). Returns
+ * what is still missing and, for each, the database's own reason (deploy review #4: e.g.
+ * "permission denied to create extension" is not the same as "not installed"), scrubbed of
+ * secrets.
+ */
+async function ensureExtensions(db: Db, secrets: string[]): Promise<{ missing: string[]; reasons: string[] }> {
   const missing: string[] = [];
+  const reasons: string[] = [];
   const steps: { schema: string; label: string; create: SQL }[] = [
     { schema: "cron", label: "pg_cron", create: sql`create extension if not exists pg_cron` },
     { schema: "net", label: "pg_net", create: sql`create extension if not exists pg_net` },
@@ -130,14 +136,19 @@ async function ensureExtensions(db: Db): Promise<string[]> {
   ];
   for (const s of steps) {
     if (await schemaExists(db, s.schema)) continue;
+    let reason: string | null = null;
     try {
       await db.execute(s.create);
-    } catch {
+    } catch (err) {
       // Not installed on this server (e.g. the local embedded database) or not allowed.
+      reason = errMessage(err, secrets);
     }
-    if (!(await schemaExists(db, s.schema))) missing.push(s.label);
+    if (!(await schemaExists(db, s.schema))) {
+      missing.push(s.label);
+      if (reason) reasons.push(`${s.label}: ${reason}`);
+    }
   }
-  return missing;
+  return { missing, reasons };
 }
 
 async function readStatus(db: Db, unavailable: string[]): Promise<ReminderClockStatus> {
@@ -207,10 +218,11 @@ export async function startReminderClock(db: Db, env: Env = process.env): Promis
   }
   const secret = env.CRON_SECRET!.trim();
   try {
-    const unavailable = await ensureExtensions(db);
+    const { missing: unavailable, reasons } = await ensureExtensions(db, [secret]);
     if (unavailable.length) {
       const status = await readStatus(db, unavailable);
-      return { ok: false, step: "unavailable", config, status, message: UNAVAILABLE_HINT.replace("{what}", unavailable.join(", ")) };
+      const why = reasons.length ? ` The database said — ${reasons.join("; ")}` : "";
+      return { ok: false, step: "unavailable", config, status, message: UNAVAILABLE_HINT.replace("{what}", unavailable.join(", ")) + why };
     }
     await upsertVaultSecret(db, VAULT_TICK_URL, config.tickUrl!, "Founders App: reminder clock tick URL");
     await upsertVaultSecret(db, VAULT_CRON_SECRET, secret, "Founders App: CRON_SECRET for the reminder clock");
