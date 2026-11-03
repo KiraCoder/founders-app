@@ -319,7 +319,7 @@ describe("grouped", () => {
     expect(nuraalyPushes(sent)[0]!.message.title).toBe("4 tasks need a new deadline");
   });
 
-  it("fits Telegram's 4096 characters: cut tasks lose their line and buttons and are not touched", async () => {
+  it("fits Telegram's 4096 characters: tasks that do not fit are '+N more', not touched; the footer stays", async () => {
     // 12 tasks one day overdue; "&" renders as "&amp;", so each line is ~1.5k characters.
     const made = [];
     for (let i = 0; i < 12; i++) made.push(await task(`${String(i).padStart(2, "0")} ${"&".repeat(290)}`, "2026-11-01"));
@@ -334,6 +334,10 @@ describe("grouped", () => {
     expect(listedLines.length).toBeGreaterThan(0);
     expect(listedLines.length).toBeLessThan(MAX_GROUPED_CHASE_TASKS);
     expect(rendered.reply_markup!.inline_keyboard).toHaveLength(listedLines.length);
+    // Budgeted, not cut: "+N more" and the footer survive, no "…".
+    expect(push.message.lines.at(-2)!.text).toBe(`+${12 - listedLines.length} more — open the app`);
+    expect(push.message.lines.at(-1)!.text).toBe("Done closes a task; +1 day / +3 days moves its deadline.");
+    expect(push.message.lines.some((l) => l.text === "…")).toBe(false);
     const rows = (await outboxFor(t.userIds.nuraaly)).filter((r) => r.kind === "overdue_chase");
     expect(rows.filter((r) => r.status === "sent")).toHaveLength(listedLines.length);
     expect(rows.filter((r) => r.status === "cancelled" && r.lastError === "grouped_not_listed")).toHaveLength(12 - listedLines.length);

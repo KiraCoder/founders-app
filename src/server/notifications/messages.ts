@@ -276,26 +276,38 @@ export const GROUPED_CHASE_ACTIONS = [
  * The grouped overdue chase ("grouped" chase style): ONE push for every overdue task due a
  * chase today. Each task is a numbered line (carrying taskRef, so fitTelegram drops its buttons
  * if the line is cut) with its own keyboard row: "1 · Done", "1 · +1 day", "1 · +3 days".
+ * Task lines share SUMMARY_TEXT_BUDGET with the title, the "+N more — open the app" line and
+ * the footer, so those two always survive (fitTelegram has nothing to cut): a task is listed
+ * while it fits (and up to MAX_GROUPED_CHASE_TASKS), the rest is "+N more".
  * `listed` = the tasks that got a line (only those count as touched today).
  */
 export function buildGroupedChase(
   tasks: readonly (TaskLike & { project?: { name: string } | null })[],
   today: IsoDate,
 ): { message: NeutralMessage; listed: string[] } {
-  const shown = tasks.slice(0, MAX_GROUPED_CHASE_TASKS);
   const n = tasks.length;
-  const lines: MessageLine[] = shown.map((t, i) => ({
-    text: `${i + 1}. ${taskLine(t, today)}`,
-    style: "text",
-    refs: [taskRef(t.id)],
-  }));
+  const title = `${n} task${n === 1 ? " needs" : "s need"} a new deadline`;
+  const footer: MessageLine = { text: "Done closes a task; +1 day / +3 days moves its deadline.", style: "muted" };
+  const moreCost = renderedLineLength({ text: MORE_IN_APP(n), style: "muted" });
+  let left = SUMMARY_TEXT_BUDGET - renderTelegramTitleLength(title) - renderedLineLength(footer);
+  const shown: (typeof tasks)[number][] = [];
+  const lines: MessageLine[] = [];
+  for (const t of tasks.slice(0, MAX_GROUPED_CHASE_TASKS)) {
+    const line: MessageLine = { text: `${shown.length + 1}. ${taskLine(t, today)}`, style: "text", refs: [taskRef(t.id)] };
+    const len = renderedLineLength(line);
+    const isLast = shown.length === n - 1;
+    if (len + (isLast ? 0 : moreCost) > left) break;
+    left -= len;
+    lines.push(line);
+    shown.push(t);
+  }
   if (n > shown.length) lines.push({ text: MORE_IN_APP(n - shown.length), style: "muted" });
-  lines.push({ text: "Done closes a task; +1 day / +3 days moves its deadline.", style: "muted" });
+  lines.push(footer);
   const actions: MessageAction[] = shown.flatMap((t, i) =>
     GROUPED_CHASE_ACTIONS.map((a) => ({ action: a.action, taskId: t.id, label: `${i + 1} · ${a.label}`, row: i })),
   );
   return {
-    message: { title: `${n} task${n === 1 ? " needs" : "s need"} a new deadline`, lines, actions },
+    message: { title, lines, actions },
     listed: shown.map((t) => t.id),
   };
 }

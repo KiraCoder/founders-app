@@ -85,9 +85,31 @@ describe("grouped overdue push", () => {
     expect(buildGroupedChase([task("t1", "Only")], "2026-11-02").message.title).toBe("1 task needs a new deadline");
   });
 
+  it("budgets the task lines so '+N more' and the footer always survive (nothing left for fitTelegram to cut)", () => {
+    const long = "&".repeat(300); // 1 500 rendered characters per line
+    const tasks = Array.from({ length: 5 }, (_, i) => task(`t${i}`, `${i} ${long}`));
+    const { message, listed } = buildGroupedChase(tasks, "2026-11-02");
+    expect(message.title).toBe("5 tasks need a new deadline");
+    expect(listed).toEqual(["t0", "t1"]);
+    expect(message.lines.map((l) => l.text.slice(0, 3))).toEqual(["1. ", "2. ", "+3 ", "Don"]);
+    expect(message.lines.at(-2)!.text).toBe("+3 more — open the app");
+    expect(message.lines.at(-1)!.text).toBe("Done closes a task; +1 day / +3 days moves its deadline.");
+    expect(message.actions!.map((a) => a.taskId)).toEqual(["t0", "t0", "t0", "t1", "t1", "t1"]);
+    const fitted = fitTelegram(message);
+    expect(fitted.message).toBe(message); // already fits: unchanged
+    expect(renderTelegram(message).text.length).toBeLessThanOrEqual(TELEGRAM_MAX_TEXT);
+  });
+
   it("fitTelegram drops the buttons of a task whose line was cut", () => {
     const long = "x".repeat(2500);
-    const { message } = buildGroupedChase([task("t1", long), task("t2", long)], "2026-11-02");
+    const message: NeutralMessage = {
+      title: "2 tasks need a new deadline",
+      lines: [
+        { text: `1. ${long}`, style: "text", refs: [taskRef("t1")] },
+        { text: `2. ${long}`, style: "text", refs: [taskRef("t2")] },
+      ],
+      actions: ["t1", "t2"].flatMap((id) => [{ action: "done" as const, taskId: id, label: "Done" }]),
+    };
     const fitted = fitTelegram(message);
     expect(fitted.keptRefs.has(taskRef("t1"))).toBe(true);
     expect(fitted.keptRefs.has(taskRef("t2"))).toBe(false);
@@ -96,4 +118,5 @@ describe("grouped overdue push", () => {
     const single: NeutralMessage = { title: "x", lines: [{ text: long }, { text: long }], actions: [{ action: "done", taskId: "t9", label: "Done" }] };
     expect(fitTelegram(single).message.actions).toHaveLength(1);
   });
+
 });

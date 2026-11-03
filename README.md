@@ -196,8 +196,9 @@ How it works (all in `src/server/notifications/`):
      per task (*1 · Done*, *1 · +1 day*, *1 · +3 days*; at most 10 tasks, then "+N more — open
      the app"). It counts as **one** push against the budget (or against the urgent cap of 2
      when an urgent-priority task leads it), follows quiet hours, the fold-into-summary rule
-     and `not_linked` like any push, is shortened to 4096 characters by whole lines (a task
-     whose line is cut loses its buttons too), and is the day's one push for every task it
+     and `not_linked` like any push, keeps to Telegram's 4096 characters by listing tasks
+     only while they fit (the rest joins "+N more — open the app"; that line and the footer
+     always stay; a task not listed has no buttons), and is the day's one push for every task it
      lists (a snooze reminder for such a task that day is cancelled). A task left out (past
      the 10, or cut) is not touched that day — its own row is cancelled `grouped_not_listed`
      even when it was the row the dispatcher picked first; the first listed row then carries
