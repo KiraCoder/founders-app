@@ -979,7 +979,7 @@ export async function syncDebtMetric(db: Db, now: Date, timeZone: string, opts: 
         await tx
           .select({ period: metricValues.periodStart, value: metricValues.value, source: metricValues.source })
           .from(metricValues)
-          .where(and(eq(metricValues.metricId, metric.id), eq(metricValues.isCurrent, true), gte(metricValues.periodStart, first), lte(metricValues.periodStart, last)))
+          .where(and(eq(metricValues.metricId, metric.id), eq(metricValues.isCurrent, true), eq(metricValues.periodKind, "period"), gte(metricValues.periodStart, first), lte(metricValues.periodStart, last)))
       ).map((r) => [r.period, r]),
     );
     const out: DebtMonthSync[] = [];

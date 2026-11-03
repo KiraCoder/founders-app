@@ -390,6 +390,10 @@ whether higher or lower is better, an optional target, and its expected source
   ("Updated 3 days ago by Talant · via upload"), and "Source disagrees: … says X (kept Y)"
   when a data source reported another number than the one entered by hand. **Enter value**
   opens a small form on the card, set to the oldest missing period.
+- **Month totals (daily numbers):** under the daily Numbers grid a *Month totals* table takes
+  one value per finished month for each daily number (total / average / end-of-month value by
+  its aggregation). It is used only by AI roles set to accept monthly totals (see *AI roles*)
+  and never mixes into the days, the card, the sparkline or freshness.
 - **Only finished periods:** daily numbers may be entered for today; weekly and monthly numbers
   only for a **finished** week / month ("This month isn't finished yet"), so a month-to-date
   total is never stored as the month's number. Future periods are refused everywhere.
@@ -598,6 +602,23 @@ it at once). A failure while re-analysing a run that already has a report keeps 
    theirs, and resuming / asking them again revives the same request with its original cadence
    (no new 7 days of daily chasing). No separate pushes — so no budget use, and quiet hours / "not linked" work like the
    summary itself.
+   **Monthly totals for daily numbers** (Tune → *Data it needs* → *Accept monthly totals for
+   daily numbers*, per hire, **off by default**). Off: a daily number counts only with every
+   day of the month (today's behaviour). On: when its days are incomplete, the role uses a
+   **month total** a founder entered for that number and month — an **average** for averaged
+   numbers (on-time %), the **end-of-month value** for "last" numbers. Complete days always
+   win; otherwise the month total; otherwise it is missing. Month totals are entered under the
+   daily Numbers grid (*Month totals*, the last 3 finished months) or right in the report's
+   "Waiting for these numbers" list ("October average [ ] Save", then the numbers are checked
+   again). They are stored as metric values with `period_kind = month_total` on the 1st of the
+   month (migration `0015`): latest wins per number + month with history kept, finished months
+   and daily numbers only, never part of the daily series, cards, freshness or *Numbers
+   waiting*, and a data source never writes or replaces them. The report's *Numbers used*
+   marks such a value "(month total entered)" / "(month average entered)", the missing list
+   says "21 of 31 days missing — or enter the month total", and the request line says
+   "— enter the October total (or every day): …" ("total or average" when both kinds are
+   missing; "… until the data source is connected" for connector numbers). Turning the switch
+   on after a report shows *Settings changed* on it.
 3. Complete → the **rule-based analysis** (`src/server/ai/finance-rules.ts`, exact decimals,
    no AI): change vs the month before and vs the 3-month average beyond the thresholds; ratios
    when both numbers exist (COD paid out vs collected, revenue per order, piecework pay per

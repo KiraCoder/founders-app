@@ -33,6 +33,7 @@ import {
   metricValues,
   users,
   type ConnectorRunConflict,
+  type MetricPeriodKind,
   type MetricSource,
 } from "@/server/db/schema";
 import { assertCompanyAccess, assertMetricAccess, visibleMetricsWhere } from "./access";
@@ -47,6 +48,13 @@ import { ServiceError } from "./errors";
  */
 
 export const SPARK_PERIODS = 12;
+
+/**
+ * Rows of the metric's own periods only. Month totals entered for daily numbers
+ * (period_kind = month_total) are never part of the series, freshness, cards or the grid's
+ * period rows; only AI roles that accept them read them (services/ai-roles.ts).
+ */
+export const ownPeriodRows = () => eq(metricValues.periodKind, "period");
 
 export interface MetricView {
   id: string;
@@ -180,7 +188,7 @@ async function freshnessInputs(db: Db, metricIds: string[], todayIso: IsoDate): 
       latest: sql<string>`max(${metricValues.periodStart})::text`,
     })
     .from(metricValues)
-    .where(and(inArray(metricValues.metricId, metricIds), eq(metricValues.isCurrent, true)))
+    .where(and(inArray(metricValues.metricId, metricIds), eq(metricValues.isCurrent, true), ownPeriodRows()))
     .groupBy(metricValues.metricId);
   // Oldest period any gap window can reach (monthly: 3 months before the expected month).
   const since = (["day", "week", "month"] as const)
@@ -189,7 +197,7 @@ async function freshnessInputs(db: Db, metricIds: string[], todayIso: IsoDate): 
   const recent = await db
     .select({ metricId: metricValues.metricId, period: metricValues.periodStart })
     .from(metricValues)
-    .where(and(inArray(metricValues.metricId, metricIds), eq(metricValues.isCurrent, true), gte(metricValues.periodStart, since)));
+    .where(and(inArray(metricValues.metricId, metricIds), eq(metricValues.isCurrent, true), ownPeriodRows(), gte(metricValues.periodStart, since)));
   const out = new Map<string, FreshnessInputs>();
   for (const b of bounds) out.set(b.metricId, { first: b.first, latest: b.latest, periods: new Set() });
   for (const r of recent) out.get(r.metricId)?.periods.add(r.period);
@@ -261,7 +269,7 @@ export async function buildMetricCards(ctx: ServiceContext, defs: MetricView[]):
     })
     .from(metricValues)
     .leftJoin(users, eq(users.id, metricValues.enteredBy))
-    .where(and(inArray(metricValues.metricId, ids), eq(metricValues.isCurrent, true)))
+    .where(and(inArray(metricValues.metricId, ids), eq(metricValues.isCurrent, true), ownPeriodRows()))
     .as("ranked");
   const rows = await ctx.db.select().from(ranked).where(sql`${ranked.rn} <= ${SPARK_PERIODS + 1}`);
   const byMetric = new Map<string, typeof rows>();
@@ -333,7 +341,7 @@ export async function listMetricValues(
     .select({ v: metricValues, enteredByName: users.shortName })
     .from(metricValues)
     .leftJoin(users, eq(users.id, metricValues.enteredBy))
-    .where(and(eq(metricValues.metricId, metricId), opts.includeHistory ? undefined : eq(metricValues.isCurrent, true)))
+    .where(and(eq(metricValues.metricId, metricId), ownPeriodRows(), opts.includeHistory ? undefined : eq(metricValues.isCurrent, true)))
     .orderBy(desc(metricValues.periodStart), desc(metricValues.isCurrent), desc(metricValues.createdAt))
     .limit(Math.min(Math.max(opts.limit ?? 200, 1), 1000));
   return rows.map(({ v, enteredByName }) => ({
@@ -364,6 +372,8 @@ export interface WriteMeta {
   note?: string | null;
   connectorRunId?: string | null;
   now: Date;
+  /** "month_total": a whole-month value of a daily number (see metricValues.periodKind). Default "period". */
+  periodKind?: MetricPeriodKind;
 }
 
 const sameNumber = (a: number, b: number) => Math.abs(a - b) < 1e-9;
@@ -389,7 +399,14 @@ export async function writeMetricValueTx(
   const [current] = await tx
     .select({ id: metricValues.id, value: metricValues.value, note: metricValues.note, source: metricValues.source })
     .from(metricValues)
-    .where(and(eq(metricValues.metricId, metricId), eq(metricValues.periodStart, period), eq(metricValues.isCurrent, true)));
+    .where(
+      and(
+        eq(metricValues.metricId, metricId),
+        eq(metricValues.periodStart, period),
+        eq(metricValues.periodKind, meta.periodKind ?? "period"),
+        eq(metricValues.isCurrent, true),
+      ),
+    );
   const previous = current ? Number(current.value) : null;
   const previousSource = current?.source ?? null;
   const keepNote = meta.note === undefined;
@@ -416,6 +433,7 @@ export async function writeMetricValueTx(
       enteredBy: meta.enteredBy,
       connectorRunId: meta.connectorRunId ?? null,
       note: newNote,
+      periodKind: meta.periodKind ?? "period",
       createdAt: meta.now,
     })
     .returning({ id: metricValues.id });
@@ -474,6 +492,44 @@ export async function recordMetricValue(
   return { action: res.action, period, value };
 }
 
+/** Month totals exist only for daily numbers (weekly and monthly numbers have their own periods). */
+function assertMonthTotalMetric(def: Pick<MetricView, "granularity" | "label">): void {
+  if (def.granularity !== "day") {
+    throw new ServiceError("validation", `${def.label} is not a daily number: enter its own periods instead of a month total`, {
+      value: ["Month totals are for daily numbers only"],
+    });
+  }
+}
+
+/**
+ * A month total (or month average for avg numbers, end-of-month value for last) of a DAILY
+ * number, for AI roles that accept monthly totals when the days are incomplete. Stored as a
+ * metric value with period_kind = month_total for the 1st of the month: latest wins per
+ * metric + month, history kept, never part of the daily series or freshness. Completed months
+ * only. A connector never writes these.
+ */
+export async function recordMonthTotal(
+  ctx: ServiceContext,
+  metricId: string,
+  input: { month: string; value: unknown; note?: string | null },
+): Promise<{ action: WriteAction; month: IsoDate; value: number }> {
+  const metric = await getMetric(ctx, metricId);
+  assertMonthTotalMetric(metric);
+  const month = resolvePeriod(String(input.month ?? ""), "month", today(ctx));
+  const value = resolveValue(input.value, metric.unit);
+  const res = await ctx.db.transaction((tx) =>
+    writeMetricValueTx(tx as unknown as Db, metric.id, month, value, {
+      source: "manual",
+      enteredBy: ctx.user.id,
+      note: input.note === undefined ? undefined : input.note,
+      now: ctx.now,
+      periodKind: "month_total",
+    }),
+  );
+  if (res.action === "conflict") throw new ServiceError("conflict", "Could not save the value");
+  return { action: res.action, month, value };
+}
+
 export interface GridResult {
   created: number;
   updated: number;
@@ -491,7 +547,7 @@ export async function saveMetricGrid(ctx: ServiceContext, companyId: string, raw
   const defs = new Map((await listMetricDefinitions(ctx, companyId)).map((d) => [d.id, d]));
   const t = today(ctx);
   const result: GridResult = { created: 0, updated: 0, unchanged: 0, errors: [] };
-  const valid: { metricId: string; period: IsoDate; value: number }[] = [];
+  const valid: { metricId: string; period: IsoDate; value: number; periodKind: MetricPeriodKind }[] = [];
   for (const c of cells) {
     if (c.value === "") continue;
     const def = defs.get(c.metricId);
@@ -500,7 +556,12 @@ export async function saveMetricGrid(ctx: ServiceContext, companyId: string, raw
       continue;
     }
     try {
-      valid.push({ metricId: def.id, period: resolvePeriod(c.period, def.granularity, t), value: resolveValue(c.value, def.unit) });
+      if (c.kind === "month_total") {
+        assertMonthTotalMetric(def);
+        valid.push({ metricId: def.id, period: resolvePeriod(c.period, "month", t), value: resolveValue(c.value, def.unit), periodKind: "month_total" });
+        continue;
+      }
+      valid.push({ metricId: def.id, period: resolvePeriod(c.period, def.granularity, t), value: resolveValue(c.value, def.unit), periodKind: "period" });
     } catch (err) {
       if (!(err instanceof ServiceError)) throw err;
       result.errors.push({ metricId: c.metricId, period: c.period, message: `${def.label}: ${err.message}` });
@@ -513,6 +574,7 @@ export async function saveMetricGrid(ctx: ServiceContext, companyId: string, raw
         source: "manual",
         enteredBy: ctx.user.id,
         now: ctx.now,
+        periodKind: v.periodKind,
       });
       if (r.action !== "conflict") result[r.action]++;
     }
@@ -521,7 +583,12 @@ export async function saveMetricGrid(ctx: ServiceContext, companyId: string, raw
 }
 
 /** Current values for a set of metrics and periods (grid prefill, import preview). */
-export async function currentValues(db: Db, metricIds: string[], periods?: { from: IsoDate; to: IsoDate }): Promise<Map<string, number>> {
+export async function currentValues(
+  db: Db,
+  metricIds: string[],
+  periods?: { from: IsoDate; to: IsoDate },
+  periodKind: MetricPeriodKind = "period",
+): Promise<Map<string, number>> {
   if (metricIds.length === 0) return new Map();
   const rows = await db
     .select({ metricId: metricValues.metricId, period: metricValues.periodStart, value: metricValues.value })
@@ -530,6 +597,7 @@ export async function currentValues(db: Db, metricIds: string[], periods?: { fro
       and(
         inArray(metricValues.metricId, metricIds),
         eq(metricValues.isCurrent, true),
+        eq(metricValues.periodKind, periodKind),
         periods ? sql`${metricValues.periodStart} between ${periods.from} and ${periods.to}` : undefined,
       ),
     );

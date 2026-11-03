@@ -1,5 +1,6 @@
 import "server-only";
-import { monthStart, monthsLabel } from "@/lib/ai-roles";
+import { monthName, monthStart, monthsLabel } from "@/lib/ai-roles";
+import { monthTotalKind } from "@/server/ai/month-values";
 import type { IsoDate } from "@/lib/dates";
 import type { Db } from "@/server/db/connect";
 import { aiRequestRef, type MessageLine } from "@/server/notifications/types";
@@ -67,13 +68,33 @@ function roleLine(item: AiRequestItem, missing: AiRequestItem["missing"]): strin
   // Numbers expected from a data source that is not connected yet: say how to get them in
   // meanwhile (the Monday "wait for data sources" line leaves them out, see composeRequests).
   const fromSource = missing.filter((m) => m.awaitingSource).length;
-  const how =
-    fromSource === 0
+  const monthly = monthTotalsWording(item, missing);
+  const how = monthly
+    ? `${monthly}${fromSource ? " until the data source is connected" : ""}`
+    : fromSource === 0
       ? "enter them"
       : fromSource === missing.length
         ? "enter by hand or upload until the data source is connected"
         : "enter them (the data-source ones by hand or upload until it is connected)";
   return `${item.roleName} needs ${monthsLabel(item.months)} numbers for ${item.companyName}: ${shown} — ${how}: ${appUrl(numbersHref(item.companySlug, g))}`;
+}
+
+/**
+ * A role that accepts monthly totals asks for one number per month instead of every day:
+ * "enter the October total (or every day)" — "average" for %-style (avg) numbers, "total or
+ * average" when both are missing; several months: "the September and October 2026 totals".
+ * Null when the role does not accept them or no daily number is missing.
+ */
+export function monthTotalsWording(item: Pick<AiRequestItem, "acceptMonthlyTotals" | "months">, missing: AiRequestItem["missing"]): string | null {
+  if (!item.acceptMonthlyTotals) return null;
+  const daily = missing.filter((m) => m.granularity === "day");
+  if (!daily.length) return null;
+  const kinds = new Set(missing.map((m) => (m.granularity === "day" ? monthTotalKind(m.aggregation ?? "sum") : "total")));
+  const kind = [...kinds].sort((a, b) => (a === "total" ? -1 : b === "total" ? 1 : a.localeCompare(b))).join(" or ");
+  const months = [...new Set(item.months)];
+  if (months.length === 1) return `enter the ${monthName(months[0]!)} ${kind} (or every day)`;
+  const plural = kind.split(" or ").map((k) => (k === "end-of-month value" ? "end-of-month values" : `${k}s`)).join(" or ");
+  return `enter the ${monthsLabel(months)} ${plural} (or every day)`;
 }
 
 /**

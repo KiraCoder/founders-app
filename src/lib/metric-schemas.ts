@@ -22,6 +22,8 @@ export const metricGridInputSchema = z
         metricId: z.uuid(),
         period: z.string().trim().min(1).max(20),
         value: z.string().trim().max(40),
+        /** "month_total": the whole-month value of a daily number (period = the month). */
+        kind: z.enum(["month_total"]).optional(),
       })
       .strict(),
   )

@@ -417,6 +417,32 @@ describe("0014 overdue chase style on existing data", () => {
   });
 });
 
+describe("0015 metric month totals on existing data", () => {
+  it("marks every existing value as 'period'; a month total sits next to the day without breaking one-current-per-period", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0015") });
+    const C = "33333333-3333-4333-8333-333333333333";
+    const M = "66666666-6666-4666-8666-666666666666";
+    await client.exec(`
+      insert into companies (id, slug, name) values ('${C}', 'kiwi-go', 'Kiwi Go');
+      insert into metric_definitions (id, company_id, key, name, unit, granularity) values ('${M}', '${C}', 'orders_day', 'Orders per day', 'orders', 'day');
+      insert into metric_values (metric_id, period_start, value, source) values ('${M}', '2026-10-01', 5, 'manual');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    expect((await client.query("select value, period_kind from metric_values")).rows).toEqual([{ value: "5.0000", period_kind: "period" }]);
+    await client.exec(`insert into metric_values (metric_id, period_start, value, source, period_kind) values ('${M}', '2026-10-01', 3100, 'manual', 'month_total')`);
+    await expect(
+      client.exec(`insert into metric_values (metric_id, period_start, value, source, period_kind) values ('${M}', '2026-10-01', 1, 'manual', 'month_total')`),
+    ).rejects.toThrow(/metric_values_current_uq/);
+    await expect(client.exec(`insert into metric_values (metric_id, period_start, value, source) values ('${M}', '2026-10-01', 6, 'manual')`)).rejects.toThrow(
+      /metric_values_current_uq/,
+    );
+    await expect(
+      client.exec(`insert into metric_values (metric_id, period_start, value, source, period_kind) values ('${M}', '2026-10-01', 1, 'manual', 'week_total')`),
+    ).rejects.toThrow(/metric_values_period_kind/);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();

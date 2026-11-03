@@ -26,7 +26,7 @@ import {
 } from "@/lib/ai-roles";
 import { addDays, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import { analyseFinance, countBySeverity, severitySummary, type Finding, type MonthSeries, type Severity } from "@/server/ai/finance-rules";
-import { monthlyName, monthValue, periodsInMonth, type Granularity } from "@/server/ai/month-values";
+import { monthlyName, monthTotalKind, monthTotalMark, monthValue, periodsInMonth, type Granularity } from "@/server/ai/month-values";
 import { generateNarrative, salaryLikeFinding } from "@/server/ai/narrative";
 import { getLlmProvider, type LlmProvider } from "@/server/ai/provider";
 import type { Db } from "@/server/db/connect";
@@ -55,6 +55,7 @@ import { assertAiRolesAccess, assertCompanyAccess, assertValidId } from "./acces
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { DEBT_METRIC_KEY } from "./holding";
+import { recordMonthTotal } from "./metrics";
 import { createTask } from "./tasks";
 
 /**
@@ -148,6 +149,11 @@ export interface RunView extends RunSummary {
   inputsChanged: boolean;
   /** A report was made, but the role was tuned since (required numbers / thresholds). */
   settingsChanged: boolean;
+  /**
+   * Missing daily numbers a month value can be entered for on the report (the role accepts
+   * monthly totals): metricId → "total" | "average" | "end-of-month value".
+   */
+  monthTotalEntry: Record<string, string>;
 }
 
 function findingsOf(run: Pick<AiRoleRun, "findings">): Finding[] {
@@ -187,6 +193,7 @@ function settingsOf(hire: Pick<AiRoleHire, "settings">, template: RoleTemplate, 
     requiredMetricKeys: s.requiredMetricKeys ?? d.requiredMetricKeys,
     recipients: s.recipients ?? d.recipients,
     askUserIds: s.askUserIds ?? d.askUserIds,
+    acceptMonthlyTotals: s.acceptMonthlyTotals ?? false,
   };
 }
 
@@ -349,6 +356,8 @@ interface CompanyNumbers {
   defs: MetricDef[];
   /** metricId → period start → decimal text (current values only). */
   values: Map<string, Map<IsoDate, string>>;
+  /** metricId → month → month total entered for a daily number (current values only). */
+  monthTotals: Map<string, Map<IsoDate, string>>;
   /** metricIds that have any value before the window. */
   hadEarlier: Set<string>;
 }
@@ -356,12 +365,13 @@ interface CompanyNumbers {
 async function loadCompanyNumbers(db: Db, companyId: string, months: IsoDate[]): Promise<CompanyNumbers> {
   const defs = await companyMetricDefs(db, companyId);
   const values = new Map<string, Map<IsoDate, string>>();
+  const monthTotals = new Map<string, Map<IsoDate, string>>();
   const hadEarlier = new Set<string>();
-  if (!defs.length) return { defs, values, hadEarlier };
+  if (!defs.length) return { defs, values, monthTotals, hadEarlier };
   const from = months[0]!;
   const to = addDays(addMonths(months.at(-1)!, 1), -1);
   const rows = await db
-    .select({ metricId: metricValues.metricId, period: metricValues.periodStart, value: metricValues.value })
+    .select({ metricId: metricValues.metricId, period: metricValues.periodStart, value: metricValues.value, kind: metricValues.periodKind })
     .from(metricValues)
     .where(
       and(
@@ -371,16 +381,18 @@ async function loadCompanyNumbers(db: Db, companyId: string, months: IsoDate[]):
       ),
     );
   for (const r of rows) {
-    const m = values.get(r.metricId) ?? new Map<IsoDate, string>();
+    // Month totals of daily numbers are kept apart: never mixed into the days.
+    const target = r.kind === "month_total" ? monthTotals : values;
+    const m = target.get(r.metricId) ?? new Map<IsoDate, string>();
     m.set(r.period, r.value);
-    values.set(r.metricId, m);
+    target.set(r.metricId, m);
   }
   const earlier = await db
     .selectDistinct({ metricId: metricValues.metricId })
     .from(metricValues)
     .where(and(inArray(metricValues.metricId, defs.map((d) => d.id)), eq(metricValues.isCurrent, true), lt(metricValues.periodStart, from)));
   for (const e of earlier) hadEarlier.add(e.metricId);
-  return { defs, values, hadEarlier };
+  return { defs, values, monthTotals, hadEarlier };
 }
 
 /** Plain "12345.6700" → "12345.67" (Postgres numeric text keeps 4 decimals). */
@@ -394,24 +406,32 @@ interface Evaluation {
   series: MonthSeries[];
 }
 
-function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: readonly string[]): Evaluation {
+/**
+ * One value per metric and month. With `acceptMonthlyTotals` a daily number whose days are
+ * incomplete takes the month total a founder entered (complete days always win).
+ */
+function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: readonly string[], acceptMonthlyTotals = false): Evaluation {
   const months = Array.from({ length: HISTORY_MONTHS + 1 }, (_, i) => prevMonth(period, HISTORY_MONTHS - i));
   const missing: AiRunMissing[] = [];
   const series: MonthSeries[] = [];
   const inputs: AiRunInputs = { months, metrics: [] };
   for (const d of numbers.defs) {
     const vals = numbers.values.get(d.id) ?? new Map<IsoDate, string>();
+    const totals = acceptMonthlyTotals && d.granularity === "day" ? (numbers.monthTotals.get(d.id) ?? new Map<IsoDate, string>()) : undefined;
     const monthVals: Record<IsoDate, string | null> = {};
+    const fromTotal: boolean[] = [];
     for (const m of months) {
-      const mv = monthValue(d, vals, m);
+      const mv = monthValue(d, vals, m, totals?.get(m) ?? null);
       monthVals[m] = "value" in mv ? cleanDecimal(mv.value) : null;
+      fromTotal.push("value" in mv && !!mv.fromMonthTotal);
       if (m === period && required.includes(d.key) && !("value" in mv)) {
-        const detail =
+        let detail =
           d.granularity === "month"
             ? "no value"
             : mv.missing === mv.total
               ? `no values (${mv.total} ${d.granularity === "day" ? "days" : "weeks"})`
               : `${mv.missing} of ${mv.total} ${d.granularity === "day" ? "days" : "weeks"} missing`;
+        if (totals) detail += ` — or enter the month ${monthTotalKind(d.aggregation)}`;
         missing.push({ metricId: d.id, key: d.key, label: d.label, detail });
       }
     }
@@ -432,7 +452,15 @@ function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: rea
       months: monthVals,
       everHadData: numbers.hadEarlier.has(d.id) || vals.size > 0,
     });
-    inputs.metrics.push({ metricId: d.id, key: d.key, label: mLabel, unit: d.unit, values: months.map((m) => monthVals[m] ?? null) });
+    inputs.metrics.push({
+      metricId: d.id,
+      key: d.key,
+      label: mLabel,
+      unit: d.unit,
+      values: months.map((m) => monthVals[m] ?? null),
+      // Only present when a month total was used, so reports made without one keep their hash.
+      ...(fromTotal.some(Boolean) ? { fromMonthTotal: fromTotal, monthTotalMark: monthTotalMark(d.aggregation) } : {}),
+    });
   }
   return { missing, inputs, series };
 }
@@ -444,9 +472,16 @@ function hashInputs(inputs: AiRunInputs): string {
   return sha256({ inputs });
 }
 
-/** The settings an analysis used (a Tune changes it → "Settings changed"). */
-function hashSettings(required: readonly string[], thresholds: HireSettings["thresholds"]): string {
-  return sha256({ required: [...required].sort(), thresholds: { changePct: thresholds.changePct, riskChangePct: thresholds.riskChangePct } });
+/**
+ * The settings an analysis used (a Tune changes it → "Settings changed"). "Accept monthly
+ * totals" is part of it only when on, so reports made before the switch existed keep their hash.
+ */
+function hashSettings(required: readonly string[], thresholds: HireSettings["thresholds"], acceptMonthlyTotals = false): string {
+  return sha256({
+    required: [...required].sort(),
+    thresholds: { changePct: thresholds.changePct, riskChangePct: thresholds.riskChangePct },
+    ...(acceptMonthlyTotals ? { acceptMonthlyTotals: true } : {}),
+  });
 }
 
 /** Rows analysed before 0013 stored one hash over numbers and settings together. */
@@ -461,7 +496,10 @@ function reportDrift(run: Pick<AiRoleRun, "inputsHash" | "settingsHash">, inputs
     // Legacy row: one combined hash, so a difference can't be split — report it as numbers.
     return { inputs: legacyHash(inputs, settings.requiredMetricKeys, settings.thresholds) !== run.inputsHash, settings: false };
   }
-  return { inputs: hashInputs(inputs) !== run.inputsHash, settings: hashSettings(settings.requiredMetricKeys, settings.thresholds) !== run.settingsHash };
+  return {
+    inputs: hashInputs(inputs) !== run.inputsHash,
+    settings: hashSettings(settings.requiredMetricKeys, settings.thresholds, settings.acceptMonthlyTotals) !== run.settingsHash,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +556,7 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
     const required = hc.settings.requiredMetricKeys;
     const months = Array.from({ length: HISTORY_MONTHS + 1 }, (_, i) => prevMonth(run.period, HISTORY_MONTHS - i));
     const numbers = await loadCompanyNumbers(db, hc.hire.companyId, months);
-    const ev = evaluateNumbers(numbers, run.period, required);
+    const ev = evaluateNumbers(numbers, run.period, required, hc.settings.acceptMonthlyTotals);
     if (ev.missing.length) {
       // A report already made stays (numbers were removed / settings changed later): only a
       // run that has not been analysed goes (back) to waiting.
@@ -553,7 +591,7 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
             missing: [],
             inputs: ev.inputs,
             inputsHash: hashInputs(ev.inputs),
-            settingsHash: hashSettings(required, hc.settings.thresholds),
+            settingsHash: hashSettings(required, hc.settings.thresholds, hc.settings.acceptMonthlyTotals),
             findings,
             narrative: narrative.text,
             narrativeStatus: narrative.status,
@@ -738,6 +776,8 @@ export interface AiRequestItem {
     key: string;
     label: string;
     granularity: Granularity;
+    /** How the number becomes a month value (sum → a total, avg → an average). */
+    aggregation?: "sum" | "avg" | "last";
     months?: IsoDate[];
     /**
      * Expected from a data source that is not connected yet (its short reason, "Edil's
@@ -752,6 +792,8 @@ export interface AiRequestItem {
   waitingOnHolding: { metricId: string; key: string; label: string; months?: IsoDate[] }[];
   /** True when today is one of the request's chase days (daily for 7 days, then weekly). */
   dueToday: boolean;
+  /** The role accepts a month total for daily numbers ("enter the October total (or every day)"). */
+  acceptMonthlyTotals?: boolean;
 }
 
 export function appUrl(path: string): string {
@@ -813,7 +855,16 @@ export async function collectAiRequests(ctx: ServiceContext, opts: { registry?: 
         }
         const def = defs.get(m.metricId);
         if (holdingFed({ key: m.key, sourceKind: def?.sourceKind })) waitingOnHolding.push({ metricId: m.metricId, key: m.key, label: m.label, months: [run.period] });
-        else missing.push({ metricId: m.metricId, key: m.key, label: m.label, granularity: def?.granularity ?? "month", months: [run.period], awaitingSource: def ? awaitingSourceOf(def, registry) : null });
+        else
+          missing.push({
+            metricId: m.metricId,
+            key: m.key,
+            label: m.label,
+            granularity: def?.granularity ?? "month",
+            aggregation: def?.aggregation,
+            months: [run.period],
+            awaitingSource: def ? awaitingSourceOf(def, registry) : null,
+          });
       }
     }
     out.push({
@@ -826,6 +877,7 @@ export async function collectAiRequests(ctx: ServiceContext, opts: { registry?: 
       missing,
       waitingOnHolding,
       dueToday: chaseDueToday(r.createdOn, r.lastShownOn, todayIso),
+      acceptMonthlyTotals: hc.settings.acceptMonthlyTotals === true,
     });
   }
   return out;
@@ -868,6 +920,7 @@ async function validateSettings(ctx: ServiceContext, companyId: string, s: HireS
     requiredMetricKeys: [...new Set(parsed.requiredMetricKeys)],
     recipients: [...new Set(parsed.recipients)],
     askUserIds: [...new Set(parsed.askUserIds)],
+    acceptMonthlyTotals: parsed.acceptMonthlyTotals ?? false,
   };
 }
 
@@ -971,7 +1024,12 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
   let settingsChanged = false;
   if ((run.status === "reported" || run.status === "analysed") && run.inputsHash) {
     const months = Array.from({ length: HISTORY_MONTHS + 1 }, (_, i) => prevMonth(run.period, HISTORY_MONTHS - i));
-    const ev = evaluateNumbers(await loadCompanyNumbers(ctx.db, hire.companyId, months), run.period, hire.settings.requiredMetricKeys);
+    const ev = evaluateNumbers(
+      await loadCompanyNumbers(ctx.db, hire.companyId, months),
+      run.period,
+      hire.settings.requiredMetricKeys,
+      hire.settings.acceptMonthlyTotals,
+    );
     if (!ev.missing.length) {
       const drift = reportDrift(run, ev.inputs, hire.settings);
       inputsChanged = drift.inputs;
@@ -1004,7 +1062,32 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
     missingFromHolding: fromHolding,
     inputsChanged,
     settingsChanged,
+    monthTotalEntry: hire.settings.acceptMonthlyTotals
+      ? Object.fromEntries(
+          run.missing.flatMap((m) => {
+            const d = defs.find((x) => x.id === m.metricId);
+            return d && d.granularity === "day" && !fromHolding.includes(d.id) ? [[d.id, monthTotalKind(d.aggregation)]] : [];
+          }),
+        )
+      : {},
   };
+}
+
+/**
+ * The report's "missing" list: enter the month total (average, end-of-month value) of a daily
+ * number for the report's month, then check the numbers again. Only for a number the run is
+ * missing, of the hire's own company, when the role accepts monthly totals.
+ */
+export async function enterMonthTotalForRun(ctx: ServiceContext, runId: unknown, metricId: string, value: unknown): Promise<RunView> {
+  const view = await getRun(ctx, runId);
+  if (!view.monthTotalEntry[metricId]) {
+    throw new ServiceError("validation", view.hire.settings.acceptMonthlyTotals
+      ? "A month total can be entered here only for a missing daily number of this report"
+      : "This role counts daily numbers only with every day in — turn on “Accept monthly totals” in Tune first");
+  }
+  await recordMonthTotal(ctx, metricId, { month: view.period, value });
+  if (view.hire.status !== "active") return getRun(ctx, view.id);
+  return rerunReport(ctx, view.id);
 }
 
 /**

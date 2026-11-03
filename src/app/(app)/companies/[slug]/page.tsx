@@ -15,7 +15,8 @@ import { NumbersGrid } from "@/components/metrics/NumbersGrid";
 import { formatMetricInput, formatPeriodShort, GRANULARITY_LABELS, lastEnterablePeriod, lastPeriods, type Granularity } from "@/lib/metrics";
 import { STUB_SPECS } from "@/server/connectors/stubs";
 import { listConnectorStatuses } from "@/server/services/connectors";
-import { currentValues, listCompanyMetricCards, listMetricDefinitions } from "@/server/services/metrics";
+import { monthTotalKind } from "@/server/ai/month-values";
+import { currentValues, listCompanyMetricCards, listMetricDefinitions, type MetricView } from "@/server/services/metrics";
 import { getPageContext } from "@/server/context";
 import { RunStatusTag } from "@/components/ai-roles/AiRolesBoard";
 import { FINANCIAL_ANALYST } from "@/lib/ai-roles";
@@ -210,7 +211,42 @@ async function NumbersTab({ ctx, company, granularity }: { ctx: Ctx; company: Co
         rows={periods.map((p) => ({ period: p, label: formatPeriodShort(p, g) }))}
         values={values}
       />
+      {g === "day" && <MonthTotalsGrid ctx={ctx} companyId={company.id} metrics={metrics} />}
     </>
+  );
+}
+
+/** Finished months offered for month totals of daily numbers. */
+const MONTH_TOTAL_ROWS = 3;
+
+/**
+ * "Month totals" under the daily grid: one value per finished month for each daily number
+ * (a total, an average for avg numbers, the end-of-month value for last). Used only by AI
+ * roles that accept monthly totals when the days are incomplete; never part of the days.
+ */
+async function MonthTotalsGrid({ ctx, companyId, metrics }: { ctx: Ctx; companyId: string; metrics: MetricView[] }) {
+  const months = lastPeriods(lastEnterablePeriod(today(ctx), "month"), "month", MONTH_TOTAL_ROWS).reverse();
+  const current = await currentValues(ctx.db, metrics.map((m) => m.id), { from: months.at(-1)!, to: months[0]! }, "month_total");
+  const values = Object.fromEntries([...current.entries()].map(([k, v]) => [k, formatMetricInput(v)]));
+  return (
+    <section className="mt-6" aria-labelledby="month-totals-heading">
+      <h3 id="month-totals-heading" className="eyebrow mb-1">
+        Month totals
+      </h3>
+      <p className="mb-2 text-[12px] text-muted">
+        When some days are missing, an AI role set to accept monthly totals uses the number entered here (complete days always win). It is never added to
+        the days above.
+      </p>
+      <NumbersGrid
+        kind="month_total"
+        label="Month totals"
+        periodHeader="Month"
+        companyId={companyId}
+        metrics={metrics.map((m) => ({ id: m.id, label: `${m.label} · month ${monthTotalKind(m.aggregation)}`, unit: m.unit }))}
+        rows={months.map((p) => ({ period: p, label: formatPeriodShort(p, "month") }))}
+        values={values}
+      />
+    </section>
   );
 }
 

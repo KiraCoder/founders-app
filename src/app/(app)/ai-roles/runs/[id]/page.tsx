@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RunStatusTag } from "@/components/ai-roles/AiRolesBoard";
-import { CreateTaskButton, RerunButton } from "@/components/ai-roles/RunActions";
+import { CreateTaskButton, MonthTotalForm, RerunButton } from "@/components/ai-roles/RunActions";
 import { CompanyDot, PageHeader, Section } from "@/components/ui";
-import { monthLabel } from "@/lib/ai-roles";
+import { monthLabel, monthName } from "@/lib/ai-roles";
 import { SEVERITY_LABELS, SEVERITY_ORDER, type Severity } from "@/server/ai/finance-rules";
 import { formatDisplayDateTime } from "@/lib/dates";
 import { formatDec, dec } from "@/lib/decimal";
@@ -89,9 +89,20 @@ export default async function RunPage({ params }: Props) {
         <Section title="Waiting for these numbers" count={run.missing.length} tone="warn">
           <div className="card divide-y divide-line">
             {run.missing.map((m) => (
-              <div key={m.metricId} className="flex items-center gap-2 px-4 py-2 text-[13px]">
+              <div key={m.metricId} className="flex flex-wrap items-center gap-2 px-4 py-2 text-[13px]">
                 <span className="font-medium">{m.label}</span>
                 <span className="text-muted">· {m.detail}</span>
+                {run.monthTotalEntry[m.metricId] && run.hire.status === "active" && (
+                  <span className="ml-auto">
+                    <MonthTotalForm
+                      runId={run.id}
+                      metricId={m.metricId}
+                      label={m.label}
+                      kind={run.monthTotalEntry[m.metricId]!}
+                      monthName={monthName(run.period)}
+                    />
+                  </span>
+                )}
                 {run.missingFromHolding.includes(m.metricId) && (
                   <span className="text-muted">
                     · computed from the{" "}
@@ -214,6 +225,11 @@ export default async function RunPage({ params }: Props) {
                         {m.values.map((v, i) => (
                           <td key={i} className="num px-3 py-2 text-right">
                             {v === null ? <span className="text-muted">—</span> : formatDec(dec(v), m.unit)}
+                            {v !== null && m.fromMonthTotal?.[i] && (
+                              <span className="block text-[11px] font-normal text-muted" data-testid="month-total-mark">
+                                {m.monthTotalMark ?? "(month total entered)"}
+                              </span>
+                            )}
                           </td>
                         ))}
                       </tr>
@@ -223,7 +239,9 @@ export default async function RunPage({ params }: Props) {
               </div>
               <p className="mt-2 text-[12px] text-muted">
                 One value per month: a daily or weekly number is shown as its month total, average or end-of-month value (as labelled), and counts only when every
-                day of the month is in (— = incomplete or no value). Exact to the tyiyn.
+                day of the month is in (— = incomplete or no value)
+                {run.hire.settings.acceptMonthlyTotals ? ", or — for a daily number with missing days — when a month total was entered (marked)" : ""}. Exact to
+                the tyiyn.
               </p>
             </Section>
           )}

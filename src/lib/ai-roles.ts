@@ -162,6 +162,11 @@ export const hireSettingsSchema = z
     recipients: z.array(z.uuid()).min(1, "Choose at least one founder to receive reports").max(10),
     /** Founders the role asks for missing numbers (founders only — never people records). */
     askUserIds: z.array(z.uuid()).min(1, "Choose at least one founder the role asks").max(10),
+    /**
+     * Accept a MONTH TOTAL entered for a daily number when its days are incomplete (complete
+     * days still win). Off by default: then a daily number counts only with every day in.
+     */
+    acceptMonthlyTotals: z.boolean().optional(),
   })
   .strict();
 export type HireSettings = z.infer<typeof hireSettingsSchema>;
@@ -193,6 +198,7 @@ export function defaultSettings(t: RoleTemplate, type: CompanyType, founderIds: 
     requiredMetricKeys: requiredKeysFor(t, type),
     recipients: [...founderIds],
     askUserIds: [...founderIds],
+    acceptMonthlyTotals: false,
   };
 }
 

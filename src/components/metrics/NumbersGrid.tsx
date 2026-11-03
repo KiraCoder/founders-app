@@ -23,12 +23,19 @@ export function NumbersGrid({
   metrics,
   rows,
   values,
+  kind,
+  label = "Numbers grid",
+  periodHeader = "Period",
 }: {
   companyId: string;
   metrics: GridMetric[];
   rows: GridRow[];
   /** "metricId|period" → current value as text. */
   values: Record<string, string>;
+  /** "month_total": the rows are months and the cells month totals of daily numbers. */
+  kind?: "month_total";
+  label?: string;
+  periodHeader?: string;
 }) {
   const [state, action, pending] = useActionState<GridState, FormData>(saveMetricGridAction, {});
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -41,9 +48,9 @@ export function NumbersGrid({
         .filter(([k, v]) => v.trim() !== (values[k] ?? "") && v.trim() !== "")
         .map(([k, v]) => {
           const [metricId, period] = k.split("|");
-          return { metricId: metricId!, period: period!, value: v.trim() };
+          return { metricId: metricId!, period: period!, value: v.trim(), ...(kind ? { kind } : {}) };
         }),
-    [edits, values],
+    [edits, values, kind],
   );
   const onSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -55,12 +62,12 @@ export function NumbersGrid({
   const r = state.result;
 
   return (
-    <form onSubmit={onSubmit} aria-label="Numbers grid">
+    <form onSubmit={onSubmit} aria-label={label}>
       <div className="card overflow-x-auto">
-        <table className="w-full min-w-[560px] text-left text-[13px]" data-testid="numbers-grid">
+        <table className="w-full min-w-[560px] text-left text-[13px]" data-testid={kind ? "month-totals-grid" : "numbers-grid"}>
           <thead>
             <tr className="border-b border-line bg-sunk">
-              <th className="eyebrow sticky left-0 bg-sunk px-3 py-2">Period</th>
+              <th className="eyebrow sticky left-0 bg-sunk px-3 py-2">{periodHeader}</th>
               {metrics.map((m) => (
                 <th key={m.id} className="eyebrow px-2 py-2 text-right font-semibold">
                   {m.label}

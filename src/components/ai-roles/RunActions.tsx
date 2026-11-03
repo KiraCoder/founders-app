@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { createTaskFromFindingAction, rerunAction, type AiActionState } from "@/app/(app)/ai-roles/actions";
+import { createTaskFromFindingAction, monthTotalAction, rerunAction, type AiActionState } from "@/app/(app)/ai-roles/actions";
 
 function Status({ state }: { state: AiActionState }) {
   if (!state.error && !state.message) return null;
@@ -70,5 +70,43 @@ export function CreateTaskButton({ runId, findingId, taskId }: { runId: string; 
       </button>
       <Status state={state} />
     </span>
+  );
+}
+
+/** In the report's missing list: "October total [   ] Save" for a daily number (role accepts month totals). */
+export function MonthTotalForm({ runId, metricId, label, kind, monthName }: { runId: string; metricId: string; label: string; kind: string; monthName: string }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [value, setValue] = useState("");
+  const [state, setState] = useState<AiActionState>({});
+  return (
+    <form
+      className="inline-flex flex-wrap items-center gap-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        start(async () => {
+          const res = await monthTotalAction(runId, metricId, value);
+          setState(res);
+          if (res.ok) {
+            setValue("");
+            router.refresh();
+          }
+        });
+      }}
+    >
+      <input
+        className="input num h-8 w-32 text-right"
+        inputMode="decimal"
+        autoComplete="off"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        aria-label={`${label}: ${monthName} ${kind}`}
+        placeholder={`${monthName} ${kind}`}
+      />
+      <button type="submit" className="btn btn-sm" disabled={pending || value.trim() === ""}>
+        {pending ? "Saving…" : "Save"}
+      </button>
+      <Status state={state} />
+    </form>
   );
 }

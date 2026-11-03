@@ -23,6 +23,7 @@ export interface WizardSettings {
   requiredMetricKeys: string[];
   recipients: string[];
   askUserIds: string[];
+  acceptMonthlyTotals?: boolean;
 }
 
 export interface WizardTarget {
@@ -65,6 +66,7 @@ export function HireWizard({
   const [riskPct, setRiskPct] = useState(String(target.settings?.thresholds.riskChangePct ?? 50));
   const [recipients, setRecipients] = useState<string[]>(target.settings?.recipients ?? allFounders);
   const [askIds, setAskIds] = useState<string[]>(target.settings?.askUserIds ?? allFounders);
+  const [acceptMonthly, setAcceptMonthly] = useState(target.settings?.acceptMonthlyTotals ?? false);
   const [notes, setNotes] = useState(target.notes ?? "");
   const [state, setState] = useState<AiActionState>({});
   const [pending, start] = useTransition();
@@ -103,6 +105,7 @@ export function HireWizard({
         requiredMetricKeys: keys,
         recipients,
         askUserIds: askIds,
+        acceptMonthlyTotals: acceptMonthly,
       };
       const res = tuning
         ? await tuneAction(target.hireId!, { settings, notes })
@@ -179,6 +182,24 @@ export function HireWizard({
                   </label>
                 ))}
               </div>
+              {company.metrics.some((m) => m.granularity === "day" && keys.includes(m.key)) && (
+                <label className="mt-3 flex items-start gap-2 text-[13px]">
+                  <input
+                    type="checkbox"
+                    checked={acceptMonthly}
+                    onChange={(e) => setAcceptMonthly(e.target.checked)}
+                    className="mt-0.5"
+                    aria-label="Accept monthly totals for daily numbers"
+                  />
+                  <span>
+                    <span className="font-medium">Accept monthly totals for daily numbers</span>
+                    <span className="block text-muted">
+                      When some days are missing, a month total (or month average for % numbers) entered on the Numbers grid or the report is enough.
+                      Complete days always win. Off: every day of the month is needed.
+                    </span>
+                  </span>
+                </label>
+              )}
             </fieldset>
           )}
 

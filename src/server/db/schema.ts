@@ -621,13 +621,26 @@ export const metricValues = pgTable(
     enteredBy: uuid("entered_by").references(() => users.id, { onDelete: "set null" }),
     connectorRunId: uuid("connector_run_id").references(() => connectorRuns.id, { onDelete: "set null" }),
     note: text("note"),
+    /**
+     * "period": the value of the metric's own period (a day, a week, a month) — every row
+     * before 0015. "month_total": a whole-month value entered for a DAILY metric (period_start
+     * = the 1st), used by AI roles that accept monthly totals when the days are incomplete
+     * (a total for sum metrics, an average for avg, the end-of-month value for last). Never
+     * part of the daily series, freshness, cards or the grid's day rows.
+     */
+    periodKind: text("period_kind").$type<MetricPeriodKind>().notNull().default("period"),
     createdAt: createdAt(),
   },
   (t) => [
-    uniqueIndex("metric_values_current_uq").on(t.metricId, t.periodStart).where(sql`${t.isCurrent}`),
+    // One current value per metric + period + kind (latest wins within each kind).
+    uniqueIndex("metric_values_current_uq").on(t.metricId, t.periodStart, t.periodKind).where(sql`${t.isCurrent}`),
     index("metric_values_metric_period_idx").on(t.metricId, t.periodStart),
+    check("metric_values_period_kind", sql`${t.periodKind} in ('period', 'month_total')`),
+    check("metric_values_month_total_first_day", sql`${t.periodKind} <> 'month_total' or extract(day from ${t.periodStart}) = 1`),
   ],
 );
+
+export type MetricPeriodKind = "period" | "month_total";
 
 /** Every connector attempt (also "not configured"), for the data sources status. */
 export const connectorRuns = pgTable(
@@ -895,6 +908,8 @@ export interface AiHireSettingsJson {
   requiredMetricKeys: string[];
   recipients: string[];
   askUserIds: string[];
+  /** Accept month totals for daily numbers whose days are incomplete (absent = false). */
+  acceptMonthlyTotals?: boolean;
 }
 
 /** One run of a hire for one month: waiting_for_data → ready → analysed → reported (or failed). */
@@ -956,7 +971,20 @@ export interface AiRunMissing {
 
 export interface AiRunInputs {
   months: string[];
-  metrics: { metricId: string; key: string; label: string; unit: string; values: (string | null)[] }[];
+  metrics: {
+    metricId: string;
+    key: string;
+    label: string;
+    unit: string;
+    values: (string | null)[];
+    /**
+     * Per month: true when the value is a month total a founder entered (the days were
+     * incomplete and the role accepts monthly totals). Absent when no month used one.
+     */
+    fromMonthTotal?: boolean[];
+    /** The mark the report shows next to such a value: "(month total entered)". */
+    monthTotalMark?: string;
+  }[];
 }
 
 /**
