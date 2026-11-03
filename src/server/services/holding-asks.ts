@@ -2,14 +2,16 @@ import "server-only";
 import { and, asc, eq, inArray, ne } from "drizzle-orm";
 import { isoWeekday, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import {
-  askLine,
+  askButtonLabel,
+  askMessage,
   countMonths,
-  elmuratMessage,
   graceDays,
-  reminderLine,
+  personLine,
   REMINDER_AFTER_DAYS,
+  whoName,
   type AskGroup,
 } from "@/lib/holding";
+import type { AskPerson } from "@/server/db/ask-person";
 import type { Db } from "@/server/db/connect";
 import { holdingAskItems, type HoldingAskItem } from "@/server/db/schema";
 import { listFounders } from "@/server/notifications/founders";
@@ -20,12 +22,16 @@ import { ServiceError } from "./errors";
 import { allGridCells, groupCells, loadActsGrid, markCellsAsked, staleRequested, type ActCell, type ActsGrid } from "./holding";
 
 /**
- * Pushing the founders to ask Elmurat (the accountant) for missing акты. Elmurat himself
- * never gets anything from the app: these items go only to the two founders, inside their
- * morning summary (no separate push, so no budget is used and nothing can pile up):
+ * Pushing the founders to ask for missing акты. Each flow names its "who to ask" (a person
+ * of one of its two companies, by default the accountant — Elmurat; a founder can override
+ * it for one round); with nobody named the wording is generic ("Ask the accountant…").
+ * Those people never get anything from the app: these items go only to the two founders,
+ * inside their morning summary (no separate push, so no budget is used and nothing can
+ * pile up):
  *
  * - once a month, from the day after the grace period (default the 11th), ONE grouped
- *   "Ask Elmurat for N missing акты: …" item per founder (round = YYYY-MM);
+ *   item per founder (round = YYYY-MM); its section has at most one line per person
+ *   ("Ask Elmurat for N missing акты: …", "Ask Aigul for …");
  * - on Mondays, ONE reminder line per founder for акты asked for ≥ 7 days ago and still
  *   not received (round = that Monday, so at most weekly);
  * - both founders get it (holding matters are shared); when one taps "I asked Elmurat"
@@ -162,8 +168,23 @@ export interface HoldingSection {
   itemIds: string[];
 }
 
-export const ASK_BUTTON_LABEL = "I asked Elmurat";
 export const ASK_AGAIN_BUTTON_LABEL = "I asked again";
+
+const personKey = (p: AskPerson | null) => p?.id ?? "";
+
+/** Groups cells by the person to ask: named people by name, then nobody named. */
+function byPerson(cells: readonly ActCell[]): { person: AskPerson | null; cells: ActCell[] }[] {
+  const map = new Map<string, { person: AskPerson | null; cells: ActCell[] }>();
+  for (const c of cells) {
+    const k = personKey(c.askPerson);
+    const entry = map.get(k) ?? { person: c.askPerson, cells: [] };
+    entry.cells.push(c);
+    map.set(k, entry);
+  }
+  return [...map.values()].sort((a, b) => (!a.person ? 1 : !b.person ? -1 : a.person.name.localeCompare(b.person.name)));
+}
+
+const earliestAsked = (cells: readonly ActCell[]) => cells.map((c) => c.requestedOn!).filter(Boolean).sort()[0] ?? null;
 
 /**
  * The "Holding · акты" section of a founder's morning summary: at most ONE line (and one
@@ -184,9 +205,9 @@ export async function holdingSummarySection(ctx: ServiceContext): Promise<Holdin
   const todayIso = today(ctx);
   const grid = await loadActsGrid(ctx.db, todayIso);
   await reconcileAskItems(ctx.db, grid, { userId: ctx.user.id, now: ctx.now });
-  const lines: MessageLine[] = [];
   const actions: MessageAction[] = [];
   const itemIds: string[] = [];
+  const open: Record<"ask" | "reminder", ActCell[]> = { ask: [], reminder: [] };
   for (const kind of ["ask", "reminder"] as const) {
     const ofKind = pending.filter((i) => i.kind === kind);
     if (!ofKind.length) continue;
@@ -210,23 +231,32 @@ export async function holdingSummarySection(ctx: ServiceContext): Promise<Holdin
       await supersedeOlder(ctx.db, ctx.user.id, kind, newest.id, ctx.now);
     }
     if (!cells.length) continue;
-    const groups = groupsFor(cells, grid);
+    open[kind] = cells;
     if (kind === "ask") {
-      lines.push({ text: askLine(groups, todayIso), style: "item", refs: [holdingRef(newest.id)] });
-      actions.push({ label: ASK_BUTTON_LABEL, action: "holding_asked", askId: newest.id });
+      actions.push({ label: askButtonLabel(byPerson(cells).map((g) => g.person)), action: "holding_asked", askId: newest.id });
     } else {
-      const askedOn = cells.map((c) => c.requestedOn!).sort()[0] ?? null;
-      lines.push({ text: reminderLine(groups, todayIso, askedOn), style: "item", refs: [holdingRef(newest.id)] });
       actions.push({ label: ASK_AGAIN_BUTTON_LABEL, action: "holding_asked", askId: newest.id });
     }
     itemIds.push(newest.id);
   }
-  if (!lines.length) return null;
+  if (!itemIds.length) return null;
+  // ONE line per person (their missing акты and, on a Monday, what they still owe).
+  const people = byPerson([...open.ask, ...open.reminder]);
+  const lines: MessageLine[] = people.map(({ person }) => {
+    const k = personKey(person);
+    const ask = open.ask.filter((c) => personKey(c.askPerson) === k);
+    const reminder = open.reminder.filter((c) => personKey(c.askPerson) === k);
+    return { text: personLine(person, todayIso, groupsFor(ask, grid), groupsFor(reminder, grid), earliestAsked(reminder)), style: "item" as const };
+  });
+  // The refs go on the LAST line: the summary is shortened from the end, so an item counts
+  // as shown only when every person's line made it into the message.
+  lines[lines.length - 1]!.refs = itemIds.map(holdingRef);
+  const named = people.length === 1 ? `The message for ${whoName(people[0]!.person)} is` : "The messages (one per person) are";
   return {
     lines: [
       { text: "Holding · акты", style: "heading" },
       ...lines,
-      { text: "The message for Elmurat is ready to copy on the Holding page. Tap the button once you have asked.", style: "muted" },
+      { text: `${named} ready to copy on the Holding page. Tap the button once you have asked.`, style: "muted" },
     ],
     actions,
     itemIds,
@@ -265,7 +295,7 @@ function monthsWord(n: number): string {
 }
 
 /**
- * The "I asked Elmurat" button (Telegram), as the founder who tapped it. Works once per
+ * The "I asked …" button (Telegram), as the founder who tapped it. Works once per
  * item; when the other founder already asked, nothing changes and it says so.
  */
 export async function applyHoldingAskAction(ctx: ServiceContext, askId: string): Promise<string> {
@@ -289,10 +319,10 @@ export async function applyHoldingAskAction(ctx: ServiceContext, askId: string):
   }
   const changed = await markCellsAsked(ctx, open, item.kind === "ask" ? "missing" : "again");
   await afterAsked(ctx, changed, item.id);
-  return `Marked ${monthsWord(changed.length)} as asked today. The message for Elmurat is on the Holding page.`;
+  return `Marked ${monthsWord(changed.length)} as asked today. The message to copy is on the Holding page.`;
 }
 
-/** The in-app "I asked Elmurat" button (Holding page). */
+/** The in-app "I asked …" button (Holding page). */
 export async function markAskedInApp(ctx: ServiceContext, cells: readonly Cell[], mode: "missing" | "again"): Promise<number> {
   assertHoldingAccess(ctx);
   const changed = await markCellsAsked(ctx, cells, mode);
@@ -300,33 +330,75 @@ export async function markAskedInApp(ctx: ServiceContext, cells: readonly Cell[]
   return changed.length;
 }
 
-export interface AskCard {
+/** One person's part of the Holding page card: what to ask them for, and their message. */
+export interface AskCardPerson {
+  /** Null = nobody named (generic wording). */
+  person: AskPerson | null;
   missing: { groups: AskGroup[]; cells: Cell[]; count: number };
   waiting: { groups: AskGroup[]; cells: Cell[]; count: number; askedOn: IsoDate | null };
-  /** Copyable Russian message for Elmurat (the app never sends it). */
+  /** Copyable Russian message for this person (the app never sends it). */
   message: string;
 }
 
-/** The Holding page card: what to ask Elmurat for now, and the message to copy. */
+/** A flow with missing акты this round: who is asked, and who a founder may pick instead. */
+export interface AskCardFlow {
+  flowId: string;
+  label: string;
+  person: AskPerson | null;
+  overridden: boolean;
+  flowPerson: AskPerson | null;
+  options: AskPerson[];
+}
+
+export interface AskCard {
+  /** Totals over everyone (the API's view; the page shows `people`). */
+  missing: { groups: AskGroup[]; cells: Cell[]; count: number };
+  waiting: { groups: AskGroup[]; cells: Cell[]; count: number; askedOn: IsoDate | null };
+  /** Every person's message, one after another (blank line between). */
+  message: string;
+  /** One block per person (named people by name, then nobody named). */
+  people: AskCardPerson[];
+  /** Flows with missing акты: "who to ask" this round (override per round). */
+  flows: AskCardFlow[];
+}
+
+/** The Holding page card: what to ask whom for now, and one message per person to copy. */
 export function askCardFromGrid(grid: ActsGrid): AskCard {
-  const missing = groupCells(grid, (c) => c.state === "missing");
   const stale = staleRequested(grid, REMINDER_AFTER_DAYS);
-  const waiting = groupCells(grid, stale);
-  const askedOn =
-    allGridCells(grid)
-      .filter(stale)
-      .map((c) => c.requestedOn!)
-      .sort()[0] ?? null;
-  // One message covering both: what is missing and what he still owes after a week.
-  const all = new Map<string, AskGroup>();
-  for (const g of [...missing.groups, ...waiting.groups]) {
-    const k = `${g.label}|${g.service}`;
-    const prev = all.get(k);
-    all.set(k, prev ? { ...prev, months: [...new Set([...prev.months, ...g.months])].sort() } : g);
-  }
+  const cells = allGridCells(grid);
+  const missingCells = cells.filter((c) => c.state === "missing");
+  const waitingCells = cells.filter(stale);
+  const toCells = (cs: readonly ActCell[]): Cell[] => cs.map((c) => ({ flowId: c.flowId, period: c.period }));
+  const people = byPerson([...missingCells, ...waitingCells]).map(({ person }): AskCardPerson => {
+    const k = personKey(person);
+    const missing = missingCells.filter((c) => personKey(c.askPerson) === k);
+    const waiting = waitingCells.filter((c) => personKey(c.askPerson) === k);
+    const missingGroups = groupsFor(missing, grid);
+    const waitingGroups = groupsFor(waiting, grid);
+    // One message covering both: what is missing and what they still owe after a week.
+    const all = new Map<string, AskGroup>();
+    for (const g of [...missingGroups, ...waitingGroups]) {
+      const gk = `${g.label}|${g.service}`;
+      const prev = all.get(gk);
+      all.set(gk, prev ? { ...prev, months: [...new Set([...prev.months, ...g.months])].sort() } : g);
+    }
+    return {
+      person,
+      missing: { groups: missingGroups, cells: toCells(missing), count: countMonths(missingGroups) },
+      waiting: { groups: waitingGroups, cells: toCells(waiting), count: countMonths(waitingGroups), askedOn: earliestAsked(waiting) },
+      message: askMessage([...all.values()], person),
+    };
+  });
+  const missingFlows = new Set(missingCells.map((c) => c.flowId));
+  const missingAll = groupsFor(missingCells, grid);
+  const waitingAll = groupsFor(waitingCells, grid);
   return {
-    missing: { ...missing, count: countMonths(missing.groups) },
-    waiting: { ...waiting, count: countMonths(waiting.groups), askedOn },
-    message: elmuratMessage([...all.values()]),
+    missing: { groups: missingAll, cells: toCells(missingCells), count: countMonths(missingAll) },
+    waiting: { groups: waitingAll, cells: toCells(waitingCells), count: countMonths(waitingAll), askedOn: earliestAsked(waitingCells) },
+    message: people.map((p) => p.message).join("\n\n"),
+    people,
+    flows: grid.rows
+      .filter((r) => missingFlows.has(r.flow.id))
+      .map((r) => ({ flowId: r.flow.id, label: r.flow.fullLabel, ...r.ask })),
   };
 }

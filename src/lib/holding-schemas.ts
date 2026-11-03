@@ -29,6 +29,8 @@ export const flowCreateSchema = z
     since: optionalDate,
     until: optionalDate,
     status: z.preprocess(blankToNull, z.enum(FLOW_STATUSES).nullable().optional()),
+    /** "Who to ask" for the акты: left out = the companies' accountant (if any); null = nobody named. */
+    askPersonId: optionalUuid,
   })
   .strict();
 export type FlowCreateInput = z.input<typeof flowCreateSchema>;
@@ -41,6 +43,8 @@ export const flowUpdateSchema = z
     since: optionalDate,
     until: optionalDate,
     status: z.enum(FLOW_STATUSES).optional(),
+    /** "Who to ask": left out = unchanged; null = nobody named (generic wording). */
+    askPersonId: optionalUuid,
   })
   .strict();
 export type FlowUpdateInput = z.input<typeof flowUpdateSchema>;
@@ -94,7 +98,16 @@ export const ledgerEntrySchema = z
   .strict();
 export type LedgerEntryInput = z.input<typeof ledgerEntrySchema>;
 
-/** "I asked Elmurat" for these cells (in-app button). */
+/** A founder's "who to ask" for one flow, this ask round only (null = back to the flow's person). */
+export const askOverrideSchema = z
+  .object({
+    flowId: z.uuid(),
+    personId: z.preprocess(blankToNull, z.uuid().nullable()),
+  })
+  .strict();
+export type AskOverrideInput = z.input<typeof askOverrideSchema>;
+
+/** "I asked …" for these cells (in-app button). */
 export const askedSchema = z
   .object({
     cells: z.array(z.object({ flowId: z.uuid(), period: monthSchema }).strict()).min(1).max(500),

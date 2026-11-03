@@ -103,9 +103,9 @@ describe("ask / reminder items never pile up", () => {
     await link("talant", "222", bishkek("2026-12-14", "06:00"));
     await days("2026-12-14", "2026-12-14");
     const m = morningOf("talant", "2026-12-14")!.message;
+    // ONE line per person (Elmurat): his missing акт and what he still owes; two buttons.
     expect(holdingLines(m)).toEqual([
-      "Ask Elmurat for 1 missing акт: Alura Style → Alura Brand (Nov)",
-      "Still waiting for 2 акты from Elmurat (asked 11 Nov): Alura Style → Alura Brand (Sep, Oct)",
+      "Ask Elmurat for 1 missing акт: Alura Style → Alura Brand (Nov); still waiting for 2 акты (asked 11 Nov): Alura Style → Alura Brand (Sep, Oct)",
     ]);
     expect(m.actions).toHaveLength(2);
     const pending = (await itemsOf("talant")).filter((i) => i.status === "pending");

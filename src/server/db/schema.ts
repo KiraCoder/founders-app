@@ -744,6 +744,13 @@ export const intercompanyFlows = pgTable(
     /** Last day of the flow (optional): months after it are not expected. */
     until: date("until", { mode: "string" }),
     status: flowStatusEnum("status").notNull().default("active"),
+    /**
+     * "Who to ask" for this flow's акты: a person who works for one of the two companies
+     * (checked by the service). Null = nobody named: generic wording ("Ask the accountant…",
+     * "Здравствуйте! …"). New flows default to the companies' accountant, if there is one.
+     * The app never messages this person; it only names them in the founders' messages.
+     */
+    askPersonId: uuid("ask_person_id").references(() => people.id, { onDelete: "set null" }),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: createdAt(),
@@ -793,6 +800,8 @@ export const intercompanyActs = pgTable(
     /** When a founder asked Elmurat (status requested; kept after received). */
     requestedOn: date("requested_on", { mode: "string" }),
     requestedBy: uuid("requested_by").references(() => users.id, { onDelete: "set null" }),
+    /** Who was asked (the flow's / round's "who to ask" at that moment); null = nobody named. */
+    requestedPersonId: uuid("requested_person_id").references(() => people.id, { onDelete: "set null" }),
     /** Amount of the акт in KGS (counts as invoiced once received or signed). */
     amount: numeric("amount", { precision: 14, scale: 2 }),
     actNumber: text("act_number"),
@@ -861,6 +870,29 @@ export const holdingAskItems = pgTable(
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("holding_ask_items_round_uq").on(t.userId, t.kind, t.roundKey)],
+);
+
+/**
+ * A founder's per-round override of a flow's "who to ask" (e.g. Elmurat is on holiday this
+ * month: ask Aigul). Round = the month of the ask (YYYY-MM); it applies to that month's ask
+ * lines, the in-app card and the copyable message. The person must work for one of the
+ * flow's two companies (checked by the service). Clearing the override deletes the row.
+ */
+export const holdingAskOverrides = pgTable(
+  "holding_ask_overrides",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    roundKey: text("round_key").notNull(),
+    flowId: uuid("flow_id").notNull().references(() => intercompanyFlows.id, { onDelete: "cascade" }),
+    personId: uuid("person_id").notNull().references(() => people.id, { onDelete: "cascade" }),
+    setBy: uuid("set_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("holding_ask_overrides_round_flow_uq").on(t.roundKey, t.flowId),
+    check("holding_ask_overrides_round", sql`${t.roundKey} ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'`),
+  ],
 );
 
 // ---------------------------------------------------------------------------

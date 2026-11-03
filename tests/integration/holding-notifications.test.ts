@@ -193,7 +193,7 @@ describe("pushing the founders to ask Elmurat", () => {
     expect((await items()).filter((i) => i.roundKey === "2027-01").every((i) => i.status === "pending")).toBe(true);
     const ctx = t.ctx("talant", bishkek("2027-01-11", "07:10"));
     const card = askCardFromGrid(await getActsGrid(ctx));
-    expect(card.message).toContain("Элмурат, здравствуйте!");
+    expect(card.message).toContain("Элмурат, пришлите, пожалуйста, акты приёма-передачи за:");
     expect(card.message).toContain("декабрь 2026");
     expect(await markAskedInApp(ctx, card.missing.cells, "missing")).toBe(card.missing.count);
     const jan = (await items()).filter((i) => i.roundKey === "2027-01");

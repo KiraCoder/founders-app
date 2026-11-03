@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/v1/holding/acts — the акты grid: months (last 12 finished + current), one row
  * per active flow with a cell per month (state, tone, recorded status, amount, …), the
- * missing / requested counts and `ask` (what to ask Elmurat for, plus the copyable message).
+ * missing / requested counts and `ask` (what to ask whom for — grouped per person — plus the copyable messages).
  */
 export async function GET() {
   return handleApi(async (ctx) => {

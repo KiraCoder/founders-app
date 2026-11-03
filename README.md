@@ -593,7 +593,7 @@ in `access.ts`); all logic in `src/server/services/holding.ts` (+ `holding-asks.
   The two companies of a flow can't be changed (archive it and add a new one).
 - **Акты grid** (`intercompany_acts`, one row per flow per month, written the first time a
   founder changes a cell): rows = active flows, columns = the last 12 finished months + the
-  current one. Green = signed / received, yellow = requested (asked Elmurat on a date), red =
+  current one. Green = signed / received, yellow = requested (asked on a date), red =
   missing, grey = not needed / before the flow started, dashed = not due yet. A month is
   **expected** from the 1st of the next month + a grace of **10 days**
   (`HOLDING_ACTS_GRACE_DAYS`): October from 11 November; the current month never. Click a
@@ -601,7 +601,7 @@ in `access.ts`); all logic in `src/server/services/holding.ts` (+ `holding-asks.
   act number / date, "asked on", note, scan. A recorded status always wins (an акт received
   early shows green). **Months older than the grid** (a flow that started more than a year
   ago) are not columns, but the flow row shows "N older missing" (click opens the oldest),
-  they count in "Missing акты" and are included in the ask and the message for Elmurat.
+  they count in "Missing акты" and are included in the ask and the message to copy.
 - **Archived flows:** their акты still count in the debts (an акт is a real invoice), so in
   *Flows → Show archived → Correct акты* a founder can still change the **status, amount and
   act date** of an акт already recorded on an archived flow. Nothing else (no new акты, no
@@ -651,33 +651,54 @@ in `access.ts`); all logic in `src/server/services/holding.ts` (+ `holding-asks.
   with a **signed direct upload** (the browser uploads straight to Supabase Storage with a
   short-lived URL the server signs; the app only records the metadata).
 
-### Pushing the founders to ask Elmurat
+### Who to ask, and pushing the founders to ask
 
-Акты are Elmurat's job; the founders ask him. **The app never messages Elmurat** (he is a
-people record, not a user; the outbox refuses anyone who is not a founder). It pushes the
-**founders**, inside their **morning summary** only — no separate push, so it uses no budget,
-can't be parked and follows quiet hours and "not linked" holding like the summary itself:
+**Who to ask.** Every flow has an optional **"Who to ask"** person (*Flows → Edit → Who to
+ask for the акты*): anyone who works for **either company of the flow** (an active link in
+People, not marked as left; the founders themselves are not offered). A new flow — and every
+existing flow (migration `0019`) — starts with the companies' **accountant** (a link whose
+role or title says accountant / бухгалтер, the providing company's first): today that is
+Elmurat. *Nobody named* is allowed: then the wording is generic ("Ask the accountant for …",
+"Здравствуйте! Пришлите, пожалуйста, …"). A founder can also **change it for one ask round**
+(this month only, e.g. when the person is away): `/holding` → *Ask for акты* → *Who to ask
+this month*. When someone is marked "I asked …", the акт remembers **who was asked**, so the
+Monday reminder names that person even after the month changes. If a flow's person later
+leaves, the flow shows a warning and nobody is named until a founder picks someone.
 
-- **Monthly**, from the day after the grace period (the **11th** by default): ONE grouped item
-  per founder, e.g. "Ask Elmurat for 3 missing акты: Alura Style → Alura Brand (Sep, Oct),
-  Jobutify → Kiwi Go (Oct)" with a button **I asked Elmurat** (Telegram button = one-time
-  server-side token, like task buttons). Both founders get it (holding matters are shared).
-- **I asked Elmurat** (Telegram or the in-app button on `/holding`) marks those months
-  *requested* with today's date, and **cancels the other founder's pending item** for the
-  same months (it never reaches his summary; an already-shown button answers "Already done:
-  Nuraaly marked these as asked on …").
-- **Reminder:** акты requested ≥ 7 days ago and still not received get ONE line in the next
+**The app never messages these people** (they are people records, not users; the outbox
+refuses anyone who is not a founder). It pushes the **founders**, inside their **morning
+summary** only — no separate push, so it uses no budget, can't be parked and follows quiet
+hours and "not linked" holding like the summary itself:
+
+- **Monthly**, from the day after the grace period (the **11th** by default): ONE grouped
+  item per founder in ONE *Holding · акты* section with **at most one line per person**, e.g.
+  "Ask Elmurat for 2 missing акты: Alura Style → Alura Brand (Sep, Oct)" and "Ask Edil for 1
+  missing акт: Jobutify → Kiwi Go (Oct)". One button: **I asked Elmurat** (one person), *I
+  asked the accountant* (nobody named) or *I asked them all* (several people) — a one-time
+  server-side token, like task buttons. Both founders get it (holding matters are shared).
+- **I asked …** (Telegram or the in-app buttons on `/holding`, one per person there) marks
+  those months *requested* with today's date and the person asked, and **cancels the other
+  founder's pending item** for the same months (it never reaches his summary; an
+  already-shown button answers "Already done: Nuraaly marked these as asked on …").
+- **Reminder:** акты requested ≥ 7 days ago and still not received appear in the next
   **Monday** summary ("Still waiting for 3 акты from Elmurat (asked 11 Nov): …", button *I
-  asked again*). At most weekly per founder (one item per Monday).
+  asked again*). At most weekly per founder (one item per Monday). When the same person also
+  has missing акты, it is still ONE line: "Ask Elmurat for 1 missing акт: …; still waiting
+  for 2 акты (asked 11 Nov): …".
 - Each item is shown once (`holding_ask_items`, unique per founder + kind + month/week, so a
   tick every 5 minutes changes nothing). **Nothing piles up** when a summary is not delivered
   (Telegram not linked yet, failed sends, quiet hours): a new round cancels the founder's
   older pending item of the same kind (`superseded`; the new one already covers every open
-  month), and the summary shows at most one ask line and one reminder line. Planned in `planHoldingAsks` (called by `planTick`),
-  rendered by `holdingSummarySection` (called by the dispatcher for the morning summary).
-- `/holding` shows the same list plus a **ready message in Russian** with a Copy button
-  ("Элмурат, здравствуйте! Пришлите, пожалуйста, акты приёма-передачи за: …"). The founder
-  sends it himself; the app never does.
+  month), and the summary shows at most one ask item and one reminder item (one line per
+  person). Planned in `planHoldingAsks` (called by `planTick`), rendered by
+  `holdingSummarySection` (called by the dispatcher for the morning summary). Per-round
+  overrides live in `holding_ask_overrides` (round = YYYY-MM; row-level security on).
+- `/holding` shows the same, one block per person, each with a **ready message in Russian**
+  and a Copy button ("Элмурат, пришлите, пожалуйста, акты приёма-передачи за: …"; nobody
+  named: "Здравствуйте! Пришлите, пожалуйста, акты приёма-передачи за: …"). The founder
+  sends it himself; the app never does. The Russian name is the person's *short name* in
+  People when it is written in Cyrillic, otherwise the first name spelled in Cyrillic
+  ("Elmurat" → "Элмурат"); set a short name to change the spelling.
 
 ## AI roles
 
@@ -850,8 +871,9 @@ Session-cookie auth for now; JSON errors look like `{ "error": { "code", "messag
 
 - `GET /api/v1/holding/acts` (grid: months, rows with cells, missing / requested counts, `ask` with the copyable message)
 - `PATCH /api/v1/holding/acts` `{ flowId, period: "2026-10", status?, amount?, actNumber?, actDate?, requestedOn?, note?, attachmentFileId? }` (left-out fields stay, `null` clears)
-- `POST /api/v1/holding/asked` `{ cells: [{ flowId, period }], again? }` ("I asked Elmurat")
-- `GET | POST /api/v1/holding/flows`, `GET | POST /api/v1/holding/contracts`, `PATCH /api/v1/holding/contracts/:id` (fields or `{ "archived": true }`)
+- `POST /api/v1/holding/asked` `{ cells: [{ flowId, period }], again? }` ("I asked …")
+- `POST /api/v1/holding/ask-person` `{ flowId, personId }` (who to ask for this month's round; `personId: null` = back to the flow's person)
+- `GET | POST /api/v1/holding/flows` (POST takes `askPersonId?`: left out = the accountant, `null` = nobody named), `GET | POST /api/v1/holding/contracts`, `PATCH /api/v1/holding/contracts/:id` (fields or `{ "archived": true }`)
 - `GET /api/v1/holding/debts?asOf=` (pairs, total, ledger entries), `POST /api/v1/holding/debts` `{ kind: "payment" | "opening", debtorCompanyId, creditorCompanyId, entryDate, amount, note? }`
 - `POST /api/v1/holding/files` (multipart `file`) → `{ id }`; `GET /api/v1/holding/files/:id`
 
@@ -873,7 +895,7 @@ src/
       companies/[slug]/    Company page with tabs (Overview KPI cards, Numbers grid); numbers/import upload
       projects/[id]/       Project with tasks and progress
       people/              People list, person page, new person, import wizard (+ server actions)
-      holding/             Holding: акты grid + cell panel, Ask Elmurat, debts, договоры, flows (+ server actions)
+      holding/             Holding: акты grid + cell panel, Ask for акты (per person), debts, договоры, flows (+ server actions)
       ai-roles/            AI roles: catalogue, Hire/Tune wizard, hired roles; runs/[id] report page (+ server actions)
       org/                 Org structure board (+ server actions); components/org/ holds the board, panels, expert strip
       search/ more/

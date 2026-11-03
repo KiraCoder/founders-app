@@ -1,7 +1,7 @@
 /**
  * Pure rules for the Holding page: which months need an акт, the colour of each grid
  * cell, debts between companies (netted per pair) and contract expiry warnings, plus the
- * texts that ask Elmurat for missing акты. No DB, no clock: callers pass `today` (the
+ * texts that ask for missing акты (naming each flow's "who to ask"). No DB, no clock: callers pass `today` (the
  * calendar day in Asia/Bishkek), so every rule is testable.
  */
 import { addDays, daysBetween, type IsoDate } from "./dates";
@@ -246,8 +246,16 @@ export function contractWarningText(w: ContractWarning): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Asking Elmurat
+// Asking for акты ("who to ask": a person per flow, e.g. Elmurat; or nobody named)
 // ---------------------------------------------------------------------------
+
+/** The person a line / message names; null = nobody named (generic wording). */
+export interface AskWho {
+  /** "Elmurat" (English lines). */
+  name: string;
+  /** "Элмурат" (the Russian message). */
+  nameRu: string;
+}
 
 export interface AskGroup {
   /** "Alura Style → Alura Brand" */
@@ -287,15 +295,47 @@ export function groupsText(groups: readonly AskGroup[], today: IsoDate, max = 3)
   return `${shown.join(", ")}${groups.length > max ? ` +${groups.length - max} more` : ""}`;
 }
 
-/** The one grouped morning-summary line for missing акты. */
-export function askLine(groups: readonly AskGroup[], today: IsoDate): string {
-  return `Ask Elmurat for ${plural(countMonths(groups), "missing акт", "missing акты")}: ${groupsText(groups, today)}`;
+/** "Elmurat" or, with nobody named, "the accountant". */
+export function whoName(who: AskWho | null | undefined): string {
+  return who?.name ?? "the accountant";
 }
 
-/** The one reminder line for акты asked for a week ago and still not received. */
-export function reminderLine(groups: readonly AskGroup[], today: IsoDate, askedOn: IsoDate | null): string {
-  const since = askedOn ? ` (asked ${Number(askedOn.slice(8, 10))} ${monthShort(askedOn)})` : "";
-  return `Still waiting for ${plural(countMonths(groups), "акт", "акты")} from Elmurat${since}: ${groupsText(groups, today)}`;
+/** "Asked 11 Nov" part, or "". */
+function askedSince(askedOn: IsoDate | null): string {
+  return askedOn ? ` (asked ${Number(askedOn.slice(8, 10))} ${monthShort(askedOn)})` : "";
+}
+
+/** The grouped morning-summary line for missing акты: "Ask Elmurat for 3 missing акты: …". */
+export function askLine(groups: readonly AskGroup[], today: IsoDate, who: AskWho | null = null): string {
+  return `Ask ${whoName(who)} for ${plural(countMonths(groups), "missing акт", "missing акты")}: ${groupsText(groups, today)}`;
+}
+
+/** The reminder line for акты asked for a week ago and still not received. */
+export function reminderLine(groups: readonly AskGroup[], today: IsoDate, askedOn: IsoDate | null, who: AskWho | null = null): string {
+  return `Still waiting for ${plural(countMonths(groups), "акт", "акты")} from ${whoName(who)}${askedSince(askedOn)}: ${groupsText(groups, today)}`;
+}
+
+/**
+ * ONE line per person when they have both missing акты and a reminder:
+ * "Ask Elmurat for 1 missing акт: … ; still waiting for 2 акты (asked 11 Nov): …".
+ */
+export function personLine(
+  who: AskWho | null,
+  today: IsoDate,
+  ask: readonly AskGroup[],
+  reminder: readonly AskGroup[],
+  askedOn: IsoDate | null,
+): string {
+  if (ask.length && reminder.length) {
+    return `${askLine(ask, today, who)}; still waiting for ${plural(countMonths(reminder), "акт", "акты")}${askedSince(askedOn)}: ${groupsText(reminder, today)}`;
+  }
+  return ask.length ? askLine(ask, today, who) : reminderLine(reminder, today, askedOn, who);
+}
+
+/** The ask button: "I asked Elmurat", "I asked the accountant", or "I asked them all" (several people). */
+export function askButtonLabel(people: readonly (AskWho | null)[]): string {
+  if (people.length > 1) return "I asked them all";
+  return `I asked ${whoName(people[0] ?? null)}`;
 }
 
 function monthsRu(months: readonly IsoDate[]): string {
@@ -306,11 +346,13 @@ function monthsRu(months: readonly IsoDate[]): string {
 }
 
 /**
- * The message a founder can copy and send to Elmurat themselves. The app never sends it:
- * it only shows it with a copy button.
+ * The message a founder can copy and send to that person themselves. The app never sends
+ * it: it only shows it with a copy button. With a person: "Элмурат, пришлите, пожалуйста,
+ * акты приёма-передачи за: …"; with nobody named: "Здравствуйте! Пришлите, пожалуйста, …".
  */
-export function elmuratMessage(groups: readonly AskGroup[]): string {
+export function askMessage(groups: readonly AskGroup[], who: AskWho | null = null): string {
   if (!groups.length) return "";
   const lines = groups.map((g) => `— ${g.label}${g.service ? ` (${g.service})` : ""}: ${monthsRu(g.months)}`);
-  return ["Элмурат, здравствуйте!", "Пришлите, пожалуйста, акты приёма-передачи за:", ...lines, "Спасибо!"].join("\n");
+  const first = who ? `${who.nameRu}, пришлите, пожалуйста, акты приёма-передачи за:` : "Здравствуйте! Пришлите, пожалуйста, акты приёма-передачи за:";
+  return [first, ...lines, "Спасибо!"].join("\n");
 }

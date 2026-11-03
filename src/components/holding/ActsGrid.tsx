@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { saveActAction, type HoldingActionState } from "@/app/(app)/holding/actions";
-import { ACT_STATUS_LABELS, ACT_STATUSES, CELL_STATE_LABELS, monthList, monthLong, monthShort, type ActStatusValue, type CellState, type CellTone } from "@/lib/holding";
+import { ACT_STATUS_LABELS, ACT_STATUSES, CELL_STATE_LABELS, monthList, monthLong, monthShort, whoName, type ActStatusValue, type CellState, type CellTone } from "@/lib/holding";
 import { formatMoney } from "@/lib/money";
 import type { ActCell, ActsGrid as Grid } from "@/server/services/holding";
 import { ACCEPT, fileUrl, uploadHoldingFile } from "./upload";
@@ -152,7 +152,7 @@ function Legend({ grace }: { grace: number }) {
   return (
     <p className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-muted">
       {item("ok", "Signed / received")}
-      {item("warn", "Asked Elmurat")}
+      {item("warn", "Asked, waiting")}
       {item("risk", "Missing")}
       {item("grey", "Not needed / before the flow started")}
       {item("upcoming", `Not due yet (a month is due ${grace} days after it ends)`)}
@@ -236,7 +236,7 @@ function CellPanel({ flowLabel, cell, today, onClose }: { flowLabel: string; cel
                 className={`flex cursor-pointer items-center gap-2 rounded-[8px] border px-2.5 py-2 text-[13px] ${status === s ? "border-accent bg-accent-soft" : "border-line"}`}
               >
                 <input type="radio" name="act-status" value={s} checked={status === s} onChange={() => setStatus(s)} ref={s === "missing" ? first : undefined} />
-                {s === "requested" ? "Requested (asked Elmurat)" : ACT_STATUS_LABELS[s]}
+                {s === "requested" ? `Requested (asked ${whoName(cell.askPerson)})` : ACT_STATUS_LABELS[s]}
               </label>
             ))}
           </div>
@@ -245,7 +245,7 @@ function CellPanel({ flowLabel, cell, today, onClose }: { flowLabel: string; cel
         {status === "requested" && (
           <div>
             <label className="label" htmlFor="act-requested-on">
-              Asked Elmurat on
+              Asked {whoName(cell.askPerson)} on
             </label>
             <DateInput id="act-requested-on" value={requestedOn} max={today} onChange={setRequestedOn} />
             {err("requestedOn") && <p className="mt-1 text-[12px] text-risk">{err("requestedOn")}</p>}

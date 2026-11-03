@@ -38,6 +38,12 @@ export function FlowsSection({ flows, companies, archivedActs = [] }: { flows: F
                 <span className="font-medium">{f.to.name}</span>
                 <span className="truncate text-muted">· {f.service}</span>
               </span>
+              {!f.archived && (
+                <span className="text-[12px] text-muted" data-testid="flow-ask-person">
+                  Ask: {f.askPerson && f.askPersonOk ? f.askPerson.name : "nobody named"}
+                </span>
+              )}
+              {!f.archived && f.askPerson && !f.askPersonOk && <Tag tone="warn">{f.askPerson.name} no longer works there — pick who to ask</Tag>}
               <span className="text-[12px] text-muted">
                 {f.since ? `since ${monthLong(f.since.slice(0, 7) + "-01")}` : f.status === "active" ? "" : "no start date"}
                 {f.until ? ` · until ${f.until}` : ""}
@@ -112,9 +118,17 @@ function FlowForm({ flow, companies, onDone }: { flow: FlowView | null; companie
         until: String(fd.get("until") ?? ""),
         status: String(fd.get("status") ?? "active") as "active" | "planned",
       };
+      // "who to ask": "default" = the companies' accountant (new flow), "none" = nobody named.
+      const who = String(fd.get("askPersonId") ?? "default");
+      const askPersonId = who === "none" ? null : who === "default" ? undefined : who;
       const res = flow
-        ? await updateFlowAction(flow.id, { ...common, since: common.since || null, until: common.until || null })
-        : await createFlowAction({ ...common, fromCompanyId: String(fd.get("fromCompanyId") ?? ""), toCompanyId: String(fd.get("toCompanyId") ?? "") });
+        ? await updateFlowAction(flow.id, { ...common, since: common.since || null, until: common.until || null, askPersonId })
+        : await createFlowAction({
+            ...common,
+            fromCompanyId: String(fd.get("fromCompanyId") ?? ""),
+            toCompanyId: String(fd.get("toCompanyId") ?? ""),
+            askPersonId,
+          });
       setState(res);
       if (res.ok) {
         router.refresh();
@@ -191,7 +205,30 @@ function FlowForm({ flow, companies, onDone }: { flow: FlowView | null; companie
         <DateInput id="fl-until" name="until" defaultValue={flow?.until ?? ""} />
         {err("until") && <p className="mt-1 text-[12px] text-risk">{err("until")}</p>}
       </div>
-      <div className="sm:col-span-2">
+      <div>
+        <label className="label" htmlFor="fl-ask">
+          Who to ask for the акты
+        </label>
+        <select
+          id="fl-ask"
+          name="askPersonId"
+          className="input"
+          defaultValue={flow ? (flow.askPerson && flow.askPersonOk ? flow.askPerson.id : "none") : "default"}
+        >
+          {!flow && <option value="default">The companies&apos; accountant (if there is one)</option>}
+          {flow?.askOptions.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+          <option value="none">Nobody named (generic message)</option>
+        </select>
+        <p className="mt-1 text-[12px] text-muted">
+          {flow ? "Anyone who works for either company. Named in your reminders and the message to copy; the app never messages them." : "After saving, Edit lets you pick anyone who works for either company."}
+        </p>
+        {err("askPersonId") && <p className="mt-1 text-[12px] text-risk">{err("askPersonId")}</p>}
+      </div>
+      <div>
         <label className="label" htmlFor="fl-desc">
           Description
         </label>

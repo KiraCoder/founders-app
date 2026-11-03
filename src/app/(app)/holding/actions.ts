@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import type { ActPatchInput, ContractCreateInput, ContractUpdateInput, FlowCreateInput, FlowUpdateInput, LedgerEntryInput } from "@/lib/holding-schemas";
-import { askedSchema } from "@/lib/holding-schemas";
+import { askedSchema, askOverrideSchema } from "@/lib/holding-schemas";
 import { getPageContext } from "@/server/context";
 import { toServiceError } from "@/server/services/errors";
 import {
@@ -14,6 +14,7 @@ import {
   createFlow,
   patchAct,
   restoreFlow,
+  setAskOverride,
   updateContract,
   updateFlow,
 } from "@/server/services/holding";
@@ -48,13 +49,23 @@ export async function saveActAction(input: ActPatchInput): Promise<HoldingAction
   });
 }
 
-/** The in-app "I asked Elmurat" / "I asked again" button. Nothing is sent to Elmurat. */
-export async function askedElmuratAction(input: { cells: { flowId: string; period: string }[]; again?: boolean }): Promise<HoldingActionState> {
+/** The in-app "I asked …" / "I asked again" button. Nothing is sent to the person asked. */
+export async function askedAction(input: { cells: { flowId: string; period: string }[]; again?: boolean }): Promise<HoldingActionState> {
   const ctx = await getPageContext();
   return run(async () => {
     const data = askedSchema.parse({ cells: input.cells });
     const n = await markAskedInApp(ctx, data.cells, input.again ? "again" : "missing");
     return n === 0 ? "Nothing to change — already marked." : `Marked ${n === 1 ? "1 акт" : `${n} акты`} as asked today.`;
+  });
+}
+
+/** "Who to ask" for one flow, this ask round only (null = back to the flow's person). */
+export async function setAskOverrideAction(input: { flowId: string; personId: string | null }): Promise<HoldingActionState> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const data = askOverrideSchema.parse(input);
+    await setAskOverride(ctx, data.flowId, data.personId);
+    return data.personId ? "Changed for this month's asks." : "Back to the flow's person.";
   });
 }
 

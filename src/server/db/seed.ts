@@ -12,6 +12,7 @@ import { addDays, todayInTimeZone } from "@/lib/dates";
 import { ROLE_TEMPLATES } from "@/lib/ai-roles";
 import { metricSeedFor, seedAggregation } from "@/lib/kpis";
 import { ORG_SEED } from "@/lib/org";
+import { defaultAskPersonId } from "./ask-person";
 import { createChartFromTemplate } from "./org-charts";
 import type { Db } from "./connect";
 import {
@@ -316,7 +317,10 @@ export async function seedIntercompanyFlows(
   companyIds: Record<string, string>,
   opts: { sampleSince: string | null },
 ): Promise<void> {
-  for (const f of INTERCOMPANY_FLOW_SEED) {
+  // The seed runs in one transaction, where now() is the same for every row: give each new
+  // flow its own created_at (1 ms apart) so flows keep the order listed above.
+  const base = Date.now();
+  for (const [i, f] of INTERCOMPANY_FLOW_SEED.entries()) {
     const fromCompanyId = companyIds[f.from];
     const toCompanyId = companyIds[f.to];
     if (!fromCompanyId || !toCompanyId) continue;
@@ -336,10 +340,14 @@ export async function seedIntercompanyFlows(
     await db.insert(intercompanyFlows).values({
       fromCompanyId,
       toCompanyId,
+      // "Who to ask" for the акты: the companies' accountant (Elmurat), if there is one.
+      askPersonId: await defaultAskPersonId(db, fromCompanyId, toCompanyId),
       service: f.service,
       description: f.description,
       status: f.status,
       since: f.status === "active" ? opts.sampleSince : null,
+      createdAt: new Date(base + i),
+      updatedAt: new Date(base + i),
     });
   }
 }

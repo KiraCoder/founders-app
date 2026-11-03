@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { askPersonNames, toCyrillic } from "@/server/db/ask-person";
 import {
   actDueFrom,
   askLine,
@@ -6,7 +7,9 @@ import {
   cellTone,
   contractWarning,
   contractWarningText,
-  elmuratMessage,
+  askButtonLabel,
+  askMessage,
+  personLine,
   expectation,
   graceDays,
   gridMonths,
@@ -125,22 +128,39 @@ describe("contract expiry warnings", () => {
   });
 });
 
-describe("asking Elmurat", () => {
+describe("asking for акты (who to ask: a person per flow, or nobody named)", () => {
+  const ELMURAT = { name: "Elmurat", nameRu: "Элмурат" };
+  const AIGUL = { name: "Aigul", nameRu: "Айгуль" };
   const groups = [
     { label: "Alura Style → Alura Brand", service: "пошив", months: ["2026-10-01", "2026-09-01"] },
     { label: "Jobutify → Kiwi Go", service: "приложение", months: ["2026-10-01"] },
   ];
 
-  it("one grouped line with the count and months per flow", () => {
-    expect(askLine(groups, "2026-11-11")).toBe(
+  it("one grouped line with the count and months per flow, naming the person (EN)", () => {
+    expect(askLine(groups, "2026-11-11", ELMURAT)).toBe(
       "Ask Elmurat for 3 missing акты: Alura Style → Alura Brand (Sep, Oct), Jobutify → Kiwi Go (Oct)",
     );
-    expect(askLine([{ ...groups[1]! }], "2026-11-11")).toBe("Ask Elmurat for 1 missing акт: Jobutify → Kiwi Go (Oct)");
+    expect(askLine([{ ...groups[1]! }], "2026-11-11", AIGUL)).toBe("Ask Aigul for 1 missing акт: Jobutify → Kiwi Go (Oct)");
     const many = Array.from({ length: 5 }, (_, i) => ({ label: `F${i}`, service: "", months: ["2025-12-01"] }));
-    expect(askLine(many, "2026-01-11")).toBe("Ask Elmurat for 5 missing акты: F0 (Dec 25), F1 (Dec 25), F2 (Dec 25) +2 more");
-    expect(reminderLine(groups, "2026-11-23", "2026-11-11")).toBe(
+    expect(askLine(many, "2026-01-11", ELMURAT)).toBe("Ask Elmurat for 5 missing акты: F0 (Dec 25), F1 (Dec 25), F2 (Dec 25) +2 more");
+    expect(reminderLine(groups, "2026-11-23", "2026-11-11", ELMURAT)).toBe(
       "Still waiting for 3 акты from Elmurat (asked 11 Nov): Alura Style → Alura Brand (Sep, Oct), Jobutify → Kiwi Go (Oct)",
     );
+  });
+
+  it("nobody named → generic wording (EN)", () => {
+    expect(askLine([{ ...groups[1]! }], "2026-11-11")).toBe("Ask the accountant for 1 missing акт: Jobutify → Kiwi Go (Oct)");
+    expect(reminderLine([{ ...groups[1]! }], "2026-11-23", null, null)).toBe("Still waiting for 1 акт from the accountant: Jobutify → Kiwi Go (Oct)");
+    expect(askButtonLabel([null])).toBe("I asked the accountant");
+    expect(askButtonLabel([ELMURAT])).toBe("I asked Elmurat");
+    expect(askButtonLabel([ELMURAT, AIGUL])).toBe("I asked them all");
+  });
+
+  it("one line per person: their missing акты and what they still owe", () => {
+    expect(personLine(ELMURAT, "2026-11-23", [groups[1]!], [groups[0]!], "2026-11-11")).toBe(
+      "Ask Elmurat for 1 missing акт: Jobutify → Kiwi Go (Oct); still waiting for 2 акты (asked 11 Nov): Alura Style → Alura Brand (Sep, Oct)",
+    );
+    expect(personLine(AIGUL, "2026-11-23", [], [groups[1]!], "2026-11-11")).toBe("Still waiting for 1 акт from Aigul (asked 11 Nov): Jobutify → Kiwi Go (Oct)");
   });
 
   it("runs of 3+ months are shown as a range", () => {
@@ -149,19 +169,38 @@ describe("asking Elmurat", () => {
     expect(monthList(["2025-11-01", "2025-12-01", "2026-01-01"], "2026-02-11")).toBe("Nov 25–Jan");
   });
 
-  it("the copyable message is in Russian and lists months per flow", () => {
-    expect(elmuratMessage(groups)).toBe(
+  it("the copyable message is in Russian, names the person (or greets generically) and lists months per flow", () => {
+    expect(askMessage(groups, ELMURAT)).toBe(
       [
-        "Элмурат, здравствуйте!",
-        "Пришлите, пожалуйста, акты приёма-передачи за:",
+        "Элмурат, пришлите, пожалуйста, акты приёма-передачи за:",
         "— Alura Style → Alura Brand (пошив): сентябрь, октябрь 2026",
         "— Jobutify → Kiwi Go (приложение): октябрь 2026",
         "Спасибо!",
       ].join("\n"),
     );
-    expect(elmuratMessage([{ label: "A → B", service: "", months: ["2026-01-01", "2025-12-01"] }])).toContain(
-      "— A → B: декабрь 2025; январь 2026",
+    expect(askMessage([groups[1]!])).toBe(
+      ["Здравствуйте! Пришлите, пожалуйста, акты приёма-передачи за:", "— Jobutify → Kiwi Go (приложение): октябрь 2026", "Спасибо!"].join("\n"),
     );
-    expect(elmuratMessage([])).toBe("");
+    expect(askMessage([{ label: "A → B", service: "", months: ["2026-01-01", "2025-12-01"] }], AIGUL)).toContain("— A → B: декабрь 2025; январь 2026");
+    expect(askMessage([], ELMURAT)).toBe("");
+  });
+});
+
+describe("names of the person to ask", () => {
+  it("English lines use a Latin name, the Russian message a Cyrillic one", () => {
+    expect(askPersonNames({ id: "1", fullName: "Elmurat", shortName: null })).toEqual({ id: "1", name: "Elmurat", nameRu: "Элмурат" });
+    expect(askPersonNames({ id: "2", fullName: "Aigul Asanova", shortName: "Айгуль" })).toEqual({ id: "2", name: "Aigul", nameRu: "Айгуль" });
+    expect(askPersonNames({ id: "3", fullName: "Асанова Айгуль", shortName: null })).toEqual({ id: "3", name: "Асанова", nameRu: "Асанова" });
+    expect(askPersonNames({ id: "4", fullName: "Edil Toktogulov", shortName: "Edik" })).toEqual({ id: "4", name: "Edik", nameRu: "Эдик" });
+  });
+
+  it("spells common Kyrgyz / Russian first names in Cyrillic; anything else unchanged", () => {
+    const cases: [string, string][] = [
+      ["Elmurat", "Элмурат"], ["Edil", "Эдил"], ["Aibek", "Айбек"], ["Nuraaly", "Нураалы"], ["Talant", "Талант"],
+      ["Zhyldyz", "Жылдыз"], ["Chyngyz", "Чынгыз"], ["Bakyt", "Бакыт"], ["Yulia", "Юлиа"], ["Aizhan", "Айжан"],
+    ];
+    for (const [lat, ru] of cases) expect(toCyrillic(lat)).toBe(ru);
+    expect(toCyrillic("Айгуль")).toBe("Айгуль");
+    expect(toCyrillic("J.R.")).toBe("J.R.");
   });
 });

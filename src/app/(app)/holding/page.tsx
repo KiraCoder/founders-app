@@ -1,5 +1,5 @@
 import { ActsGrid } from "@/components/holding/ActsGrid";
-import { AskElmuratCard } from "@/components/holding/AskElmuratCard";
+import { AskCard } from "@/components/holding/AskCard";
 import { ContractsSection } from "@/components/holding/ContractsSection";
 import { DebtsSection } from "@/components/holding/DebtsSection";
 import { FlowsSection } from "@/components/holding/FlowsSection";
@@ -57,7 +57,7 @@ export default async function HoldingPage() {
           label="Missing акты"
           value={String(grid.missing)}
           tone={grid.missing > 0 ? "risk" : "ok"}
-          hint={grid.requested ? `${grid.requested} asked, waiting for Elmurat` : "All months since each flow started"}
+          hint={grid.requested ? `${grid.requested} asked, waiting for the акты` : "All months since each flow started"}
         />
         <Stat
           testId="stat-contracts"
@@ -75,8 +75,8 @@ export default async function HoldingPage() {
         />
       </div>
 
-      <Section title="Ask Elmurat" count={ask.missing.count + ask.waiting.count} tone="risk">
-        <AskElmuratCard card={ask} today={todayIso} />
+      <Section title="Ask for акты" count={ask.missing.count + ask.waiting.count} tone="risk">
+        <AskCard card={ask} today={todayIso} />
       </Section>
 
       <Section title="Акты приёма-передачи" count={grid.missing} tone="risk">

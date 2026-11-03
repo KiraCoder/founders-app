@@ -666,6 +666,62 @@ describe("0018 audit rows for system salary grants on existing data", () => {
   });
 });
 
+describe("0019 who to ask (holding) on existing data", () => {
+  it("each flow gets its companies' accountant (providing company first), asked акты record him; nobody → empty; RLS on the new table", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0019") });
+    const C = (n: number) => `33333333-3333-4333-8333-33333333333${n}`;
+    const ELM = "55555555-5555-4555-8555-555555555551";
+    const AIG = "55555555-5555-4555-8555-555555555552";
+    const GONE = "55555555-5555-4555-8555-555555555553";
+    const FOUNDER_P = "55555555-5555-4555-8555-555555555554";
+    const F = (n: number) => `66666666-6666-4666-8666-66666666666${n}`;
+    await client.exec(`
+      insert into users (id, email, name, short_name, role) values ('${NURAALY}', 'nuraaly@founders.local', 'Nuraaly', 'Nuraaly', 'founder');
+      insert into companies (id, slug, name) values ('${C(1)}', 'alura-style', 'Alura Style'), ('${C(2)}', 'alura-brand', 'Alura Brand'),
+        ('${C(3)}', 'upsell', 'Upsell'), ('${C(4)}', 'marketing', 'Marketing');
+      insert into people (id, full_name, short_name, user_id, left_at) values
+        ('${ELM}', 'Elmurat', null, null, null), ('${AIG}', 'Aigul', 'Айгуль', null, null),
+        ('${GONE}', 'Aaron Gone', null, null, now()), ('${FOUNDER_P}', 'Aa Founder', null, '${NURAALY}', null);
+      insert into person_companies (person_id, company_id, role, title, is_active) values
+        ('${ELM}', '${C(1)}', 'accountant', 'Accountant', true),
+        ('${AIG}', '${C(2)}', 'manager', 'Бухгалтер', true),
+        ('${GONE}', '${C(1)}', 'accountant', null, true),
+        ('${FOUNDER_P}', '${C(1)}', 'accountant', null, true),
+        ('${ELM}', '${C(3)}', 'accountant', null, false);
+      insert into intercompany_flows (id, from_company_id, to_company_id, service, since) values
+        ('${F(1)}', '${C(1)}', '${C(2)}', 'пошив', '2026-09-01'),
+        ('${F(2)}', '${C(2)}', '${C(1)}', 'материалы', '2026-09-01'),
+        ('${F(3)}', '${C(3)}', '${C(4)}', 'реклама', null);
+      insert into intercompany_acts (flow_id, period, status, requested_on) values
+        ('${F(1)}', '2026-09-01', 'requested', '2026-10-11'), ('${F(1)}', '2026-10-01', 'missing', null);
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const flows = await client.query<{ id: string; ask_person_id: string | null }>("select id, ask_person_id from intercompany_flows order by id");
+    // Flow 1 (Alura Style provides): Elmurat; flow 2 (Alura Brand provides): Aigul (title Бухгалтер); flow 3: nobody
+    // (Elmurat's Upsell link is inactive). Never the founder's person record or someone who left.
+    expect(flows.rows).toEqual([
+      { id: F(1), ask_person_id: ELM },
+      { id: F(2), ask_person_id: AIG },
+      { id: F(3), ask_person_id: null },
+    ]);
+    const acts = await client.query<{ period: string; requested_person_id: string | null }>(
+      "select to_char(period, 'YYYY-MM') as period, requested_person_id from intercompany_acts order by period",
+    );
+    expect(acts.rows).toEqual([
+      { period: "2026-09", requested_person_id: ELM },
+      { period: "2026-10", requested_person_id: null },
+    ]);
+    // People records are not changed.
+    expect((await client.query(`select short_name from people where id = '${ELM}'`)).rows).toEqual([{ short_name: null }]);
+    const rls = await client.query<{ relrowsecurity: boolean }>("select relrowsecurity from pg_class where relname = 'holding_ask_overrides'");
+    expect(rls.rows).toEqual([{ relrowsecurity: true }]);
+    await expect(client.query(`insert into holding_ask_overrides (round_key, flow_id, person_id) values ('2026-13', '${F(1)}', '${AIG}')`)).rejects.toThrow();
+    await client.query(`insert into holding_ask_overrides (round_key, flow_id, person_id) values ('2026-11', '${F(1)}', '${AIG}')`);
+    await expect(client.query(`insert into holding_ask_overrides (round_key, flow_id, person_id) values ('2026-11', '${F(1)}', '${ELM}')`)).rejects.toThrow();
+  });
+});
+
 describe("0017 org structure on existing data", () => {
   it("adds the org tables with RLS, keeps tasks (no department) and enforces the number ranges and one chart per company", async () => {
     const { client, db } = await newPglite();

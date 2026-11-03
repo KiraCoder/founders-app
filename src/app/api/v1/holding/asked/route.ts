@@ -6,9 +6,9 @@ import { markAskedInApp } from "@/server/services/holding-asks";
 export const dynamic = "force-dynamic";
 
 /**
- * POST /api/v1/holding/asked — "I asked Elmurat": `{ cells: [{ flowId, period }], again?: true }`.
+ * POST /api/v1/holding/asked — "I asked …" (the flow's "who to ask", e.g. Elmurat): `{ cells: [{ flowId, period }], again?: true }`.
  * Missing cells become requested today (with `again`: requested cells get today's date).
- * The other founder's pending reminder for the same months is cancelled. Nothing is sent to Elmurat.
+ * The other founder's pending reminder for the same months is cancelled. Nothing is sent to the person asked.
  */
 export async function POST(req: NextRequest) {
   return handleApi(async (ctx) => {

@@ -38,9 +38,11 @@ import {
   type LedgerEntryInput,
 } from "@/lib/holding-schemas";
 import { decimalPlaces, nextPeriod, parseMetricInput, periodEnd, prevPeriod } from "@/lib/metrics";
+import { loadAskPeople, type AskPeopleIndex, type AskPerson } from "@/server/db/ask-person";
 import type { Db } from "@/server/db/connect";
 import {
   companies,
+  holdingAskOverrides,
   holdingFiles,
   intercompanyActs,
   intercompanyContracts,
@@ -61,8 +63,9 @@ import { writeMetricValueTx } from "./metrics";
 /**
  * Holding: intercompany flows, contracts, monthly акты приёма-передачи and the debts
  * between group companies. Founders only (assertHoldingAccess). Nothing is hard-deleted:
- * flows, contracts and ledger entries are archived. The app never contacts Elmurat; it
- * only reminds the founders to ask him (see holding-asks.ts).
+ * flows, contracts and ledger entries are archived. The app never contacts the people it
+ * names ("who to ask" per flow, e.g. Elmurat); it only reminds the founders to ask them
+ * (see holding-asks.ts).
  */
 
 export const HOLDING_COMPANY_SLUG = "asqa-zou-holding";
@@ -106,13 +109,19 @@ export interface FlowView {
   until: IsoDate | null;
   status: FlowStatusValue;
   archived: boolean;
+  /** "Who to ask" for this flow's акты (null = nobody named: generic wording). */
+  askPerson: AskPerson | null;
+  /** False when the saved person no longer works for either company (then nobody is named). */
+  askPersonOk: boolean;
+  /** People a founder can pick as "who to ask" (work for one of the two companies). */
+  askOptions: AskPerson[];
   /** "Alura Style → Alura Brand" */
   label: string;
   /** "Alura Style → Alura Brand · пошив" */
   fullLabel: string;
 }
 
-function flowView(f: IntercompanyFlow, cmap: Map<string, CompanyRef>): FlowView {
+function flowView(f: IntercompanyFlow, cmap: Map<string, CompanyRef>, ask: AskPeopleIndex): FlowView {
   const unknown = (id: string): CompanyRef => ({ id, slug: "", name: "Unknown company", color: "#58645D" });
   const from = cmap.get(f.fromCompanyId) ?? unknown(f.fromCompanyId);
   const to = cmap.get(f.toCompanyId) ?? unknown(f.toCompanyId);
@@ -127,22 +136,26 @@ function flowView(f: IntercompanyFlow, cmap: Map<string, CompanyRef>): FlowView 
     until: f.until,
     status: f.status,
     archived: !!f.archivedAt,
+    askPerson: ask.person(f.askPersonId),
+    askPersonOk: !f.askPersonId || ask.eligible(f, f.askPersonId),
+    askOptions: ask.options(f),
     label,
     fullLabel: `${label} · ${f.service}`,
   };
 }
 
-async function loadFlows(db: Db, opts: { includeArchived?: boolean } = {}): Promise<FlowView[]> {
-  const [rows, cmap] = await Promise.all([
+async function loadFlows(db: Db, opts: { includeArchived?: boolean; ask?: AskPeopleIndex } = {}): Promise<FlowView[]> {
+  const [rows, cmap, ask] = await Promise.all([
     db
       .select()
       .from(intercompanyFlows)
       .where(opts.includeArchived ? undefined : isNull(intercompanyFlows.archivedAt))
       .orderBy(asc(intercompanyFlows.createdAt), asc(intercompanyFlows.id)),
     companyMap(db),
+    opts.ask ?? loadAskPeople(db, null),
   ]);
   return rows
-    .map((f) => flowView(f, cmap))
+    .map((f) => flowView(f, cmap, ask))
     .sort((a, b) => Number(a.archived) - Number(b.archived) || (a.status === b.status ? 0 : a.status === "active" ? -1 : 1));
 }
 
@@ -186,11 +199,16 @@ export async function createFlow(ctx: ServiceContext, input: FlowCreateInput): P
   await assertLiveCompany(ctx.db, data.toCompanyId, "toCompanyId");
   const status = data.status ?? "active";
   checkFlowDates(data.since ?? null, data.until ?? null, status);
+  const ask = await loadAskPeople(ctx.db, null);
+  // Left out = the companies' accountant (if any); null = nobody named; else must work there.
+  const askPersonId = data.askPersonId === undefined ? ask.defaultFor(data) : data.askPersonId;
+  assertAskPerson(ask, data, askPersonId, "askPersonId");
   const [row] = await ctx.db
     .insert(intercompanyFlows)
     .values({
       fromCompanyId: data.fromCompanyId,
       toCompanyId: data.toCompanyId,
+      askPersonId,
       service: data.service,
       description: data.description ?? null,
       since: data.since ?? null,
@@ -202,7 +220,22 @@ export async function createFlow(ctx: ServiceContext, input: FlowCreateInput): P
     })
     .returning()
     .catch(uniqueFlowError);
-  return flowView(row!, await companyMap(ctx.db));
+  return flowView(row!, await companyMap(ctx.db), ask);
+}
+
+/** "Who to ask" must work (active link, not left, not an app user) for one of the flow's companies. */
+function assertAskPerson(
+  ask: AskPeopleIndex,
+  flow: { fromCompanyId: string; toCompanyId: string },
+  personId: string | null,
+  field: string,
+): void {
+  if (personId === null) return;
+  if (!ask.eligible(flow, personId)) {
+    throw new ServiceError("validation", "Pick someone who works for one of the flow's two companies", {
+      [field]: ["Not a person of these companies"],
+    });
+  }
 }
 
 export async function updateFlow(ctx: ServiceContext, id: string, input: FlowUpdateInput): Promise<FlowView> {
@@ -213,10 +246,14 @@ export async function updateFlow(ctx: ServiceContext, id: string, input: FlowUpd
   const until = data.until === undefined ? flow.until : data.until;
   const status = data.status ?? flow.status;
   checkFlowDates(since, until, status);
+  const ask = await loadAskPeople(ctx.db, null);
+  // Unchanged (left out) is fine even when that person has since left; a new choice is checked.
+  if (data.askPersonId !== undefined && data.askPersonId !== flow.askPersonId) assertAskPerson(ask, flow, data.askPersonId, "askPersonId");
   const [row] = await ctx.db
     .update(intercompanyFlows)
     .set({
       service: data.service ?? flow.service,
+      askPersonId: data.askPersonId === undefined ? flow.askPersonId : data.askPersonId,
       description: data.description === undefined ? flow.description : data.description,
       since,
       until,
@@ -226,7 +263,32 @@ export async function updateFlow(ctx: ServiceContext, id: string, input: FlowUpd
     .where(eq(intercompanyFlows.id, flow.id))
     .returning()
     .catch(uniqueFlowError);
-  return flowView(row!, await companyMap(ctx.db));
+  return flowView(row!, await companyMap(ctx.db), ask);
+}
+
+/**
+ * A founder's override of a flow's "who to ask" for this ask round (the current month,
+ * YYYY-MM in the business time zone). `personId` null clears it (back to the flow's person).
+ * The person must work for one of the flow's two companies.
+ */
+export async function setAskOverride(ctx: ServiceContext, flowId: string, personId: string | null): Promise<{ roundKey: string }> {
+  assertHoldingAccess(ctx);
+  const flow = await loadFlow(ctx.db, flowId);
+  if (personId !== null) assertValidId(personId, "Person");
+  const roundKey = today(ctx).slice(0, 7);
+  if (personId === null) {
+    await ctx.db.delete(holdingAskOverrides).where(and(eq(holdingAskOverrides.roundKey, roundKey), eq(holdingAskOverrides.flowId, flow.id)));
+    return { roundKey };
+  }
+  assertAskPerson(await loadAskPeople(ctx.db, null), flow, personId, "personId");
+  await ctx.db
+    .insert(holdingAskOverrides)
+    .values({ roundKey, flowId: flow.id, personId, setBy: ctx.user.id, createdAt: ctx.now, updatedAt: ctx.now })
+    .onConflictDoUpdate({
+      target: [holdingAskOverrides.roundKey, holdingAskOverrides.flowId],
+      set: { personId, setBy: ctx.user.id, updatedAt: ctx.now },
+    });
+  return { roundKey };
 }
 
 /** Archive (never delete): the flow leaves the grid; its акты and contracts are kept. */
@@ -429,6 +491,11 @@ export interface ActCell {
   attachment: FileRef | null;
   /** First day this month's акт is expected (end of month + grace). */
   dueFrom: IsoDate;
+  /**
+   * Who the founders' messages name for this month: for an акт already asked for, the person
+   * asked; otherwise this round's override or the flow's "who to ask". Null = nobody named.
+   */
+  askPerson: AskPerson | null;
 }
 
 export interface ActsGrid {
@@ -450,6 +517,8 @@ export interface ActsGridRow {
    * and the ask / reminder include them, so they are never silently forgotten.
    */
   older: ActCell[];
+  /** "Who to ask" for this flow's missing акты this round, and whether a founder overrode it. */
+  ask: { person: AskPerson | null; overridden: boolean; flowPerson: AskPerson | null; options: AskPerson[] };
 }
 
 /** Every cell of a row that can be asked about: older months first, then the grid's. */
@@ -473,7 +542,9 @@ const OLDEST_MONTH = "2015-01-01";
 export async function loadActsGrid(db: Db, todayIso: IsoDate, opts: GridOpts = {}): Promise<ActsGrid> {
   const grace = opts.grace ?? graceDays();
   const months = opts.months ?? gridMonths(todayIso);
-  const flows = (await loadFlows(db)).filter((f) => f.status === "active");
+  const askIndex = await loadAskPeople(db, todayIso.slice(0, 7));
+  const flowRows = new Map((await db.select().from(intercompanyFlows).where(isNull(intercompanyFlows.archivedAt))).map((f) => [f.id, f]));
+  const flows = (await loadFlows(db, { ask: askIndex })).filter((f) => f.status === "active");
   // The default grid also looks at the months before it (see ActsGridRow.older); a grid
   // for given months (one cell after a change) does not.
   const withOlder = !opts.months;
@@ -521,6 +592,11 @@ export async function loadActsGrid(db: Db, todayIso: IsoDate, opts: GridOpts = {
       note: a?.note ?? null,
       attachment: a?.attachmentFileId ? (files.get(a.attachmentFileId) ?? null) : null,
       dueFrom: actDueFrom(period, grace),
+      askPerson: (() => {
+        const raw = flowRows.get(flow.id);
+        if (!raw) return null;
+        return state === "requested" ? askIndex.forRequested(raw, a?.requestedPersonId ?? null) : askIndex.forMissing(raw);
+      })(),
     };
   };
   const rows = flows.map((flow): ActsGridRow => {
@@ -533,7 +609,14 @@ export async function loadActsGrid(db: Db, todayIso: IsoDate, opts: GridOpts = {
         if (state === "missing" || state === "requested") older.push(cellFor(flow, p));
       }
     }
-    return { flow, older, cells: months.map((period) => cellFor(flow, period)) };
+    const raw = flowRows.get(flow.id)!;
+    const override = askIndex.override(raw);
+    return {
+      flow,
+      older,
+      cells: months.map((period) => cellFor(flow, period)),
+      ask: { person: askIndex.forMissing(raw), overridden: !!override, flowPerson: flow.askPersonOk ? flow.askPerson : null, options: flow.askOptions },
+    };
   });
   return {
     today: todayIso,
@@ -550,7 +633,7 @@ export async function getActsGrid(ctx: ServiceContext, opts: GridOpts = {}): Pro
   return loadActsGrid(ctx.db, today(ctx), opts);
 }
 
-/** Cells grouped per flow, for the "ask Elmurat" lines and message. */
+/** Cells grouped per flow, for the ask lines and messages. */
 export function groupCells(grid: ActsGrid, pick: (c: ActCell) => boolean): { groups: AskGroup[]; cells: { flowId: string; period: IsoDate }[] } {
   const groups: AskGroup[] = [];
   const cells: { flowId: string; period: IsoDate }[] = [];
@@ -661,20 +744,24 @@ export async function patchAct(ctx: ServiceContext, input: ActPatchInput): Promi
     const status: ActStatusValue = data.status ?? prevStatus;
     let requestedOn = cur?.requestedOn ?? null;
     let requestedBy = cur?.requestedBy ?? null;
+    let requestedPersonId = cur?.requestedPersonId ?? null;
     if (status === "requested" && (prevStatus !== "requested" || data.requestedOn)) {
       requestedOn = data.requestedOn ?? todayIso;
       requestedBy = ctx.user.id;
+      if (prevStatus !== "requested") requestedPersonId = (await loadAskPeople(tx, todayIso.slice(0, 7))).forMissing(flow)?.id ?? null;
     } else if (data.requestedOn !== undefined && status !== "missing") {
       requestedOn = data.requestedOn;
     }
     if (status === "missing") {
       requestedOn = null;
       requestedBy = null;
+      requestedPersonId = null;
     }
     const next = {
       status,
       requestedOn,
       requestedBy,
+      requestedPersonId,
       amount: amount === undefined ? (cur?.amount ?? null) : amount === null ? null : amount.toFixed(2),
       actNumber: data.actNumber === undefined ? (cur?.actNumber ?? null) : data.actNumber,
       actDate: data.actDate === undefined ? (cur?.actDate ?? null) : data.actDate,
@@ -722,6 +809,7 @@ export async function patchAct(ctx: ServiceContext, input: ActPatchInput): Promi
       note: null,
       attachment: null,
       dueFrom: actDueFrom(data.period, graceDays()),
+      askPerson: null,
     } satisfies ActCell);
   if (debtChanged && affectedFrom) await syncDebtMetricSafe(ctx, affectedFrom);
   return { cell, debtChanged };
@@ -743,6 +831,7 @@ export async function markCellsAsked(
   const flows = new Map(
     (await ctx.db.select().from(intercompanyFlows).where(isNull(intercompanyFlows.archivedAt))).map((f) => [f.id, f]),
   );
+  const ask = await loadAskPeople(ctx.db, todayIso.slice(0, 7));
   const changed: { flowId: string; period: IsoDate }[] = [];
   // Fixed order: two founders tapping at once lock rows in the same order (no deadlock).
   const sorted = [...cells].sort((a, b) => (a.flowId === b.flowId ? a.period.localeCompare(b.period) : a.flowId.localeCompare(b.flowId)));
@@ -763,7 +852,9 @@ export async function markCellsAsked(
       } else if (status !== "requested" || cur?.requestedOn === todayIso) {
         continue;
       }
-      const set = { status: "requested" as const, requestedOn: todayIso, requestedBy: ctx.user.id, updatedBy: ctx.user.id, updatedAt: ctx.now };
+      // Who was asked: this round's "who to ask" (asked again: the same person, if still there).
+      const requestedPersonId = (mode === "again" ? ask.forRequested(flow, cur?.requestedPersonId ?? null) : ask.forMissing(flow))?.id ?? null;
+      const set = { status: "requested" as const, requestedOn: todayIso, requestedBy: ctx.user.id, requestedPersonId, updatedBy: ctx.user.id, updatedAt: ctx.now };
       if (cur) {
         await tx.update(intercompanyActs).set(set).where(eq(intercompanyActs.id, cur.id));
       } else {
