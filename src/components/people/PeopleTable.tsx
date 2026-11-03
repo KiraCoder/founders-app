@@ -91,19 +91,19 @@ export function PeopleTable({
                 {p.phone && (
                   <div className="group/phone flex items-center gap-1 num whitespace-nowrap">
                     <span>{p.phone}</span>
-                    <CopyButton text={p.phone} title={`Copy phone for ${p.fullName}`} size={12} className="opacity-0 group-hover/phone:opacity-100 transition-opacity" />
+                    <CopyButton text={p.phone} title={`Copy phone for ${p.fullName}`} size={12} className="opacity-0 transition-opacity group-hover/phone:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100" />
                   </div>
                 )}
                 {p.telegramHandle && (
                   <div className="group/tg flex items-center gap-1">
                     <span>@{p.telegramHandle}</span>
-                    <CopyButton text={`@${p.telegramHandle}`} title={`Copy Telegram handle for ${p.fullName}`} size={12} className="opacity-0 group-hover/tg:opacity-100 transition-opacity" />
+                    <CopyButton text={`@${p.telegramHandle}`} title={`Copy Telegram handle for ${p.fullName}`} size={12} className="opacity-0 transition-opacity group-hover/tg:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100" />
                   </div>
                 )}
                 {p.email && (
                   <div className="group/email flex items-center gap-1 truncate">
                     <span className="truncate">{p.email}</span>
-                    <CopyButton text={p.email} title={`Copy email for ${p.fullName}`} size={12} className="opacity-0 group-hover/email:opacity-100 transition-opacity" />
+                    <CopyButton text={p.email} title={`Copy email for ${p.fullName}`} size={12} className="opacity-0 transition-opacity group-hover/email:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100" />
                   </div>
                 )}
               </td>
