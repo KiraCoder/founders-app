@@ -621,7 +621,9 @@ it at once). A failure while re-analysing a run that already has a report keeps 
    says "21 of 31 days missing — or enter the month total", and the request line says
    "— enter the October total (or every day): …" ("total or average" when both kinds are
    missing; "… until the data source is connected" for connector numbers). Turning the switch
-   on after a report shows *Settings changed* on it.
+   on after a report shows *Settings changed* on it. A month total counts as "had data" (so
+   a number without values reads "2+ months missing", not "never entered") only when the
+   switch is on, like the values themselves.
 3. Complete → the **rule-based analysis** (`src/server/ai/finance-rules.ts`, exact decimals,
    no AI): change vs the month before and vs the 3-month average beyond the thresholds; ratios
    when both numbers exist (COD paid out vs collected, revenue per order, piecework pay per

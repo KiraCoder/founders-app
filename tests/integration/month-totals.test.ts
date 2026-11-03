@@ -169,6 +169,42 @@ describe("acceptMonthlyTotals on", () => {
   });
 });
 
+describe("month totals before the window (never entered vs 2+ months missing)", () => {
+  it("off: an earlier month total alone is still 'never entered' (info); on: it counts as earlier data (warn)", async () => {
+    const tt = await createTestDb();
+    try {
+      const k = tt.companyIds["kiwi-go"]!;
+      const c = tt.ctx("nuraaly", bishkek("2026-11-02", "12:00"));
+      const idOf = async (key: string) =>
+        (
+          await tt.handle.db
+            .select({ id: metricDefinitions.id })
+            .from(metricDefinitions)
+            .where(and(eq(metricDefinitions.companyId, k), eq(metricDefinitions.key, key)))
+        )[0]!.id;
+      const h = await hireRole(c, { templateKey: "financial-analyst", companyId: k, settings: { requiredMetricKeys: ["revenue"] } });
+      await saveMetricGrid(c, k, [{ metricId: await idOf("revenue"), period: "2026-10", value: "100" }]);
+      // On-time % (a daily number): no days ever, only a month total long before the window.
+      await recordMonthTotal(c, await idOf("on_time_pct"), { month: "2025-06", value: "90" });
+      const flags = (run: { findings: { id: string; rule: string; metricKeys?: string[] }[] }) => ({
+        never: run.findings.some((f) => f.rule === "never_entered" && f.metricKeys?.includes("on_time_pct")),
+        missing: run.findings.some((f) => f.rule === "missing" && f.id.startsWith("missing:on_time_pct:")),
+      });
+
+      const off = await runHireNow(c, h.id);
+      expect(off.status).toBe("reported");
+      expect(flags(off)).toEqual({ never: true, missing: false });
+
+      await updateHire(c, h.id, { settings: { acceptMonthlyTotals: true } });
+      const on = await runHireNow(c, h.id);
+      expect(on.status).toBe("reported");
+      expect(flags(on)).toEqual({ never: false, missing: true });
+    } finally {
+      await tt.handle.close();
+    }
+  });
+});
+
 describe("storage rules", () => {
   it("latest wins per metric + month, history kept; never part of the daily series, freshness or the grid", async () => {
     const id = await metricId(kiwi, "cod_paid_out");

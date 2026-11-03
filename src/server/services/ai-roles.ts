@@ -358,8 +358,13 @@ interface CompanyNumbers {
   values: Map<string, Map<IsoDate, string>>;
   /** metricId → month → month total entered for a daily number (current values only). */
   monthTotals: Map<string, Map<IsoDate, string>>;
-  /** metricIds that have any value before the window. */
+  /** metricIds that have a period value (day / week / month) before the window. */
   hadEarlier: Set<string>;
+  /**
+   * metricIds that have a month total (daily numbers) before the window. Counts as earlier
+   * data only for a hire with acceptMonthlyTotals (the same rule as for the values it uses).
+   */
+  hadEarlierTotal: Set<string>;
 }
 
 async function loadCompanyNumbers(db: Db, companyId: string, months: IsoDate[]): Promise<CompanyNumbers> {
@@ -367,7 +372,8 @@ async function loadCompanyNumbers(db: Db, companyId: string, months: IsoDate[]):
   const values = new Map<string, Map<IsoDate, string>>();
   const monthTotals = new Map<string, Map<IsoDate, string>>();
   const hadEarlier = new Set<string>();
-  if (!defs.length) return { defs, values, monthTotals, hadEarlier };
+  const hadEarlierTotal = new Set<string>();
+  if (!defs.length) return { defs, values, monthTotals, hadEarlier, hadEarlierTotal };
   const from = months[0]!;
   const to = addDays(addMonths(months.at(-1)!, 1), -1);
   const rows = await db
@@ -388,11 +394,13 @@ async function loadCompanyNumbers(db: Db, companyId: string, months: IsoDate[]):
     target.set(r.metricId, m);
   }
   const earlier = await db
-    .selectDistinct({ metricId: metricValues.metricId })
+    .selectDistinct({ metricId: metricValues.metricId, kind: metricValues.periodKind })
     .from(metricValues)
     .where(and(inArray(metricValues.metricId, defs.map((d) => d.id)), eq(metricValues.isCurrent, true), lt(metricValues.periodStart, from)));
-  for (const e of earlier) hadEarlier.add(e.metricId);
-  return { defs, values, monthTotals, hadEarlier };
+  // Kept apart like the values: a month total alone must not flip "never entered" (info) to
+  // "2+ months missing" (warn) for a hire that ignores month totals.
+  for (const e of earlier) (e.kind === "month_total" ? hadEarlierTotal : hadEarlier).add(e.metricId);
+  return { defs, values, monthTotals, hadEarlier, hadEarlierTotal };
 }
 
 /** Plain "12345.6700" → "12345.67" (Postgres numeric text keeps 4 decimals). */
@@ -450,7 +458,9 @@ function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: rea
       direction: d.direction,
       target: d.target === null ? null : cleanDecimal(d.target),
       months: monthVals,
-      everHadData: numbers.hadEarlier.has(d.id) || vals.size > 0,
+      // Month totals count as data only when this hire uses them (acceptMonthlyTotals).
+      everHadData:
+        numbers.hadEarlier.has(d.id) || vals.size > 0 || (!!totals && (numbers.hadEarlierTotal.has(d.id) || totals.size > 0)),
     });
     inputs.metrics.push({
       metricId: d.id,
