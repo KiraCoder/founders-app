@@ -75,4 +75,54 @@ describe("Data Visualizations", () => {
       expect(html).toContain("(64%)");
     });
   });
+
+  describe("edge data (merge review)", () => {
+    it("BarChart: negative bars hang below the zero line, zero differs from no data, empty is labelled", () => {
+      const html = renderToStaticMarkup(
+        createElement(BarChart, {
+          data: [
+            { label: "A", value: 100 },
+            { label: "B", value: -50, formatted: "−50 сом" },
+            { label: "C", value: 0 },
+            { label: "D", value: null },
+            { label: "E", value: Number.NaN },
+          ],
+          height: 78,
+          showLabels: true,
+        }),
+      );
+      // height 78 - 18 labels = 60; plot 3..60 (57px); span 150 → zero line at 3 + 100/150*57 = 41.
+      expect(html).toContain('y1="41"');
+      expect(html).toMatch(/<rect x="26" y="41"/); // the negative bar starts at the zero line
+      expect(html.match(/stroke-dasharray="2 2"/g)).toHaveLength(2); // null and NaN
+      expect(html).toContain("B −50 сом");
+      expect(html).toContain("D no data");
+      expect(renderToStaticMarkup(createElement(BarChart, { data: [] }))).toContain('aria-label="Bar chart: no data"');
+    });
+
+    it("DonutBreakdown: zero / negative slices take 0% and the label carries the breakdown", () => {
+      const html = renderToStaticMarkup(
+        createElement(DonutBreakdown, {
+          slices: [
+            { label: "Paid", value: 3 },
+            { label: "Refunds", value: -2 },
+            { label: "Empty", value: 0 },
+          ],
+          centerLabel: "Orders",
+        }),
+      );
+      expect(html).toContain("(100%)");
+      expect(html).not.toContain("-67%");
+      expect(html).toContain('aria-label="Orders: Paid 3 (100%), Refunds -2 (0%), Empty 0 (0%)"');
+    });
+
+    it("ProgressMetric: zero target or negative current → empty bar, no bogus gap; bar has a name", () => {
+      const zero = renderToStaticMarkup(createElement(ProgressMetric, { current: 5, target: 0, label: "X" }));
+      expect(zero).toContain("width:0%");
+      expect(zero).not.toContain("to target");
+      const neg = renderToStaticMarkup(createElement(ProgressMetric, { current: -20, target: 100, label: "Profit" }));
+      expect(neg).toContain("width:0%");
+      expect(neg).toContain('aria-label="Profit"');
+    });
+  });
 });

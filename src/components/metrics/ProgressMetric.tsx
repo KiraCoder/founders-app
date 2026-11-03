@@ -29,12 +29,14 @@ export function ProgressMetric({
   formatter?: (val: number, unit?: string) => string;
   className?: string;
 }) {
-  const percent = target > 0 ? Math.min(100, Math.max(0, Math.round((current / target) * 100))) : 0;
+  const valid = Number.isFinite(current) && Number.isFinite(target) && target > 0;
+  // A share of the target, clamped to 0..100 (negative or missing values show an empty bar).
+  const percent = valid ? Math.min(100, Math.max(0, Math.round((current / target) * 100))) : 0;
   const resolvedTone: Tone =
     tone ?? (percent >= 100 ? "ok" : percent >= 70 ? "info" : percent >= 40 ? "warn" : "risk");
 
   const fmt = (v: number) => (formatter ? formatter(v, unit) : unit ? `${v.toLocaleString()} ${unit}` : v.toLocaleString());
-  const gap = target - current;
+  const gap = valid ? target - current : 0;
 
   return (
     <div className={`flex flex-col gap-1.5 ${className}`}>
@@ -55,6 +57,8 @@ export function ProgressMetric({
           aria-valuenow={percent}
           aria-valuemin={0}
           aria-valuemax={100}
+          aria-label={label ?? "Progress to target"}
+          aria-valuetext={valid ? `${percent}% (${fmt(current)} of ${fmt(target)})` : "No target"}
           className={`h-full rounded-full transition-all duration-300 ${TONE_BAR[resolvedTone]}`}
           style={{ width: `${percent}%` }}
         />

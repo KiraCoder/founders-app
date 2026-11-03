@@ -84,7 +84,8 @@ export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: Is
         <Tag tone={tag.tone}>{tag.text}</Tag>
         {m.target !== null && <span className="text-[11px] text-muted">Target {formatMetricValue(m.target, m.unit)}</span>}
       </div>
-      {m.target !== null && m.latest && (
+      {/* "% of target" only reads right when more is better (not for costs, returns, ...). */}
+      {m.target !== null && m.latest && m.direction === "higher_is_better" && (
         <ProgressMetric
           current={m.latest.value}
           target={m.target}

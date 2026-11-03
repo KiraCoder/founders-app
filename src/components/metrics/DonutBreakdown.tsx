@@ -42,7 +42,11 @@ export function DonutBreakdown({
   centerValue?: string | number;
   showLegend?: boolean;
 }) {
-  const total = slices.reduce((acc, s) => acc + (s.value > 0 ? s.value : 0), 0);
+  // Only positive, finite values take part of the ring; zero / negative / NaN slices get 0%.
+  const share = (v: number) => (Number.isFinite(v) && v > 0 ? v : 0);
+  const total = slices.reduce((acc, s) => acc + share(s.value), 0);
+  const pctOf = (v: number) => (total > 0 ? Math.round((share(v) / total) * 100) : 0);
+  const summary = slices.length ? slices.map((s) => `${s.label} ${s.value} (${pctOf(s.value)}%)`).join(", ") : "no data";
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
 
@@ -57,7 +61,7 @@ export function DonutBreakdown({
           viewBox={`0 0 ${size} ${size}`}
           className="-rotate-90"
           role="img"
-          aria-label={centerLabel ?? "Distribution breakdown"}
+          aria-label={`${centerLabel ?? "Distribution breakdown"}: ${summary}`}
         >
           {/* Background circle track */}
           <circle
@@ -70,7 +74,7 @@ export function DonutBreakdown({
           />
           {total > 0 &&
             slices.map((slice, i) => {
-              if (slice.value <= 0) return null;
+              if (share(slice.value) === 0) return null;
               const percent = slice.value / total;
               const strokeDasharray = `${percent * circumference} ${circumference}`;
               const strokeDashoffset = -accumulatedPercent * circumference;
@@ -100,7 +104,7 @@ export function DonutBreakdown({
         </svg>
         {/* Center content */}
         {(centerValue !== undefined || centerLabel) && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
+          <div aria-hidden="true" className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
             {centerValue !== undefined && (
               <span className="num text-[16px] font-semibold leading-tight text-ink">
                 {centerValue}
@@ -121,7 +125,7 @@ export function DonutBreakdown({
             const color =
               slice.color ??
               (slice.tone ? TONE_COLORS[slice.tone] : DEFAULT_PALETTE[i % DEFAULT_PALETTE.length]);
-            const pct = total > 0 ? Math.round((slice.value / total) * 100) : 0;
+            const pct = pctOf(slice.value);
             return (
               <li key={i} className="flex items-center gap-2">
                 <span
