@@ -139,6 +139,35 @@ describe("daily budget (anti-spam)", () => {
     expect(after.filter((i) => i.status === "parked" && !i.bundledIntoId)).toHaveLength(3);
   });
 
+  it("does not repeat a parked task that the summary already lists (whole-app review #5)", async () => {
+    const db = t.handle.db;
+    await updateMyPreferences(t.ctx("nuraaly"), {
+      morningSummaryTime: "08:30",
+      eveningCheckEnabled: false,
+      eveningCheckTime: "19:00",
+      quietStart: "21:00",
+      quietEnd: "08:00",
+      maxOtherPerDay: 0,
+      urgentAtNight: false,
+    });
+    await overdueTask("nuraaly", "Parked and listed");
+    await planTick(db, FIXED_NOW);
+    await dispatch(db, FIXED_NOW, { registry: recordingRegistry().registry });
+    const parkedRow = (await outbox(t.userIds.nuraaly)).find((r) => r.status === "parked")!;
+    expect(parkedRow).toBeDefined();
+
+    const nextMorning = at("2026-11-03T02:30:00Z");
+    await planTick(db, nextMorning);
+    const { sent, registry } = recordingRegistry();
+    await dispatch(db, nextMorning, { registry });
+    const summary = sent.find((s) => s.userId === t.userIds.nuraaly && s.message.title.startsWith("Good morning"))!;
+    expect(text(summary.message)).toContain("Parked and listed");
+    expect(text(summary.message)).not.toContain("Parked reminders");
+    const row = (await outbox(t.userIds.nuraaly)).find((r) => r.id === parkedRow.id)!;
+    const summaryRow = (await outbox(t.userIds.nuraaly)).find((r) => r.dedupeKey === "morning:2026-11-03")!;
+    expect(row.bundledIntoId).toBe(summaryRow.id);
+  });
+
   it("respects a custom budget of 0 extra pushes", async () => {
     await updateMyPreferences(t.ctx("talant"), {
       morningSummaryTime: "08:30",

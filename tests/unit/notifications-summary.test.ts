@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMorningSummary, type ParkedItem } from "@/server/notifications/messages";
+import { buildEveningCheck, buildMorningSummary, type ParkedItem } from "@/server/notifications/messages";
 import { fitTelegram, renderTelegram, renderTelegramText, TELEGRAM_MAX_TEXT } from "@/server/notifications/render-telegram";
 import { aiRequestRef, holdingRef, parkedRef, type NeutralMessage } from "@/server/notifications/types";
 import type { TaskView, TodaySummary } from "@/server/services/tasks";
@@ -114,5 +114,36 @@ describe("fitTelegram", () => {
     expect([...fit.keptRefs].filter((r) => r.startsWith("p:"))).toHaveLength(kept);
     // A holding button whose line was left out is removed with it.
     expect(fit.message.actions?.map((a) => a.askId)).toEqual(["early"]);
+  });
+});
+
+describe("parked reminders are not repeated (whole-app review #5)", () => {
+  const today = "2026-11-16";
+  const s = (overdue: TaskView[], dueToday: TaskView[] = []) =>
+    ({ today, overdue, dueToday, thisWeek: [], personal: [] }) as unknown as TodaySummary;
+
+  it("drops parked lines for tasks listed in a section and bundles them with that line", () => {
+    const overdue = Array.from({ length: 10 }, (_, i) => task(i, "2026-11-01"));
+    const parked: ParkedItem[] = [
+      { text: "Overdue: shown task", taskId: "t1", refs: [parkedRef("r1"), parkedRef("r1b")] },
+      // t9 is behind "+2 more" (8 per section), so it stays a parked line.
+      { text: "Overdue: hidden task", taskId: "t9", refs: [parkedRef("r9")] },
+      { text: "Report ready: Financial Analyst · Kiwi Go · October 2026 (1 info)", refs: [parkedRef("rep")] },
+    ];
+    const m = buildMorningSummary(s(overdue), parked, "Nuraaly");
+    const text = renderTelegramText(m);
+    expect(text).toContain("Parked reminders (2)");
+    expect(text).not.toContain("shown task");
+    expect(text).toContain("Overdue: hidden task");
+    const fit = fitTelegram(m);
+    for (const r of ["r1", "r1b", "r9", "rep"]) expect(fit.keptRefs.has(parkedRef(r))).toBe(true);
+    expect(m.lines.find((l) => l.text.startsWith(title80(1)))?.refs).toEqual([parkedRef("r1"), parkedRef("r1b")]);
+  });
+
+  it("the evening check does not repeat a due-today task in Parked reminders", () => {
+    const due = task(5, today);
+    const m = buildEveningCheck(s([], [due]), [{ text: "Due today: x", taskId: "t5", refs: [parkedRef("p5")] }])!;
+    expect(renderTelegramText(m)).not.toContain("Parked reminders");
+    expect(fitTelegram(m).keptRefs.has(parkedRef("p5"))).toBe(true);
   });
 });

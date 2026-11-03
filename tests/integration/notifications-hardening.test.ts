@@ -461,7 +461,9 @@ describe("#7 parked items are re-checked at bundle time", () => {
     await planTick(db, morning);
     await dispatch(db, morning, { registry: next.registry });
     const summary = text(next.sent.find((s) => s.message.title.startsWith("Good morning"))!.message);
-    expect(summary).toContain("Overdue: Ages — Kiwi Go · 2d overdue");
+    // Listed in the Overdue section with today's count, so not repeated as a parked line (review #5).
+    expect(summary).toContain("Ages — Kiwi Go · 2d overdue");
+    expect(summary).not.toContain("Parked reminders");
     expect(summary).not.toContain("1d overdue");
   });
 

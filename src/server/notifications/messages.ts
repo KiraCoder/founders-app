@@ -209,7 +209,7 @@ export function buildMorningSummary(
     ...section("Due this week", s.thisWeek, s.today, opts),
     ...section("My personal todos", personalRest, s.today, opts),
   ];
-  const lines: MessageLine[] = [header, ...nothing, ...actionLines, ...tasks, ...parkedSection(parkedItems), ...numbers];
+  const lines: MessageLine[] = [header, ...nothing, ...actionLines, ...tasks, ...parkedSection(parkedItems, taskLines), ...numbers];
   return {
     title,
     lines,
@@ -229,7 +229,7 @@ export function buildEveningCheck(s: TodaySummary, parked: readonly (string | Pa
   const lines: MessageLine[] = [
     ...section("Still open today", s.dueToday, s.today, { taskLines }),
     ...(s.overdue.length ? [{ text: `${s.overdue.length} overdue task(s) still waiting for a new deadline.`, style: "text" as const }] : []),
-    ...parkedSection(parkedItems),
+    ...parkedSection(parkedItems, taskLines),
     { text: "Close what is done or move the deadline in the app.", style: "muted" },
   ];
   return { title: "Evening check", lines };
