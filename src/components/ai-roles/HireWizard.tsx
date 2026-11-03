@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { hireAction, tuneAction, type AiActionState } from "@/app/(app)/ai-roles/actions";
 import { Icon } from "@/components/Icon";
-import { defaultAcceptMonthlyTotals } from "@/lib/ai-roles";
+import { defaultAcceptMonthlyTotals, ORG_STRUCTURE_EXPERT } from "@/lib/ai-roles";
 
 export interface WizardCompany {
   id: string;
@@ -25,6 +25,7 @@ export interface WizardSettings {
   recipients: string[];
   askUserIds: string[];
   acceptMonthlyTotals?: boolean;
+  maxDepartmentsPerHead?: number;
 }
 
 export interface WizardTarget {
@@ -37,7 +38,10 @@ export interface WizardTarget {
   notes?: string | null;
 }
 
-const STEPS = ["Company", "Data it needs", "Schedule", "Who hears from it"] as const;
+const FINANCE_STEPS = ["Company", "Data it needs", "Schedule", "Who hears from it"] as const;
+/** The Org Structure Expert needs no numbers and asks nobody: company → checks → who hears from it. */
+const ORG_STEPS = ["Company", "Checks", "Who hears from it"] as const;
+type StepName = (typeof FINANCE_STEPS)[number] | (typeof ORG_STEPS)[number];
 const GRAN = { day: "daily", week: "weekly", month: "monthly" } as const;
 
 /**
@@ -57,7 +61,11 @@ export function HireWizard({
 }) {
   const router = useRouter();
   const tuning = !!target.hireId;
+  const org = target.templateKey === ORG_STRUCTURE_EXPERT;
+  const STEPS: readonly StepName[] = org ? ORG_STEPS : FINANCE_STEPS;
   const [step, setStep] = useState(tuning ? 1 : 0);
+  const stepName = STEPS[step];
+  const [maxHeads, setMaxHeads] = useState(String(target.settings?.maxDepartmentsPerHead ?? 4));
   const [companyId, setCompanyId] = useState(target.companyId ?? "");
   const company = companies.find((c) => c.id === companyId) ?? null;
   const allFounders = founders.map((f) => f.id);
@@ -86,28 +94,35 @@ export function HireWizard({
   const toggle = (list: string[], set: (v: string[]) => void, id: string) => set(list.includes(id) ? list.filter((x) => x !== id) : [...list, id]);
 
   const problem = useMemo(() => {
-    if (step === 0 && !company) return "Choose a company";
-    if (step === 0 && company?.hiredId) return `Already hired for ${company.name} — close this and use Tune`;
-    if (step === 0 && company && company.metrics.length === 0) return `${company.name} has no numbers yet`;
-    if (step === 2) {
+    if (stepName === "Company" && !company) return "Choose a company";
+    if (stepName === "Company" && company?.hiredId) return `Already hired for ${company.name} — close this and use Tune`;
+    if (stepName === "Company" && !org && company && company.metrics.length === 0) return `${company.name} has no numbers yet`;
+    if (stepName === "Checks") {
+      const n = Number(maxHeads);
+      if (!Number.isInteger(n) || n < 1 || n > 21) return "Departments per head: 1 to 21";
+    }
+    if (org && stepName === "Who hears from it" && !recipients.length) return "Choose at least one founder";
+    if (stepName === "Schedule") {
       const d = Number(day);
       if (!Number.isInteger(d) || d < 1 || d > 28) return "Day of the month: 1 to 28";
       if (!(Number(changePct) >= 1) || !(Number(riskPct) >= Number(changePct))) return "The risk threshold must be at least the warning threshold";
     }
-    if (step === 3 && (!recipients.length || !askIds.length)) return "Choose at least one founder for each";
+    if (!org && stepName === "Who hears from it" && (!recipients.length || !askIds.length)) return "Choose at least one founder for each";
     return null;
-  }, [step, company, day, changePct, riskPct, recipients, askIds]);
+  }, [stepName, org, company, day, changePct, riskPct, recipients, askIds, maxHeads]);
 
   const submit = () =>
     start(async () => {
-      const settings = {
-        schedule: { kind: "monthly" as const, day: Number(day) },
-        thresholds: { changePct: Number(changePct), riskChangePct: Number(riskPct) },
-        requiredMetricKeys: keys,
-        recipients,
-        askUserIds: askIds,
-        acceptMonthlyTotals: acceptMonthly,
-      };
+      const settings = org
+        ? { requiredMetricKeys: [], recipients, askUserIds: recipients, maxDepartmentsPerHead: Number(maxHeads) }
+        : {
+            schedule: { kind: "monthly" as const, day: Number(day) },
+            thresholds: { changePct: Number(changePct), riskChangePct: Number(riskPct) },
+            requiredMetricKeys: keys,
+            recipients,
+            askUserIds: askIds,
+            acceptMonthlyTotals: acceptMonthly,
+          };
       const res = tuning
         ? await tuneAction(target.hireId!, { settings, notes })
         : await hireAction({ templateKey: target.templateKey, companyId, settings, notes });
@@ -148,7 +163,7 @@ export function HireWizard({
         </ol>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-          {step === 0 && (
+          {stepName === "Company" && (
             <fieldset>
               <legend className="label">Which company does it work for?</legend>
               <div className="flex flex-col gap-1.5">
@@ -158,14 +173,29 @@ export function HireWizard({
                     <span className="font-medium">{c.name}</span>
                     <span className="text-muted">· {c.typeLabel}</span>
                     {c.hiredId && <span className="tag tag-info ml-auto">Hired</span>}
-                    {!c.hiredId && c.metrics.length === 0 && <span className="tag ml-auto">No numbers yet</span>}
+                    {!c.hiredId && !org && c.metrics.length === 0 && <span className="tag ml-auto">No numbers yet</span>}
                   </label>
                 ))}
               </div>
             </fieldset>
           )}
 
-          {step === 1 && company && (
+          {stepName === "Checks" && (
+            <div className="flex flex-col gap-3 text-[13px]">
+              <p className="text-muted">
+                It checks the org chart of {company?.name ?? "the company"}: divisions and departments without a head, departments without ЦКП or a
+                statistic, linked numbers that are not up to date, departments with 5+ overdue tasks, functions without a responsible person (info).
+                The findings are always on the Org structure page; once a week (Mondays) it adds one line to the morning summary when something
+                needs attention. Brainstorming and advice come after the AI provider is chosen.
+              </p>
+              <label>
+                <span className="label">Flag a person heading more than … departments</span>
+                <input className="input w-24" inputMode="numeric" value={maxHeads} onChange={(e) => setMaxHeads(e.target.value)} aria-label="Departments per head" />
+              </label>
+            </div>
+          )}
+
+          {stepName === "Data it needs" && company && (
             <fieldset>
               <legend className="label">Numbers it waits for before it analyses the month</legend>
               <p className="mb-2 text-[12px] text-muted">
@@ -204,7 +234,7 @@ export function HireWizard({
             </fieldset>
           )}
 
-          {step === 2 && (
+          {stepName === "Schedule" && (
             <div className="flex flex-col gap-3">
               <label className="text-[13px]">
                 <span className="label">Runs monthly on day (for the month that just finished)</span>
@@ -224,10 +254,10 @@ export function HireWizard({
             </div>
           )}
 
-          {step === 3 && (
+          {stepName === "Who hears from it" && (
             <div className="flex flex-col gap-4">
               <fieldset>
-                <legend className="label">Who gets the “report ready” message</legend>
+                <legend className="label">{org ? "Who gets its Monday line" : "Who gets the “report ready” message"}</legend>
                 {founders.map((f) => (
                   <label key={f.id} className="mr-4 inline-flex items-center gap-1.5 text-[13px]">
                     <input type="checkbox" checked={recipients.includes(f.id)} onChange={() => toggle(recipients, setRecipients, f.id)} aria-label={`Reports to ${f.shortName}`} />
@@ -235,6 +265,7 @@ export function HireWizard({
                   </label>
                 ))}
               </fieldset>
+              {!org && (
               <fieldset>
                 <legend className="label">Whom it asks for missing numbers</legend>
                 {founders.map((f) => (
@@ -245,6 +276,7 @@ export function HireWizard({
                 ))}
                 <p className="mt-1 text-[12px] text-muted">Founders only — it never messages anyone else. Requests go inside the morning summary.</p>
               </fieldset>
+              )}
               <label className="text-[13px]">
                 <span className="label">Notes (optional)</span>
                 <textarea className="input" rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />

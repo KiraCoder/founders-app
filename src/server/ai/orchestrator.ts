@@ -9,6 +9,7 @@ import { appUrl, collectAiRequests, numbersHref, planAiRoles, type AiPlanReport,
 import type { ServiceContext } from "@/server/services/context";
 import { DEBT_METRIC_KEY } from "@/server/services/holding";
 import type { HoldingSection } from "@/server/services/holding-asks";
+import { orgExpertSummaryLines } from "@/server/services/org-expert";
 
 /**
  * The orchestrator: decides what each founder is asked, when, and by whom — so the same
@@ -41,6 +42,8 @@ import type { HoldingSection } from "@/server/services/holding-asks";
  * 5. A number a role asks for that is expected from a data source that is not connected yet
  *    is asked as "enter by hand or upload until the data source is connected" and is left out
  *    of the Monday "N numbers wait for data sources" line while the request is active.
+ * 6. The Org Structure Expert adds at most ONE line, on Mondays, only when warnings exist
+ *    (org-expert.ts). Its stale-number findings stay on the board: "Numbers waiting" asks.
  */
 
 /** At most this many AI role lines in one morning summary. */
@@ -161,5 +164,15 @@ export async function composeMorningRequests(
   input: { waiting: readonly (WaitingNumber & { metricId?: string; waitingFor?: IsoDate })[]; holding: HoldingSection | null },
 ): Promise<ComposedRequests> {
   const items = ctx.user.role === "founder" ? await collectAiRequests(ctx) : [];
-  return composeRequests(items, input.waiting, input.holding);
+  const composed = composeRequests(items, input.waiting, input.holding);
+  // The Org Structure Expert: at most ONE line, Mondays only (see org-expert.ts). A failure
+  // never costs the founder the rest of the summary.
+  const org = await orgExpertSummaryLines(ctx).catch((err: unknown) => {
+    console.error("[orchestrator] org expert line failed", err);
+    return [];
+  });
+  if (org.length) {
+    composed.aiLines = composed.aiLines.length ? [...composed.aiLines, ...org] : [{ text: "AI roles", style: "heading" }, ...org];
+  }
+  return composed;
 }

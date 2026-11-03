@@ -41,11 +41,12 @@ describe("/api/v1/ai", () => {
     as("staff");
     expect((await rolesGet(req("/api/v1/ai/roles"))).status).toBe(403);
   });
-  it("GET roles: catalogue (Financial Analyst available, three coming soon) and provider none", async () => {
+  it("GET roles: catalogue (Financial Analyst and Org Structure Expert available, three coming soon) and provider none", async () => {
     as("talant");
     const data = (await (await rolesGet(req("/api/v1/ai/roles"))).json()).data;
     expect(data.templates.map((x: { key: string; status: string }) => `${x.key}:${x.status}`)).toEqual([
       "financial-analyst:available",
+      "org-structure-expert:available",
       "hr:coming_soon",
       "marketing:coming_soon",
       "operations:coming_soon",

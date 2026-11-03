@@ -63,9 +63,21 @@ export interface RoleTemplate {
   /** What every report contains. */
   reportSections: string[];
   sort: number;
+  /**
+   * How it works: "finance" = monthly runs over company numbers (the Financial Analyst's
+   * engine, the default); "org_rules" = deterministic checks of the company's org chart,
+   * shown live on the board and once a week (Mondays) in the morning summary — no runs.
+   */
+  engine?: "finance" | "org_rules";
 }
 
 export const FINANCIAL_ANALYST = "financial-analyst";
+export const ORG_STRUCTURE_EXPERT = "org-structure-expert";
+
+/** Which engine a template runs on (finance unless stated). */
+export function templateEngine(t: Pick<RoleTemplate, "engine"> | undefined): "finance" | "org_rules" {
+  return t?.engine ?? "finance";
+}
 
 export const ROLE_TEMPLATES: RoleTemplate[] = [
   {
@@ -93,6 +105,26 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     defaultSchedule: { kind: "monthly", day: 10 },
     reportSections: ["Risks", "Warnings", "Info", "Numbers used", "AI summary (after the AI provider is chosen)"],
     sort: 10,
+  },
+  {
+    key: ORG_STRUCTURE_EXPERT,
+    name: "Org Structure Expert",
+    description:
+      "Checks a company's org chart (Vysotsky model) every week: who heads what, missing ЦКП and statistics, stale linked numbers, departments drowning in overdue tasks. Brainstorming and advice come after the AI provider is chosen.",
+    status: "available",
+    engine: "org_rules",
+    responsibilities: [
+      "Flag divisions and departments without a head, and people heading too many departments",
+      "Flag departments without a ЦКП or a statistic, and linked numbers that are not up to date",
+      "Flag departments with 5+ overdue tasks; list functions without a responsible person (info)",
+      "One grouped line in the Monday morning summary (only when something needs attention)",
+      "Brainstorm the structure with you (after the AI provider is chosen)",
+    ],
+    requiredData: {},
+    optionalUploads: [],
+    defaultSchedule: { kind: "monthly", day: 1 },
+    reportSections: ["Findings on the org board", "Monday summary line", "Advice (after the AI provider is chosen)"],
+    sort: 15,
   },
   {
     key: "hr",
@@ -169,6 +201,8 @@ export const hireSettingsSchema = z
      * (`defaultAcceptMonthlyTotals`).
      */
     acceptMonthlyTotals: z.boolean().optional(),
+    /** Org Structure Expert: one person heading more than this many departments is flagged (default 4). */
+    maxDepartmentsPerHead: z.coerce.number().int().min(1).max(21).optional(),
   })
   .strict();
 export type HireSettings = z.infer<typeof hireSettingsSchema>;
@@ -288,6 +322,11 @@ export function scheduledPeriod(today: IsoDate, schedule: Schedule): IsoDate {
 /** The first month a hire analyses: the month that had just finished when it was hired. */
 export function firstPeriodFor(hiredOn: IsoDate): IsoDate {
   return prevMonth(monthStart(hiredOn));
+}
+
+/** "Weekly on Mondays" for the org checks, otherwise "Monthly on the 10th". */
+export function templateScheduleLabel(t: Pick<RoleTemplate, "engine" | "defaultSchedule">, s: Schedule = t.defaultSchedule): string {
+  return templateEngine(t) === "org_rules" ? "Weekly on Mondays" : scheduleLabel(s);
 }
 
 /** "Monthly on the 10th". */

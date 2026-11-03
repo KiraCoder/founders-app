@@ -919,6 +919,8 @@ export interface AiHireSettingsJson {
    * Financial Analyst hires get true (founders' decision); 0016 set it on existing ones.
    */
   acceptMonthlyTotals?: boolean;
+  /** Org Structure Expert only: flag a person heading more than this many departments (default 4). */
+  maxDepartmentsPerHead?: number;
 }
 
 /** One run of a hire for one month: waiting_for_data → ready → analysed → reported (or failed). */

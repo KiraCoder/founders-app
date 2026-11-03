@@ -20,7 +20,7 @@ import { monthTotalKind } from "@/server/ai/month-values";
 import { currentValues, listCompanyMetricCards, listMetricDefinitions, type MetricView } from "@/server/services/metrics";
 import { getPageContext } from "@/server/context";
 import { RunStatusTag } from "@/components/ai-roles/AiRolesBoard";
-import { FINANCIAL_ANALYST } from "@/lib/ai-roles";
+import { FINANCIAL_ANALYST, ORG_STRUCTURE_EXPERT } from "@/lib/ai-roles";
 import { canUseAiRoles } from "@/server/services/access";
 import { listHireRuns, listHires } from "@/server/services/ai-roles";
 import { getCompanyBySlug } from "@/server/services/companies";
@@ -370,7 +370,15 @@ async function AiRolesTab({ ctx, company }: { ctx: Ctx; company: CompanyFull }) 
                     </Link>
                   </li>
                 ))}
-                {(runs.get(h.id) ?? []).length === 0 && <li className="text-muted">No report yet — it runs {h.scheduleLabel.toLowerCase()}.</li>}
+                {h.templateKey === ORG_STRUCTURE_EXPERT ? (
+                  <li>
+                    <Link href={`/companies/${company.slug}?tab=org`} className="text-accent hover:underline">
+                      Its findings are on the Org structure tab
+                    </Link>
+                  </li>
+                ) : (
+                  (runs.get(h.id) ?? []).length === 0 && <li className="text-muted">No report yet — it runs {h.scheduleLabel.toLowerCase()}.</li>
+                )}
               </ul>
             </div>
           ))}

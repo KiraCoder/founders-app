@@ -16,8 +16,9 @@ import {
   monthStart,
   runDueOn,
   scheduledPeriod,
-  scheduleLabel,
   templateByKey,
+  templateEngine,
+  templateScheduleLabel,
   ROLE_TEMPLATES,
   type CompanyType,
   type HireCreateInput,
@@ -195,6 +196,7 @@ function settingsOf(hire: Pick<AiRoleHire, "settings">, template: RoleTemplate, 
     recipients: s.recipients ?? d.recipients,
     askUserIds: s.askUserIds ?? d.askUserIds,
     acceptMonthlyTotals: s.acceptMonthlyTotals ?? false,
+    ...(s.maxDepartmentsPerHead ? { maxDepartmentsPerHead: s.maxDepartmentsPerHead } : {}),
   };
 }
 
@@ -243,7 +245,7 @@ async function toHireViews(db: Db, rows: HireRow[]): Promise<HireView[]> {
       companyType: type,
       status: hire.status,
       settings,
-      scheduleLabel: scheduleLabel(settings.schedule),
+      scheduleLabel: templateScheduleLabel(template, settings.schedule),
       notes: hire.notes,
       hiredOn: hire.hiredOn,
       hiredByName,
@@ -677,6 +679,9 @@ export async function planAiRoles(db: Db, now: Date, opts: EngineOptions = {}): 
     try {
       const hc = await hireContext(db, id);
       if (!hc || hc.template.status !== "available") continue;
+      // The Org Structure Expert has no monthly runs: its checks are live (org board) and its
+      // Monday line is composed with the morning summary (orchestrator).
+      if (templateEngine(hc.template) !== "finance") continue;
       const period = scheduledPeriod(todayIso, hc.settings.schedule);
       if (period >= firstPeriodFor(hc.hire.hiredOn)) {
         const [exists] = await db.select({ id: aiRoleRuns.id }).from(aiRoleRuns).where(and(eq(aiRoleRuns.hireId, id), eq(aiRoleRuns.period, period)));
@@ -945,13 +950,19 @@ export async function hireRole(ctx: ServiceContext, input: HireCreateInput): Pro
   await assertCompanyAccess(ctx, data.companyId);
   const [company] = await ctx.db.select({ slug: companies.slug, name: companies.name }).from(companies).where(eq(companies.id, data.companyId));
   const defs = await companyMetricDefs(ctx.db, data.companyId);
-  if (!defs.length) {
+  const orgRules = templateEngine(template) === "org_rules";
+  if (!defs.length && !orgRules) {
     throw new ServiceError("validation", `${company!.name} has no numbers yet, so the ${template.name} would have nothing to analyse`);
   }
   const founderIds = (await listFounders(ctx.db)).map((f) => f.id);
   const type = companyTypeFor(company!.slug);
   const defaults = defaultSettings(template, type, founderIds);
-  if (!defaults.requiredMetricKeys.length) defaults.requiredMetricKeys = [...new Set(defs.filter((d) => d.granularity === "month").map((d) => d.key))];
+  if (!defaults.requiredMetricKeys.length && !orgRules) defaults.requiredMetricKeys = [...new Set(defs.filter((d) => d.granularity === "month").map((d) => d.key))];
+  // The org checks need no numbers and ask nobody: whoever gets its line is also "asked".
+  if (orgRules) {
+    defaults.requiredMetricKeys = [];
+    if (data.settings?.recipients?.length) defaults.askUserIds = [...data.settings.recipients];
+  }
   const settings = await validateSettings(ctx, data.companyId, { ...defaults, ...(data.settings ?? {}) } as HireSettings);
   await syncAiTemplates(ctx.db);
   const rows = await ctx.db
@@ -1012,6 +1023,9 @@ export async function runHireNow(ctx: ServiceContext, hireId: unknown, opts: Eng
   const view = await getHire(ctx, hireId);
   if (view.status !== "active") throw new ServiceError("validation", "This role is paused — resume it first");
   const hc = (await hireContext(ctx.db, view.id))!;
+  if (templateEngine(hc.template) !== "finance") {
+    throw new ServiceError("validation", `The ${hc.template.name} has no monthly report: its checks are live on the Org structure page`);
+  }
   const period = prevMonth(monthStart(today(ctx)));
   const run = await ensureRun(ctx.db, view.id, period, "manual", ctx.now);
   await evaluateRun(ctx.db, hc, run, ctx.now, { timeZone: ctx.timeZone, ...opts });

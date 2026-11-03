@@ -33,6 +33,9 @@ export interface BoardHire {
   askNames: string[];
   requiredLabels: string[];
   latestRun: { id: string; periodLabel: string; status: string; summary: string } | null;
+  /** "org_rules" for the Org Structure Expert (no monthly runs; findings live on the org board). */
+  engine?: "finance" | "org_rules";
+  orgSummary?: string;
 }
 
 const RUN_TONE: Record<string, string> = {
@@ -73,13 +76,24 @@ function HireCard({ hire, onTune }: { hire: BoardHire; onTune: () => void }) {
         <span className="text-muted">· {hire.companyName}</span>
         <span className={`tag ${hire.status === "active" ? "tag-ok" : ""} ml-auto`}>{hire.status === "active" ? "Active" : "Paused"}</span>
       </div>
-      <p className="text-[12px] text-muted">
-        {hire.scheduleLabel} · waits for {hire.requiredLabels.join(", ") || "nothing"} · reports to {hire.recipientNames.join(" and ")} · asks{" "}
-        {hire.askNames.join(" and ")}
-      </p>
+      {hire.engine === "org_rules" ? (
+        <p className="text-[12px] text-muted">
+          {hire.scheduleLabel} (one line in the morning summary) · reports to {hire.recipientNames.join(" and ")} · flags a head of more than{" "}
+          {hire.settings.maxDepartmentsPerHead ?? 4} departments
+        </p>
+      ) : (
+        <p className="text-[12px] text-muted">
+          {hire.scheduleLabel} · waits for {hire.requiredLabels.join(", ") || "nothing"} · reports to {hire.recipientNames.join(" and ")} · asks{" "}
+          {hire.askNames.join(" and ")}
+        </p>
+      )}
       {hire.notes && <p className="text-[12px]">{hire.notes}</p>}
       <div className="flex flex-wrap items-center gap-2 text-[13px]">
-        {hire.latestRun ? (
+        {hire.engine === "org_rules" ? (
+          <Link href={`/org?company=${hire.companySlug}`} className="text-accent hover:underline">
+            {hire.orgSummary} · open the org board
+          </Link>
+        ) : hire.latestRun ? (
           <Link href={`/ai-roles/runs/${hire.latestRun.id}`} className="flex items-center gap-2 text-accent hover:underline">
             Latest: {hire.latestRun.periodLabel} <RunStatusTag status={hire.latestRun.status} />
             <span className="text-muted">{hire.latestRun.summary}</span>
@@ -95,7 +109,7 @@ function HireCard({ hire, onTune }: { hire: BoardHire; onTune: () => void }) {
         <button type="button" className="btn btn-sm" disabled={pending} onClick={() => act(() => tuneAction(hire.id, { status: hire.status === "active" ? "paused" : "active" }))}>
           {hire.status === "active" ? "Pause" : "Resume"}
         </button>
-        {hire.status === "active" && (
+        {hire.status === "active" && hire.engine !== "org_rules" && (
           <button type="button" className="btn btn-sm btn-primary" disabled={pending} onClick={() => act(() => runNowAction(hire.id))}>
             Run now (last month)
           </button>

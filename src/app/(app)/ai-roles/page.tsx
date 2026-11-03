@@ -1,7 +1,10 @@
 import { AiRolesBoard, type BoardHire, type BoardTemplate } from "@/components/ai-roles/AiRolesBoard";
 import type { WizardCompany, WizardTarget } from "@/components/ai-roles/HireWizard";
 import { PageHeader } from "@/components/ui";
-import { COMPANY_TYPE_LABELS, companyTypeFor, requiredKeysFor, scheduleLabel } from "@/lib/ai-roles";
+import Link from "next/link";
+import { OrgExpertStrip } from "@/components/org/OrgExpertStrip";
+import { COMPANY_TYPE_LABELS, companyTypeFor, requiredKeysFor, templateByKey, templateEngine, templateScheduleLabel } from "@/lib/ai-roles";
+import { orgExpertForCompany } from "@/server/services/org";
 import { providerStatus } from "@/server/ai/provider";
 import { getPageContext } from "@/server/context";
 import { canUseAiRoles } from "@/server/services/access";
@@ -53,8 +56,12 @@ export default async function AiRolesPage({ searchParams }: Props) {
     status: t.status,
     responsibilities: t.responsibilities,
     reportSections: t.reportSections,
-    scheduleLabel: scheduleLabel(t.defaultSchedule),
+    scheduleLabel: templateScheduleLabel(t),
   }));
+  // Org Structure Expert: its deterministic findings for every company (shown below and on hire cards).
+  const orgResults = (await Promise.all(companies.map((c) => orgExpertForCompany(ctx, c.id)))).flat();
+  const orgWarnings = (companyId: string) =>
+    orgResults.filter((r) => r.companyId === companyId && r.chartId).reduce((n, r) => n + r.findings.filter((f) => f.severity === "warning").length, 0);
   const boardHires: BoardHire[] = hires.map((h) => {
     const metrics = metricsByCompany.get(h.companyId) ?? [];
     return {
@@ -73,6 +80,13 @@ export default async function AiRolesPage({ searchParams }: Props) {
       askNames: h.askNames,
       requiredLabels: h.settings.requiredMetricKeys.map((k) => metrics.find((m) => m.key === k)?.label ?? k),
       latestRun: h.latestRun ? { id: h.latestRun.id, periodLabel: h.latestRun.periodLabel, status: h.latestRun.status, summary: h.latestRun.summary } : null,
+      engine: templateEngine(templateByKey(h.templateKey)),
+      orgSummary:
+        templateEngine(templateByKey(h.templateKey)) === "org_rules"
+          ? orgResults.some((r) => r.companyId === h.companyId && r.chartId)
+            ? `${orgWarnings(h.companyId) || "Nothing"} to fix on the org chart`
+            : "No org chart yet — apply the template"
+          : undefined,
     };
   });
 
@@ -104,6 +118,27 @@ export default async function AiRolesPage({ searchParams }: Props) {
           {provider.problem ? ` ${provider.problem}` : ""}
         </span>
       </div>
+      <section className="mb-6" aria-labelledby="org-expert-heading" data-testid="org-expert-section">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <h2 id="org-expert-heading" className="eyebrow">
+            Org Structure Expert · checks
+          </h2>
+          <span className="text-[12px] text-muted">Rule-based, for every company with an org chart. Hire it to get one grouped line in Monday&apos;s summary.</span>
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          {orgResults
+            .filter((r) => r.chartId)
+            .map((r) => (
+              <div key={r.chartId} className="flex flex-col">
+                <Link href={`/org?company=${r.companySlug}`} className="mb-1 text-[13px] font-semibold hover:underline">
+                  {r.scopeName}
+                </Link>
+                <OrgExpertStrip findings={r.findings} compact />
+              </div>
+            ))}
+          {!orgResults.some((r) => r.chartId) && <div className="card px-4 py-6 text-center text-[13px] text-muted">No company has an org chart yet.</div>}
+        </div>
+      </section>
       <AiRolesBoard templates={boardTemplates} hires={boardHires} companies={wizardCompanies} founders={founders.map((f) => ({ id: f.id, shortName: f.shortName }))} initial={initial} />
     </>
   );
