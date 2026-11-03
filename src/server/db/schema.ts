@@ -834,6 +834,140 @@ export const holdingAskItems = pgTable(
   (t) => [uniqueIndex("holding_ask_items_round_uq").on(t.userId, t.kind, t.roundKey)],
 );
 
+// ---------------------------------------------------------------------------
+// AI roles: "hire" an AI agent for a role in a company (src/lib/ai-roles.ts is the
+// catalogue; services/ai-roles.ts the logic). Founders only. Only the two founders are ever
+// asked for data or told about reports; people records never receive anything.
+// ---------------------------------------------------------------------------
+export const aiTemplateStatusEnum = pgEnum("ai_template_status", ["available", "coming_soon"]);
+export const aiHireStatusEnum = pgEnum("ai_hire_status", ["active", "paused"]);
+export const aiRunStatusEnum = pgEnum("ai_run_status", ["waiting_for_data", "ready", "analysed", "reported", "failed"]);
+export const aiRequestStatusEnum = pgEnum("ai_request_status", ["active", "done", "cancelled"]);
+
+/** Copy of the code-defined role catalogue (seeded; the code stays the source of truth). */
+export const aiRoleTemplates = pgTable("ai_role_templates", {
+  key: text("key").primaryKey(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  status: aiTemplateStatusEnum("status").notNull().default("coming_soon"),
+  responsibilities: jsonb("responsibilities").$type<string[]>().notNull().default([]),
+  /** { byCompanyType: { delivery: ["revenue", …] }, optionalUploads: [...] } */
+  requiredData: jsonb("required_data").$type<{ byCompanyType: Record<string, string[]>; optionalUploads: string[] }>().notNull(),
+  defaultSchedule: jsonb("default_schedule").$type<{ kind: "monthly"; day: number }>().notNull(),
+  reportSections: jsonb("report_sections").$type<string[]>().notNull().default([]),
+  sort: integer("sort").notNull().default(100),
+  updatedAt: updatedAt(),
+});
+
+/** A role hired for one company, with its tuned settings (see HireSettings in src/lib/ai-roles.ts). */
+export const aiRoleHires = pgTable(
+  "ai_role_hires",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    templateKey: text("template_key").notNull().references(() => aiRoleTemplates.key, { onDelete: "restrict" }),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "restrict" }),
+    status: aiHireStatusEnum("status").notNull().default("active"),
+    settings: jsonb("settings").$type<AiHireSettingsJson>().notNull(),
+    notes: text("notes"),
+    hiredBy: uuid("hired_by").references(() => users.id, { onDelete: "set null" }),
+    /** Calendar day (Asia/Bishkek) it was hired: the first month analysed is the one before. */
+    hiredOn: date("hired_on", { mode: "string" }).notNull(),
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("ai_role_hires_template_company_uq").on(t.templateKey, t.companyId)],
+);
+
+export interface AiHireSettingsJson {
+  schedule: { kind: "monthly"; day: number };
+  thresholds: { changePct: number; riskChangePct: number };
+  requiredMetricKeys: string[];
+  recipients: string[];
+  askUserIds: string[];
+}
+
+/** One run of a hire for one month: waiting_for_data → ready → analysed → reported (or failed). */
+export const aiRoleRuns = pgTable(
+  "ai_role_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    hireId: uuid("hire_id").notNull().references(() => aiRoleHires.id, { onDelete: "restrict" }),
+    /** First day of the month analysed. */
+    period: date("period", { mode: "string" }).notNull(),
+    status: aiRunStatusEnum("status").notNull().default("waiting_for_data"),
+    /** What is still missing: [{ metricId, key, label, detail }]. */
+    missing: jsonb("missing").$type<AiRunMissing[]>().notNull().default([]),
+    /** sha256 of the numbers the analysis used (a later correction changes it). */
+    inputsHash: text("inputs_hash"),
+    /** The numbers used, per metric and month (exact decimal text). */
+    inputs: jsonb("inputs").$type<AiRunInputs | null>(),
+    findings: jsonb("findings").$type<unknown[]>().notNull().default([]),
+    narrative: text("narrative"),
+    /** narrative_skipped (no provider) | narrative_done | narrative_failed */
+    narrativeStatus: text("narrative_status"),
+    /** AI provider id used for the narrative ("none" until one is chosen). */
+    provider: text("provider"),
+    error: text("error"),
+    /** schedule | manual */
+    trigger: text("trigger").notNull().default("schedule"),
+    analysedAt: timestamp("analysed_at", { withTimezone: true }),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("ai_role_runs_hire_period_uq").on(t.hireId, t.period),
+    check("ai_role_runs_period_first", sql`extract(day from ${t.period}) = 1`),
+  ],
+);
+
+export interface AiRunMissing {
+  metricId: string;
+  key: string;
+  label: string;
+  /** "no value" | "12 of 31 days missing" */
+  detail: string;
+}
+
+export interface AiRunInputs {
+  months: string[];
+  metrics: { metricId: string; key: string; label: string; unit: string; values: (string | null)[] }[];
+}
+
+/**
+ * A data request: "Financial Analyst needs October numbers for Kiwi Go: …", ONE line in a
+ * founder's morning summary, chased daily for 7 days and then weekly (never more than once
+ * a day). A new round (month) supersedes the founder's older active request of that hire.
+ */
+export const aiDataRequests = pgTable(
+  "ai_data_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    hireId: uuid("hire_id").notNull().references(() => aiRoleHires.id, { onDelete: "restrict" }),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    /** The newest month asked for (YYYY-MM-01). */
+    roundKey: text("round_key").notNull(),
+    status: aiRequestStatusEnum("status").notNull().default("active"),
+    /** Local day it was created (start of the daily-then-weekly cadence). */
+    createdOn: date("created_on", { mode: "string" }).notNull(),
+    /** Local day it was last shown in a morning summary. */
+    lastShownOn: date("last_shown_on", { mode: "string" }),
+    shownCount: integer("shown_count").notNull().default(0),
+    outboxId: uuid("outbox_id").references(() => notificationsOutbox.id, { onDelete: "set null" }),
+    reason: text("reason"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("ai_data_requests_round_uq").on(t.hireId, t.userId, t.roundKey)],
+);
+
+export type AiRoleTemplateRow = typeof aiRoleTemplates.$inferSelect;
+export type AiRoleHire = typeof aiRoleHires.$inferSelect;
+export type AiRoleRun = typeof aiRoleRuns.$inferSelect;
+export type AiDataRequest = typeof aiDataRequests.$inferSelect;
+export type AiRunStatus = (typeof aiRunStatusEnum.enumValues)[number];
+
 export type IntercompanyFlow = typeof intercompanyFlows.$inferSelect;
 export type IntercompanyContract = typeof intercompanyContracts.$inferSelect;
 export type IntercompanyAct = typeof intercompanyActs.$inferSelect;

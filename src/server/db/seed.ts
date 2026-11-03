@@ -9,9 +9,11 @@
 import bcrypt from "bcryptjs";
 import { and, eq, like } from "drizzle-orm";
 import { addDays, todayInTimeZone } from "@/lib/dates";
+import { ROLE_TEMPLATES } from "@/lib/ai-roles";
 import { metricSeedFor, seedAggregation } from "@/lib/kpis";
 import type { Db } from "./connect";
 import {
+  aiRoleTemplates,
   companies,
   companyUnits,
   intercompanyFlows,
@@ -238,6 +240,9 @@ export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResul
     ],
   );
 
+  // --- AI roles: the role catalogue (code is the source of truth) ---------------
+  await syncAiTemplates(db);
+
   // --- Holding: the known intercompany flows (only missing ones are added) ------
   await seedIntercompanyFlows(db, companyIds, { sampleSince: options.withSamples === true ? SAMPLE_FLOW_SINCE : null });
 
@@ -457,4 +462,28 @@ async function seedSamples(db: Db, ids: SeedResult, options: SeedOptions) {
       dueDate: addDays(today, 3),
     },
   ]);
+}
+
+/**
+ * Copies the AI role catalogue (src/lib/ai-roles.ts) into `ai_role_templates`: new roles
+ * are added and existing ones updated to match the code. Idempotent; also called by the
+ * hire service so a hire never fails on a database that was not re-seeded.
+ */
+export async function syncAiTemplates(db: Db): Promise<void> {
+  for (const t of ROLE_TEMPLATES) {
+    const values = {
+      key: t.key,
+      name: t.name,
+      description: t.description,
+      status: t.status,
+      responsibilities: t.responsibilities,
+      requiredData: { byCompanyType: t.requiredData as Record<string, string[]>, optionalUploads: t.optionalUploads },
+      defaultSchedule: t.defaultSchedule,
+      reportSections: t.reportSections,
+      sort: t.sort,
+    };
+    const { key: _key, ...rest } = values;
+    void _key;
+    await db.insert(aiRoleTemplates).values(values).onConflictDoUpdate({ target: aiRoleTemplates.key, set: { ...rest, updatedAt: new Date() } });
+  }
 }

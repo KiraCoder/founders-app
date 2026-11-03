@@ -15,6 +15,8 @@ export const NOTIFICATION_KINDS = [
   "overdue_chase",
   "task_reminder",
   "urgent",
+  /** An AI role's report is ready (one per run per founder; uses the normal daily budget). */
+  "ai_report_ready",
 ] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
@@ -32,6 +34,7 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   overdue_chase: "Overdue chase",
   task_reminder: "Reminder",
   urgent: "Urgent",
+  ai_report_ready: "AI report ready",
 };
 
 /** Actions a founder can take straight from a task notification. */

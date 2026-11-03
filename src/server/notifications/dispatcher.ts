@@ -4,6 +4,8 @@ import { todayInTimeZone, addDays, isWithinWindow, windowEndAfter, zonedTimeToUt
 import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, reminderSnoozes, type OutboxItem } from "@/server/db/schema";
 import { makeContext, type ServiceContext } from "@/server/services/context";
+import { composeMorningRequests } from "@/server/ai/orchestrator";
+import { buildReportReadyMessage, markRequestsShown, REPORT_KIND, reportParkedLine } from "@/server/services/ai-roles";
 import { holdingSummarySection, markAskItemsShown } from "@/server/services/holding-asks";
 import { staleMetricsFor } from "@/server/services/metrics";
 import { getTask, getTodaySummary, type TaskView } from "@/server/services/tasks";
@@ -139,6 +141,21 @@ async function collectParked(ctx: ServiceContext): Promise<{ keep: string[]; dro
   const lines: string[] = [];
   const seen = new Set<string>();
   for (const r of rows) {
+    if (r.kind === REPORT_KIND) {
+      // A parked "report ready" push: one line, if the report still exists.
+      const runId = (r.payload as { runId?: string }).runId;
+      const line = runId ? await reportParkedLine(ctx, runId) : null;
+      if (!line) {
+        drop.push(r.id);
+        continue;
+      }
+      keep.push(r.id);
+      if (!seen.has(`run:${runId}`)) {
+        seen.add(`run:${runId}`);
+        lines.push(line);
+      }
+      continue;
+    }
     const task = r.taskId ? await getTask(ctx, r.taskId).catch(() => null) : null;
     const open = task && task.status !== "done" && task.status !== "cancelled";
     const relevant = open && (r.kind === "task_reminder" || task.isOverdue || task.dueDate === today);
@@ -155,7 +172,7 @@ async function collectParked(ctx: ServiceContext): Promise<{ keep: string[]; dro
 }
 
 type Built =
-  | { message: NeutralMessage; bundle?: string[]; dropParked?: string[]; holdingItemIds?: string[] }
+  | { message: NeutralMessage; bundle?: string[]; dropParked?: string[]; holdingItemIds?: string[]; aiRequestIds?: string[] }
   | { skip: string };
 
 async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
@@ -176,13 +193,26 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
             return null;
           })
         : null;
+    // Orchestrator: AI role data requests, de-duplicated against "Numbers waiting" and Holding.
+    const composed =
+      kind === "morning_summary"
+        ? await composeMorningRequests(ctx, { waiting, holding }).catch((err: unknown) => {
+            console.error("[dispatcher] AI role requests failed", err);
+            return { waiting, holding, aiLines: [], aiRequestIds: [] };
+          })
+        : null;
     const message =
       kind === "morning_summary"
-        ? buildMorningSummary(summary, parked.lines, ctx.user.shortName, waiting, holding)
+        ? buildMorningSummary(summary, parked.lines, ctx.user.shortName, composed!.waiting, composed!.holding, composed!.aiLines)
         : buildEveningCheck(summary, parked.lines);
     return message
-      ? { message, bundle: parked.keep, dropParked: parked.drop, holdingItemIds: holding?.itemIds }
+      ? { message, bundle: parked.keep, dropParked: parked.drop, holdingItemIds: holding?.itemIds, aiRequestIds: composed?.aiRequestIds }
       : { skip: "nothing_to_send" };
+  }
+  if (kind === REPORT_KIND) {
+    const runId = (item.payload as { runId?: string }).runId;
+    const message = runId ? await buildReportReadyMessage(ctx, runId) : null;
+    return message ? { message } : { skip: "report_gone" };
   }
   if (!item.taskId) return { skip: "no_task" };
   // getTask enforces visibility as the recipient: another founder's private task is "not found".
@@ -410,6 +440,7 @@ async function processItem(
       nextAttemptAt: null,
     });
     if (built.holdingItemIds?.length) await markAskItemsShown(db, built.holdingItemIds, item.id, now);
+    if (built.aiRequestIds?.length) await markRequestsShown(db, built.aiRequestIds, todayInTimeZone(now, tz), item.id);
     if (built.bundle?.length) {
       await db
         .update(notificationsOutbox)

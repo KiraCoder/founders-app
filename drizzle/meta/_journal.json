@@ -85,6 +85,13 @@
       "when": 1793662993079,
       "tag": "0011_holding_fixes",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1793664389011,
+      "tag": "0012_ai_roles",
+      "breakpoints": true
     }
   ]
 }

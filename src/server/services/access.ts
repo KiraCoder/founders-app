@@ -160,3 +160,20 @@ export function canSeeHolding(ctx: ServiceContext): boolean {
 export function assertHoldingAccess(ctx: ServiceContext): void {
   if (!canSeeHolding(ctx)) throw new ServiceError("forbidden", "Only the founders can see the holding");
 }
+
+// ---------------------------------------------------------------------------
+// AI roles (hires, runs, data requests)
+// ---------------------------------------------------------------------------
+
+/**
+ * AI roles rule: hiring, tuning, pausing a role and reading its reports is founders-only
+ * (a report spans a company's numbers; staff, later, get nothing here). A role only ever
+ * asks or notifies founders.
+ */
+export function canUseAiRoles(ctx: ServiceContext): boolean {
+  return ctx.user.role === "founder";
+}
+
+export function assertAiRolesAccess(ctx: ServiceContext): void {
+  if (!canUseAiRoles(ctx)) throw new ServiceError("forbidden", "Only the founders can hire or manage AI roles");
+}

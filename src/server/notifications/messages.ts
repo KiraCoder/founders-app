@@ -113,6 +113,7 @@ export function buildMorningSummary(
   firstName: string,
   numbersWaiting: readonly WaitingNumber[] = [],
   holding: { lines: MessageLine[]; actions: MessageAction[] } | null = null,
+  aiLines: readonly MessageLine[] = [],
 ): NeutralMessage {
   const listed = new Set([...s.overdue, ...s.dueToday, ...s.thisWeek].map((t) => t.id));
   const personalRest = s.personal.filter((t) => !listed.has(t.id));
@@ -129,6 +130,8 @@ export function buildMorningSummary(
   ];
   if (lines.length === 1) lines.push({ text: "Nothing on your plate today.", style: "muted" });
   lines.push(...numbersWaitingSection(numbersWaiting, s.today));
+  // AI roles: data requests composed by the orchestrator (deduped against "Numbers waiting").
+  lines.push(...aiLines);
   if (holding?.lines.length) lines.push(...holding.lines);
   return {
     title: `Good morning, ${firstName}`,
