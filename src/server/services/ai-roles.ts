@@ -212,9 +212,9 @@ function runSummary(run: AiRoleRun): RunSummary {
 function settingsOf(hire: Pick<AiRoleHire, "settings">, template: ResolvedRole, type: CompanyType, founderIds: string[]): HireSettings {
   const d = roleDefaultSettings(template, type, founderIds);
   const s = (hire.settings ?? {}) as Partial<AiHireSettingsJson>;
-  let schedule = s.schedule ?? d.schedule;
-  // Org roles always sent their line on Mondays; a row from before 0021 stored "monthly 1".
-  if (template.engine === "org_rules" && schedule.kind === "monthly" && schedule.day === 1) schedule = { kind: "weekly", weekday: 1 };
+  // Stored as chosen: 0021 already rewrote the old "monthly 1" rows that meant Mondays, so a
+  // "monthly on day 1" saved since then is honoured (no coercion to weekly).
+  const schedule = s.schedule ?? d.schedule;
   return {
     schedule,
     thresholds: s.thresholds ?? d.thresholds,

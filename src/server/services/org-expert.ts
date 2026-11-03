@@ -34,9 +34,8 @@ export async function orgExpertHires(ctx: ServiceContext): Promise<OrgExpertHire
   return rows.map((r) => {
     const s = (r.settings ?? {}) as Partial<AiHireSettingsJson>;
     const d = roleDefaultSettings(role, companyTypeFor(r.slug), founders);
-    let schedule: Schedule = s.schedule ?? d.schedule;
-    // Before 0021 the stored "monthly 1" meant Mondays.
-    if (schedule.kind === "monthly" && schedule.day === 1) schedule = { kind: "weekly", weekday: 1 };
+    // As chosen (0021 rewrote the old "monthly 1" rows): monthly on day 1 means the 1st.
+    const schedule: Schedule = s.schedule ?? d.schedule;
     const checks = hireChecks(role, { checks: s.checks, thresholds: s.thresholds ?? d.thresholds, maxDepartmentsPerHead: s.maxDepartmentsPerHead ?? d.maxDepartmentsPerHead });
     return {
       companyId: r.companyId,
@@ -89,6 +88,7 @@ export async function orgExpertSummaryLines(ctx: ServiceContext): Promise<Messag
   const line = orgExpertSummaryLine(
     results.map((r) => ({ companyName: r.scopeName, findings: r.findings })),
     href,
+    hires.every((h) => h.schedule.kind === "monthly") ? "monthly" : "weekly",
   );
   return line ? [{ text: line, style: "item" }] : [];
 }

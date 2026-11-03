@@ -362,8 +362,6 @@ export function firstPeriodFor(hiredOn: IsoDate): IsoDate {
 /** "Weekly on Mondays" for the org checks, otherwise "Monthly on the 10th". */
 export function templateScheduleLabel(t: Pick<RoleTemplate, "engine" | "defaultSchedule">, s: Schedule = t.defaultSchedule): string {
   if (s.kind === "off") return runBased(templateEngine(t)) ? "Off (Run now only)" : "Off";
-  // Org roles store their weekday; legacy monthly-day-1 rows (before 0021) meant Mondays.
-  if (templateEngine(t) === "org_rules" && s.kind === "monthly" && s.day === 1 && t.defaultSchedule.kind === "weekly") return "Weekly on Mondays";
   return scheduleLabel(s, templateEngine(t));
 }
 

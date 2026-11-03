@@ -499,7 +499,11 @@ const SHORT: Record<OrgRule, (n: number) => string> = {
  * companies it works for, or null when nothing needs attention. Info findings and stale
  * numbers are left out (the latter are asked for by "Numbers waiting" — one source per ask).
  */
-export function orgExpertSummaryLine(companies: readonly { companyName: string; findings: readonly OrgFinding[] }[], href: string): string | null {
+export function orgExpertSummaryLine(
+  companies: readonly { companyName: string; findings: readonly OrgFinding[] }[],
+  href: string,
+  cadence: "weekly" | "monthly" = "weekly",
+): string | null {
   const parts: string[] = [];
   for (const c of companies) {
     const relevant = c.findings.filter((f) => f.severity === "warning" && !SUMMARY_SKIP.has(f.rule));
@@ -510,5 +514,5 @@ export function orgExpertSummaryLine(companies: readonly { companyName: string; 
   }
   if (!parts.length) return null;
   const listed = parts.slice(0, 3).join("; ") + (parts.length > 3 ? `; +${parts.length - 3} more companies` : "");
-  return `Org Structure Expert (weekly): ${listed} — ${href}`;
+  return `Org Structure Expert (${cadence}): ${listed} — ${href}`;
 }

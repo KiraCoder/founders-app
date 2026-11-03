@@ -278,5 +278,15 @@ describe("built-in roles: template-level edits, defaults unchanged", () => {
     expect(tuesday[0]!.text).toContain("Org Structure Expert (weekly): Jobutify");
     await updateHire(ctx, hire.id, { settings: { schedule: { kind: "off" } } });
     expect(await orgExpertSummaryLines(t.ctx("nuraaly", new Date("2026-11-10T06:00:00Z")))).toEqual([]);
+    // "Monthly on day 1" is kept as chosen (C5b #4): not turned into weekly Mondays.
+    await updateHire(ctx, hire.id, { settings: { schedule: { kind: "monthly", day: 1 } } });
+    const saved = await getHire(ctx, hire.id);
+    expect(saved.settings.schedule).toEqual({ kind: "monthly", day: 1 });
+    expect(saved.scheduleLabel).toBe("Monthly on the 1st");
+    expect((await orgExpertHires(ctx)).find((h) => h.companyId === jobutify)!.schedule).toEqual({ kind: "monthly", day: 1 });
+    expect(await orgExpertSummaryLines(t.ctx("nuraaly", new Date("2026-11-09T06:00:00Z")))).toEqual([]); // a Monday
+    const first = await orgExpertSummaryLines(t.ctx("nuraaly", new Date("2026-12-01T06:00:00Z"))); // the 1st
+    expect(first).toHaveLength(1);
+    expect(first[0]!.text).toContain("Org Structure Expert (monthly): Jobutify");
   });
 });
