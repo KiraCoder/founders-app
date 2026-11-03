@@ -1,0 +1,2 @@
+ALTER TABLE "ai_role_settings_log" DROP CONSTRAINT "ai_role_settings_log_action";--> statement-breakpoint
+ALTER TABLE "ai_role_settings_log" ADD CONSTRAINT "ai_role_settings_log_action" CHECK ("ai_role_settings_log"."action" in ('create', 'edit', 'revert', 'reset'));

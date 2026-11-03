@@ -1139,7 +1139,7 @@ export async function hireRole(ctx: ServiceContext, input: HireCreateInput): Pro
 }
 
 /** Tune (settings, notes) and/or pause / resume. Pausing closes the hire's data requests. */
-export async function updateHire(ctx: ServiceContext, id: unknown, input: HirePatchInput, opts: { revertedTo?: number } = {}): Promise<HireView> {
+export async function updateHire(ctx: ServiceContext, id: unknown, input: HirePatchInput, opts: { revertedTo?: number; reset?: boolean } = {}): Promise<HireView> {
   const view = await getHire(ctx, id);
   const data = hirePatchSchema.parse(input);
   const role = await resolveRole(ctx.db, view.templateKey);
@@ -1157,6 +1157,7 @@ export async function updateHire(ctx: ServiceContext, id: unknown, input: HirePa
       // `null` in a patch clears an override (checks / profile → the role's again).
       const merged: Record<string, unknown> = { ...current.settings, ...data.settings };
       for (const k of ["checks", "profile"] as const) if (data.settings[k] === null) delete merged[k];
+      if (opts.reset) for (const k of ["checks", "profile", "maxDepartmentsPerHead"] as const) if (!(k in data.settings) || data.settings[k] == null) delete merged[k];
       set.settings = await validateSettings(tctx, current.companyId, merged as HireSettings, role ?? undefined);
     }
     if (data.notes !== undefined) set.notes = data.notes;
@@ -1172,7 +1173,7 @@ export async function updateHire(ctx: ServiceContext, id: unknown, input: HirePa
         scope: "hire",
         roleKey: current.templateKey,
         hireId: current.id,
-        action: opts.revertedTo ? "revert" : "edit",
+        action: opts.reset ? "reset" : opts.revertedTo ? "revert" : "edit",
         revertedTo: opts.revertedTo,
         before,
         after,
@@ -1190,6 +1191,21 @@ export async function updateHire(ctx: ServiceContext, id: unknown, input: HirePa
   });
   if (!changed.paused && changed.settings) await recheckOpenRuns(ctx.db, view.id, ctx.now, today(ctx));
   return getHire(ctx, view.id);
+}
+
+/**
+ * "Reset to defaults" for a hire: its settings become the role's defaults for this company
+ * (schedule, thresholds, numbers needed, recipients, month totals) and its own checks and
+ * profile overrides are cleared; notes are kept. Logged as a version ("reset"), so it can be
+ * reverted like any other.
+ */
+export async function resetHireToDefaults(ctx: ServiceContext, id: unknown): Promise<HireView> {
+  const view = await getHire(ctx, id);
+  const role = await resolveRole(ctx.db, view.templateKey);
+  if (!role) throw new ServiceError("not_found", "AI role not found");
+  const founders = (await listFounders(ctx.db)).map((f) => f.id);
+  const d = roleDefaultSettings(role, companyTypeFor(view.companySlug), founders);
+  return updateHire(ctx, view.id, { settings: { ...d, checks: null, profile: null } }, { reset: true });
 }
 
 /**

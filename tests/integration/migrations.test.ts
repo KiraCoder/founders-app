@@ -905,3 +905,12 @@ describe("0024 is_pay_data on existing metrics", () => {
     });
   });
 });
+
+describe("0025 settings log 'reset' action", () => {
+  it("allows 'reset' and still refuses unknown actions", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    await client.exec(`insert into ai_role_settings_log (scope_key, role_key, version, action, after) values ('role:x', 'x', 1, 'reset', '{}')`);
+    await expect(client.query(`insert into ai_role_settings_log (scope_key, role_key, version, action, after) values ('role:x', 'x', 2, 'wipe', '{}')`)).rejects.toThrow();
+  });
+});

@@ -200,7 +200,7 @@ export async function logSettingsChange(
     scope: "role" | "hire";
     roleKey: string;
     hireId?: string | null;
-    action: "create" | "edit" | "revert";
+    action: "create" | "edit" | "revert" | "reset";
     revertedTo?: number;
     before: Record<string, unknown> | null;
     after: Record<string, unknown>;

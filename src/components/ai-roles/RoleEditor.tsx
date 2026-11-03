@@ -4,6 +4,8 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import {
   createCustomRoleAction,
+  resetHireAction,
+  resetRoleAction,
   revertHireAction,
   revertRoleAction,
   saveHireSettingsAction,
@@ -248,6 +250,19 @@ export function RoleEditor({
         onClose();
       }
     });
+
+  const resetToDefaults = () => {
+    const what = hire ? "this hire's settings to the role's defaults (its own checks and name go; notes stay)" : target.custom ? "this role to its first version" : "this role to the built-in defaults";
+    if (!window.confirm(`Reset ${what}? The current settings stay in History and can be restored.`)) return;
+    start(async () => {
+      const res = hire ? await resetHireAction(target.hireId!) : await resetRoleAction(target.roleKey!);
+      setState(res);
+      if (res.ok) {
+        router.refresh();
+        onClose();
+      }
+    });
+  };
 
   const label = creating ? "Create your own role" : `Edit ${target.title}`;
   return (
@@ -580,7 +595,13 @@ export function RoleEditor({
                     <span className="text-muted">{v.at}</span>
                     <span>{v.byName ?? "?"}</span>
                     <span className="text-muted">
-                      {v.action === "revert" ? `reverted to v${v.revertedTo}` : v.action === "create" ? "created" : `changed ${v.changed.join(", ") || "settings"}`}
+                      {v.action === "revert"
+                        ? `reverted to v${v.revertedTo}`
+                        : v.action === "reset"
+                          ? "reset to defaults"
+                          : v.action === "create"
+                            ? "created"
+                            : `changed ${v.changed.join(", ") || "settings"}`}
                     </span>
                     {i > 0 && (
                       <button type="button" className="btn btn-sm btn-ghost ml-auto" disabled={pending} onClick={() => revert(v.version)} aria-label={`Revert to version ${v.version}`}>
@@ -601,6 +622,11 @@ export function RoleEditor({
             </p>
           )}
           <div className="ml-auto flex gap-2">
+            {!creating && (
+              <button type="button" className="btn btn-ghost" onClick={resetToDefaults} disabled={pending} data-testid="editor-reset">
+                Reset to defaults
+              </button>
+            )}
             <button type="button" className="btn" onClick={onClose} disabled={pending}>
               Cancel
             </button>

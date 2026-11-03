@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import type { HireCreateInput, HirePatchInput } from "@/lib/ai-roles";
 import { getPageContext } from "@/server/context";
 import type { CustomRoleCreateInput } from "@/lib/ai-role-config";
-import { createCustomRole, revertHire, revertRole, updateRoleConfig } from "@/server/services/ai-role-editor";
+import { createCustomRole, resetHire, resetRoleToDefaults, revertHire, revertRole, updateRoleConfig } from "@/server/services/ai-role-editor";
 import { createTaskFromFinding, enterMonthTotalForRun, hireRole, rerunReport, runHireNow, updateHire } from "@/server/services/ai-roles";
 import { toServiceError } from "@/server/services/errors";
 
@@ -129,5 +129,22 @@ export async function revertHireAction(hireId: string, version: number): Promise
   return run(async () => {
     await revertHire(ctx, hireId, version);
     return { message: `Back to version ${version}.` };
+  });
+}
+
+/** "Reset to defaults" (role: the code's defaults / a custom role's first version; hire: the role's defaults). */
+export async function resetRoleAction(key: string): Promise<AiActionState> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const role = await resetRoleToDefaults(ctx, key);
+    return { message: `Back to the defaults (saved as version ${role.version}).` };
+  });
+}
+
+export async function resetHireAction(hireId: string): Promise<AiActionState> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    await resetHire(ctx, hireId);
+    return { message: "Back to the role's defaults." };
   });
 }

@@ -18,7 +18,7 @@ import { aiRoleConfigs, aiRoleHires, aiRoleSettingsLog, aiRoleTemplates, compani
 import { listFounders } from "@/server/notifications/founders";
 import { assertAiRolesAccess, assertCompanyAccess, assertValidId } from "./access";
 import { CUSTOM_PREFIX, isCustomKey, isSalaryMetric, logSettingsChange, resolveRole, type ResolvedRole } from "./ai-role-defs";
-import { recheckOpenRuns, updateHire, type HireView } from "./ai-roles";
+import { recheckOpenRuns, resetHireToDefaults, updateHire, type HireView } from "./ai-roles";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 
@@ -33,7 +33,7 @@ import { ServiceError } from "./errors";
 
 export interface SettingsVersion {
   version: number;
-  action: "create" | "edit" | "revert";
+  action: "create" | "edit" | "revert" | "reset";
   revertedTo: number | null;
   at: string;
   byName: string | null;
@@ -195,7 +195,7 @@ async function syncCustomTemplateRow(db: Db, key: string, config: RoleConfig, no
  * that did not override a setting follow it at once (their reports say "Settings changed"
  * where the analysis changes); open runs are re-checked.
  */
-export async function updateRoleConfig(ctx: ServiceContext, key: unknown, input: unknown, opts: { revertedTo?: number } = {}): Promise<ResolvedRole> {
+export async function updateRoleConfig(ctx: ServiceContext, key: unknown, input: unknown, opts: { revertedTo?: number; reset?: boolean } = {}): Promise<ResolvedRole> {
   assertAiRolesAccess(ctx);
   const role = await roleOrThrow(ctx, key);
   const config = await validateRoleConfig(ctx, role, input);
@@ -210,7 +210,7 @@ export async function updateRoleConfig(ctx: ServiceContext, key: unknown, input:
     const version = await logSettingsChange(tx, {
       scope: "role",
       roleKey: role.key,
-      action: opts.revertedTo ? "revert" : "edit",
+      action: opts.reset ? "reset" : opts.revertedTo ? "revert" : "edit",
       revertedTo: opts.revertedTo,
       before,
       after: config as Record<string, unknown>,
@@ -317,6 +317,34 @@ export async function revertRole(ctx: ServiceContext, key: unknown, version: unk
     .where(and(eq(aiRoleSettingsLog.scopeKey, `role:${role.key}`), eq(aiRoleSettingsLog.version, v)));
   if (!row) throw new ServiceError("not_found", "Version not found");
   return updateRoleConfig(ctx, role.key, row.after, { revertedTo: row.version });
+}
+
+/**
+ * "Reset to defaults" for a role: a built-in role goes back to the code's defaults (no
+ * role-level edits); a custom role to its first version (as created). Logged as a new
+ * version ("reset"), so it can be reverted. Nothing is logged when it already is there.
+ */
+export async function resetRoleToDefaults(ctx: ServiceContext, key: unknown): Promise<ResolvedRole> {
+  assertAiRolesAccess(ctx);
+  const role = await roleOrThrow(ctx, key);
+  let config: Record<string, unknown> = {};
+  if (role.custom) {
+    const [first] = await ctx.db
+      .select()
+      .from(aiRoleSettingsLog)
+      .where(and(eq(aiRoleSettingsLog.scopeKey, `role:${role.key}`), eq(aiRoleSettingsLog.action, "create")))
+      .orderBy(asc(aiRoleSettingsLog.version))
+      .limit(1);
+    if (!first) throw new ServiceError("not_found", "This role has no first version to go back to");
+    config = first.after;
+  }
+  return updateRoleConfig(ctx, role.key, config, { reset: true });
+}
+
+/** "Reset to defaults" for a hire (see resetHireToDefaults in services/ai-roles.ts). */
+export async function resetHire(ctx: ServiceContext, hireId: unknown): Promise<HireView> {
+  assertAiRolesAccess(ctx);
+  return resetHireToDefaults(ctx, hireId);
 }
 
 /** Restores a hire's settings and notes to an earlier version (logged as a new version). */

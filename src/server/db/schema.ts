@@ -1082,7 +1082,7 @@ export const aiRoleSettingsLog = pgTable(
     roleKey: text("role_key").notNull(),
     hireId: uuid("hire_id").references(() => aiRoleHires.id, { onDelete: "restrict" }),
     version: integer("version").notNull(),
-    /** create | edit | revert */
+    /** create | edit | revert | reset (back to the defaults, 0025) */
     action: text("action").notNull(),
     revertedTo: integer("reverted_to"),
     before: jsonb("before").$type<Record<string, unknown> | null>(),
@@ -1092,7 +1092,7 @@ export const aiRoleSettingsLog = pgTable(
   },
   (t) => [
     uniqueIndex("ai_role_settings_log_scope_version_uq").on(t.scopeKey, t.version),
-    check("ai_role_settings_log_action", sql`${t.action} in ('create', 'edit', 'revert')`),
+    check("ai_role_settings_log_action", sql`${t.action} in ('create', 'edit', 'revert', 'reset')`),
   ],
 );
 
