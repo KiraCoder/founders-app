@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, notLike, sql } from "drizzle-orm";
 import { todayInTimeZone, type IsoDate } from "@/lib/dates";
 import { metricGridInputSchema, metricValueInputSchema, type MetricValueInput } from "@/lib/metric-schemas";
 import {
@@ -217,42 +217,56 @@ function freshnessOf(def: MetricView, inputs: FreshnessInputs | undefined, today
   );
 }
 
+/** Rows of db.execute (PGlite: { rows }, postgres-js: an array). */
+function rowsOf<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  return ((result as { rows?: T[] } | null)?.rows ?? []) as T[];
+}
+
 /**
- * Unresolved disagreements: conflicts recorded by the LATEST finished run of each
- * connector, whose kept (founder's) value is still the current one.
+ * Unresolved disagreements, whose kept (founder's) value is still the current one:
+ * - connectors: the conflicts of the LATEST finished run of each connector and company
+ *   (DISTINCT ON — however many runs there are);
+ * - browser extension: per number and period, the NEWEST extension run that mentions it
+ *   decides (a conflict, or an agreement with the founder's number that clears it) — so any
+ *   number of later calls about other numbers never pushes a disagreement off the card.
  */
 async function loadDisagreements(db: Db, defs: MetricView[]): Promise<Map<string, MetricDisagreement[]>> {
   const out = new Map<string, MetricDisagreement[]>();
   if (defs.length === 0) return out;
   const companyIds = [...new Set(defs.map((d) => d.companyId))];
+  const defIds = new Set(defs.map((d) => d.id));
   // Any source of the metric's company counts (the metric may be fed by another source than expected).
   const runs = await db
-    .select({ connectorId: connectorRuns.connectorId, companyId: connectorRuns.companyId, details: connectorRuns.details, at: connectorRuns.startedAt })
+    .selectDistinctOn([connectorRuns.connectorId, connectorRuns.companyId], { connectorId: connectorRuns.connectorId, details: connectorRuns.details, at: connectorRuns.startedAt })
     .from(connectorRuns)
-    .where(and(inArray(connectorRuns.companyId, companyIds), eq(connectorRuns.status, "ok"), isNotNull(connectorRuns.finishedAt)))
-    .orderBy(desc(connectorRuns.startedAt))
-    .limit(200);
-  const latestRun = new Map<string, (typeof runs)[number]>();
-  for (const r of runs) if (!latestRun.has(`${r.connectorId}|${r.companyId}`)) latestRun.set(`${r.connectorId}|${r.companyId}`, r);
-  const defIds = new Set(defs.map((d) => d.id));
+    .where(and(inArray(connectorRuns.companyId, companyIds), eq(connectorRuns.status, "ok"), isNotNull(connectorRuns.finishedAt), notLike(connectorRuns.connectorId, "extension:%")))
+    .orderBy(connectorRuns.connectorId, connectorRuns.companyId, desc(connectorRuns.startedAt), desc(connectorRuns.id));
   const conflicts: (ConnectorRunConflict & { connectorId: string; at: Date })[] = [];
-  for (const r of latestRun.values()) {
-    if (r.connectorId.startsWith("extension:")) continue;
+  for (const r of runs) {
     for (const c of r.details?.conflicts ?? []) if (defIds.has(c.metricId)) conflicts.push({ ...c, connectorId: r.connectorId, at: r.at });
   }
-  // Browser extension calls each carry a few points, so every recent call counts (not only the
-  // latest): per number and period the newest call that mentions it decides — a conflict, or an
-  // agreement with the founder's number that clears it.
-  const decided = new Set<string>();
-  for (const r of runs) {
-    if (!r.connectorId.startsWith("extension:")) continue;
-    for (const a of r.details?.agreed ?? []) decided.add(`${a.metricId}|${a.period}`);
-    for (const c of r.details?.conflicts ?? []) {
-      const k = `${c.metricId}|${c.period}`;
-      if (decided.has(k) || !defIds.has(c.metricId)) continue;
-      decided.add(k);
-      conflicts.push({ ...c, connectorId: r.connectorId, at: r.at });
-    }
+  const list = (values: readonly string[]) => sql.join(values.map((v) => sql`${v}`), sql`, `);
+  const items = sql`(case when jsonb_typeof(r.details -> 'conflicts') = 'array' then r.details -> 'conflicts' else '[]'::jsonb end)`;
+  const agreedItems = sql`(case when jsonb_typeof(r.details -> 'agreed') = 'array' then r.details -> 'agreed' else '[]'::jsonb end)`;
+  const ext = rowsOf<{ connectorId: string; at: Date | string; kind: "conflict" | "agreed"; item: ConnectorRunConflict }>(
+    await db.execute(sql`
+      select distinct on (e.item ->> 'metricId', e.item ->> 'period')
+        r.connector_id as "connectorId", r.started_at as "at", e.kind as "kind", e.item as "item"
+      from connector_runs r
+      cross join lateral (
+        select 'conflict' as kind, x as item from jsonb_array_elements(${items}) x
+        union all
+        select 'agreed' as kind, x as item from jsonb_array_elements(${agreedItems}) x
+      ) e
+      where r.company_id in (${list(companyIds)}) and r.status = 'ok' and r.finished_at is not null
+        and r.connector_id like 'extension:%' and e.item ->> 'metricId' in (${list([...defIds])})
+      order by e.item ->> 'metricId', e.item ->> 'period', r.started_at desc, r.id desc`),
+  );
+  for (const r of ext) {
+    if (r.kind !== "conflict") continue;
+    const c = r.item;
+    conflicts.push({ metricId: c.metricId, period: c.period, kept: Number(c.kept), keptSource: c.keptSource, reported: Number(c.reported), connectorId: r.connectorId, at: new Date(r.at) });
   }
   if (conflicts.length === 0) return out;
   const current = await currentValues(db, [...new Set(conflicts.map((c) => c.metricId))]);

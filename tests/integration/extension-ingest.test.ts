@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 import { and, desc, eq } from "drizzle-orm";
 import { middleware } from "@/middleware";
-import { companies, extensionIngestLog, extensionKeys, ingestRateCounters, metricDefinitions, metricValues } from "@/server/db/schema";
+import { companies, connectorRuns, extensionIngestLog, extensionKeys, ingestRateCounters, metricDefinitions, metricValues } from "@/server/db/schema";
 import { handleIngestPreflight, handleIngestRequest } from "@/server/http/ingest";
 import type { ServiceContext } from "@/server/services/context";
 import { createExtensionKey, hashKey, INGEST_RATE_LIMIT, listExtensionKeys, listIngestLog, revokeExtensionKey } from "@/server/services/extension";
@@ -264,5 +264,52 @@ describe("POST /api/v1/ingest", () => {
     // Other API routes still need the session and the same-origin guard.
     expect((await middleware(new NextRequest(`${base}/api/v1/ingestx`, { method: "POST", headers: { origin: EXT, "content-type": "application/json" } }))).status).toBe(403);
     expect((await middleware(new NextRequest(`${base}/api/v1/tasks`, { method: "POST", headers: { origin: EXT, "content-type": "application/json" } }))).status).toBe(403);
+  });
+});
+
+describe("'Source disagrees' survives many later calls (C5b #2)", () => {
+  it("after 205 unrelated extension calls the extension's and a connector's disagreements still show; a call that changes nothing leaves no run", async () => {
+    const kiwi = t.companyIds["kiwi-go"]!;
+    const [rev] = await t.handle.db.select().from(metricDefinitions).where(and(eq(metricDefinitions.companyId, kiwi), eq(metricDefinitions.key, "revenue")));
+    now = new Date(FIXED_NOW.getTime() + 4 * 3_600_000);
+    await recordMetricValue(t.ctx("talant"), rev!.id, { period: "2026-05", value: 100 });
+    await recordMetricValue(t.ctx("talant"), rev!.id, { period: "2026-02", value: 50 });
+    // A real connector's run (older than every extension call below) that disagreed on February.
+    await t.handle.db.insert(connectorRuns).values({
+      connectorId: "kiwi-api",
+      companyId: kiwi,
+      status: "ok",
+      rangeFrom: "2026-02-01",
+      rangeTo: "2026-02-01",
+      startedAt: now,
+      finishedAt: now,
+      details: { conflicts: [{ metricId: rev!.id, period: "2026-02-01", kept: 50, keptSource: "manual", reported: 55 }] },
+    });
+    now = new Date(now.getTime() + 1000);
+    const res = await send(post(env([pt("kiwi-go", "revenue", "2026-05-01", "130")])));
+    expect((await res.json()).rejected).toHaveLength(1);
+    const disagreements = async () =>
+      (await listCompanyMetricCards(t.ctx("nuraaly"), kiwi)).find((c) => c.key === "revenue")!.disagreements.map((d) => [d.period, d.kept, d.reported, d.connectorId]);
+    const expected = [
+      ["2026-05-01", 100, 130, "extension:wb-seller"],
+      ["2026-02-01", 50, 55, "kiwi-api"],
+    ];
+    expect(await disagreements()).toEqual(expected);
+    for (let i = 0; i < 205; i++) {
+      now = new Date(now.getTime() + 1200); // under the rate limit
+      const r = await send(post(env([pt("kiwi-go", "orders_day", "2026-10-01", String(1000 + i))])));
+      expect(r.status).toBe(200);
+    }
+    const runs = await t.handle.db.select({ id: connectorRuns.id }).from(connectorRuns).where(eq(connectorRuns.companyId, kiwi));
+    expect(runs.length).toBeGreaterThan(205);
+    expect(await disagreements()).toEqual(expected);
+    // The same value again changes nothing: accepted, no new run.
+    now = new Date(now.getTime() + 1200);
+    expect((await (await send(post(env([pt("kiwi-go", "orders_day", "2026-10-01", "1204")])))).json()).accepted).toBe(1);
+    expect(await t.handle.db.select({ id: connectorRuns.id }).from(connectorRuns).where(eq(connectorRuns.companyId, kiwi))).toHaveLength(runs.length);
+    // An agreement still clears the extension's disagreement (the newest run that mentions it decides).
+    now = new Date(now.getTime() + 1200);
+    await send(post(env([pt("kiwi-go", "revenue", "2026-05-01", "100")])));
+    expect(await disagreements()).toEqual([expected[1]]);
   });
 });

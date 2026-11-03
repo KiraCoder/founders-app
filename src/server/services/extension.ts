@@ -383,6 +383,11 @@ export async function ingestPoints(ctx: ServiceContext, adapterId: string, point
           if (res.action === "created" || res.action === "updated") written++;
           else if (res.previousSource === "manual" || res.previousSource === "upload") agreed.push({ metricId: a.metricId, period: a.period });
         }
+        // A call that changed nothing and said nothing about a founder's number leaves no run.
+        if (written === 0 && runConflicts.length === 0 && agreed.length === 0) {
+          await tx.delete(connectorRuns).where(eq(connectorRuns.id, run!.id));
+          continue;
+        }
         await tx
           .update(connectorRuns)
           .set({
