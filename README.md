@@ -848,13 +848,20 @@ one row per edited built-in role or custom role) and `ai_role_settings_log` (eve
   rules (one grouped data-request line per role per founder per day, daily for 7 days then
   weekly; "never entered" / data-source lines stay Monday-only in *Numbers waiting*).
 - **Salary guard.** A custom role can never watch pay data: a number whose key, name or
-  aliases name salaries / payroll / wages / зарплата / ФОТ / оклад (the narrative's word list)
-  is refused when the role is saved (shown as "pay data — never watched") and dropped again at
-  run time (a forged config analyses nothing of it). Only `piecework_total` (a factory total)
-  is allowed, by key.
+  aliases name salaries / payroll / wages / bonuses / compensation / зарплата / з/п / зар. плата
+  / ФОТ / оклад / премия / бонус (the narrative's word list; keys checked as snake_case and
+  camelCase parts, e.g. `fot_total`, `fotTotal`), **or that is flagged
+  `metric_definitions.is_pay_data`** (0024; existing pay-named numbers were flagged), is refused
+  when the role is saved (shown as "pay data — never watched") and dropped again at run time (a
+  forged config analyses nothing of it); findings about such numbers never enter an AI prompt.
+  Only `piecework_total` (a factory total) is allowed, by key, unless it is flagged.
 - **Versions.** Every save is a numbered version per role / per hire (who, when, before,
   after; creating a role or a hire is version 1). *History → Revert to this* restores that
-  version's settings and is logged as a new version. Nothing is deleted.
+  version's settings and is logged as a new version. **Reset to defaults** (in the editor)
+  takes a built-in role back to the code's defaults, a custom role to its first version, a hire
+  to its role's defaults (own checks / name cleared, notes kept) — logged as a version
+  ("reset to defaults") that can be reverted. Nothing is deleted. Hire edits are made under a
+  row lock, so two edits at once both land and log the right "before".
 
 ## Org structure (Vysotsky model)
 
