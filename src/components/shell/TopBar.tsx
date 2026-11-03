@@ -4,16 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Icon } from "@/components/Icon";
+import { InitialsAvatar } from "@/components/ui";
 import { logoutAction } from "@/app/(app)/actions";
-
-function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((p) => p[0])
-    .join("")
-    .toUpperCase();
-}
 
 export interface AgentHire {
   id: string;
@@ -116,8 +108,11 @@ export function TopBar({ user, agentHires = [] }: { user: { name: string; shortN
             type="search"
             placeholder="Search tasks, projects, companies, people"
             aria-label="Search"
-            className="input pl-8"
+            className="input pl-8 pr-10"
           />
+          <kbd className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 hidden select-none rounded border border-line bg-sunk px-1.5 py-0.5 text-[10px] font-medium text-muted md:inline-block">
+            /
+          </kbd>
         </form>
         <div className="ml-auto flex items-center gap-1.5">
           <button
@@ -139,10 +134,8 @@ export function TopBar({ user, agentHires = [] }: { user: { name: string; shortN
               aria-expanded={menuOpen}
               aria-label="User menu"
             >
-              <span className="grid size-7 place-items-center rounded-full bg-accent-soft text-[12px] font-semibold text-accent">
-                {initials(user.name)}
-              </span>
-              <span className="hidden text-[13px] lg:inline">{user.shortName}</span>
+              <InitialsAvatar name={user.name} size={28} />
+              <span className="hidden text-[13px] font-medium lg:inline">{user.shortName}</span>
             </button>
             {menuOpen && (
               <div role="menu" className="card-raised absolute right-0 top-11 w-60 p-1.5">

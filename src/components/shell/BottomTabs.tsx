@@ -26,7 +26,9 @@ export function BottomTabs() {
             key={t.href}
             href={t.href}
             aria-current={active ? "page" : undefined}
-            className={`flex flex-col items-center gap-0.5 py-2 text-[11px] font-medium ${active ? "text-accent" : "text-muted"}`}
+            className={`flex flex-col items-center gap-0.5 py-2 text-[11px] transition-colors ${
+              active ? "font-semibold text-accent" : "font-medium text-muted hover:text-ink"
+            }`}
           >
             <Icon name={t.icon} size={20} />
             {t.label}
