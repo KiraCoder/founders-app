@@ -6,8 +6,10 @@
  *
  * Rules (thresholds are the hire's tuned settings, default warn ±20 %, risk ±50 %):
  * 1. change     — a number moved ≥ threshold vs the month before and/or vs the average of
- *                 the 3 months before. Bad direction → warn (risk past the risk threshold);
- *                 good direction or a neutral number → info.
+ *                 the 3 months before. Each comparison is judged on its own: bad direction →
+ *                 warn (risk past the risk threshold); good direction or a neutral number →
+ *                 info. The worse comparison sets the severity and leads the sentence.
+ *                 Percentage metrics are phrased in percentage points ("rose 1.5 pp").
  * 2. ratio      — margin-like ratios when both numbers exist (same factory): revenue per
  *                 order, piecework pay per piece, returns rate, shipment error rate; same
  *                 thresholds month over month. Plus COD: the share of COD collected that
@@ -34,6 +36,7 @@ import {
   pctOf,
   sub,
   sum,
+  toFixed,
   type Dec,
 } from "@/lib/decimal";
 
@@ -109,6 +112,36 @@ const verb = (up: boolean) => (up ? "rose" : "fell");
 // Rules
 // ---------------------------------------------------------------------------
 
+const SEVERITY_RANK: Record<Severity, number> = { risk: 0, warn: 1, info: 2 };
+
+/** "3.0%" — a percentage metric's value, always one decimal (for pp sentences). */
+const pct1 = (v: Dec) => `${toFixed(v, 1)}%`;
+
+/**
+ * How a move is phrased. Money / counts: "fell 32.5% vs September". A metric that is itself a
+ * percentage (defect rate, returns rate): percentage points, "rose 1.5 pp vs September, from
+ * 3.0% to 4.5%" — a relative "+50%" of a rate reads wrong.
+ */
+function movePhrase(cur: Dec, base: Dec, unit: string, basis: string): string {
+  const up = cmp(cur, base) > 0;
+  if (unit === "%") return `${verb(up)} ${toFixed(abs(sub(cur, base)), 1)} pp vs ${basis}, from ${pct1(base)} to ${pct1(cur)}`;
+  return `${verb(up)} ${formatPct(pctChange(cur, base)!)} vs ${basis}`;
+}
+
+interface Comparison {
+  basis: "prev" | "avg";
+  base: Dec;
+  severity: Severity;
+  phrase: string;
+}
+
+/**
+ * Change vs the month before and vs the 3-month average. Each comparison is judged on its own
+ * (its own direction and thresholds) and the worse one sets the severity; the sentence starts
+ * with that comparison and its numbers. E.g. 10, 10, 100 → 75 is a warning ("fell 25% vs
+ * September"), not a risk because it is +87.5% vs the average; 100, 100, 10 → 30 is a risk
+ * ("fell 57.1% vs the 3-month average"), not info because it rose vs September.
+ */
 function changeRule(s: MonthSeries, input: FinanceInput): Finding | null {
   const p = input.period;
   const cur = value(s, p);
@@ -120,32 +153,44 @@ function changeRule(s: MonthSeries, input: FinanceInput): Finding | null {
   const hist = [1, 2, 3].map((n) => value(s, addMonths(p, -n)));
   const avg = hist.every((v) => v !== null) ? divInt(sum(hist as Dec[]), 3) : null;
 
-  const momHit = prev !== null && changeAtLeast(cur, prev, T);
-  const avgHit = avg !== null && changeAtLeast(cur, avg, T);
-  if (!momHit && !avgHit) return null;
-  const riskHit = (prev !== null && changeAtLeast(cur, prev, R)) || (avg !== null && changeAtLeast(cur, avg, R));
-  const base = momHit ? prev! : avg!;
-  const up = cmp(cur, base) > 0;
+  const hits: Comparison[] = [];
+  for (const [basis, base, label] of [
+    ["prev", prev, monthName(prevP)],
+    ["avg", avg, "the 3-month average"],
+  ] as const) {
+    if (base === null || !changeAtLeast(cur, base, T)) continue;
+    hits.push({
+      basis,
+      base,
+      severity: severityFor(s.direction, cmp(cur, base) > 0, changeAtLeast(cur, base, R)),
+      phrase: movePhrase(cur, base, s.unit, label),
+    });
+  }
+  if (!hits.length) return null;
+  // Worst first; on a tie the month before comes first (stable sort).
+  hits.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
+  const trigger = hits[0]!;
 
-  const parts: string[] = [];
-  if (momHit) parts.push(`${verb(cmp(cur, prev!) > 0)} ${formatPct(pctChange(cur, prev!)!)} vs ${monthName(prevP)}`);
-  if (avgHit) parts.push(`${verb(cmp(cur, avg!) > 0)} ${formatPct(pctChange(cur, avg!)!)} vs the 3-month average`);
   const shown =
-    prev !== null
-      ? `${shortMonth(prevP)}: ${formatDec(prev, s.unit)}, ${shortMonth(p)}: ${formatDec(cur, s.unit)}`
+    trigger.basis === "prev"
+      ? `${shortMonth(prevP)}: ${formatDec(prev!, s.unit)}, ${shortMonth(p)}: ${formatDec(cur, s.unit)}`
       : `3-month average: ${formatDec(avg!, s.unit)}, ${shortMonth(p)}: ${formatDec(cur, s.unit)}`;
   const numbers: FindingNumber[] = [{ label: `${s.label} · ${monthLabel(p)}`, value: formatDec(cur, s.unit) }];
   if (prev !== null) numbers.push({ label: `${s.label} · ${monthLabel(prevP)}`, value: formatDec(prev, s.unit) });
   if (avg !== null) numbers.push({ label: `${s.label} · 3-month average`, value: formatDec(avg, s.unit) });
+  const sentence =
+    s.unit === "%"
+      ? `${s.label} ${hits.map((h) => h.phrase).join("; ")}.`
+      : `${s.label} ${hits.map((h) => h.phrase).join(" and ")} (${shown}).`;
   return {
     id: `change:${s.key}:${s.unitSlug ?? ""}`,
     rule: "change",
-    severity: severityFor(s.direction, up, riskHit),
+    severity: trigger.severity,
     company: input.companyName,
     metrics: [s.label],
     metricKeys: [s.key],
     numbers,
-    sentence: `${s.label} ${parts.join(" and ")} (${shown}).`,
+    sentence,
   };
 }
 
@@ -201,7 +246,10 @@ function ratioRules(input: FinanceInput): Finding[] {
           { label: `${label} · ${monthLabel(p)}`, value: formatDec(cur, r.unit) },
           { label: `${label} · ${monthLabel(prevP)}`, value: formatDec(prev, r.unit) },
         ],
-        sentence: `${label} ${verb(up)} ${formatPct(pctChange(cur, prev)!)} vs ${monthName(prevP)} (${formatDec(prev, r.unit)} → ${formatDec(cur, r.unit)}).`,
+        sentence:
+          r.unit === "%"
+            ? `${label} ${movePhrase(cur, prev, r.unit, monthName(prevP))}.`
+            : `${label} ${movePhrase(cur, prev, r.unit, monthName(prevP))} (${formatDec(prev, r.unit)} → ${formatDec(cur, r.unit)}).`,
       });
     }
   }
@@ -327,7 +375,7 @@ function targetRule(s: MonthSeries, input: FinanceInput): Finding | null {
       { label: `${s.label} · ${monthLabel(input.period)}`, value: formatDec(cur, s.unit) },
       { label: `${s.label} · target`, value: formatDec(target, s.unit) },
     ],
-    sentence: `${s.label} was ${formatDec(cur, s.unit)} in ${monthName(input.period)}, ${where} the ${formatDec(target, s.unit)} target (off by ${formatDec(abs(sub(cur, target)), s.unit)}).`,
+    sentence: `${s.label} was ${formatDec(cur, s.unit)} in ${monthName(input.period)}, ${where} the ${formatDec(target, s.unit)} target (off by ${s.unit === "%" ? `${formatDec(abs(sub(cur, target)), undefined, 1)} pp` : formatDec(abs(sub(cur, target)), s.unit)}).`,
   };
 }
 

@@ -135,7 +135,33 @@ describe("finance rules (fixed fixtures)", () => {
   it("vs the 3-month average alone (no previous-month move)", () => {
     const f = analyseFinance(input([series("sales", ["100", "100", "130", "135"])]));
     expect(f).toHaveLength(1);
-    expect(f[0]!.sentence).toBe("sales rose 22.7% vs the 3-month average (Sep: 130 KGS, Oct: 135 KGS).");
+    expect(f[0]!.sentence).toBe("sales rose 22.7% vs the 3-month average (3-month average: 110 KGS, Oct: 135 KGS).");
+  });
+  it("each comparison has its own direction: a drop vs September is not a risk because it is up vs the average", () => {
+    // 10, 10, 100 → 75: −25% vs September (warning), +87.5% vs the average 40 (good news).
+    const f = analyseFinance(input([series("revenue", ["10", "10", "100", "75"], { label: "Revenue" })]));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("warn");
+    expect(f[0]!.sentence).toBe("Revenue fell 25% vs September and rose 87.5% vs the 3-month average (Sep: 100 KGS, Oct: 75 KGS).");
+  });
+  it("a big drop vs the 3-month average is a risk even when the number rose vs September; the sentence names the average", () => {
+    // 100, 100, 10 → 30: +200% vs September (info), −57.1% vs the average 70 (risk).
+    const f = analyseFinance(input([series("revenue", ["100", "100", "10", "30"], { label: "Revenue" })]));
+    expect(f).toHaveLength(1);
+    expect(f[0]!.severity).toBe("risk");
+    expect(f[0]!.sentence).toBe("Revenue fell 57.1% vs the 3-month average and rose 200% vs September (3-month average: 70 KGS, Oct: 30 KGS).");
+  });
+  it("percentage metrics are phrased in percentage points", () => {
+    const f = analyseFinance(input([series("defect_pct", [null, null, "3", "4.5"], { label: "Defect rate", unit: "%", direction: "lower_is_better" })]));
+    expect(f[0]).toMatchObject({ rule: "change", severity: "risk" });
+    expect(f[0]!.sentence).toBe("Defect rate rose 1.5 pp vs September, from 3.0% to 4.5%.");
+    const r = analyseFinance(
+      input([
+        series("wb_returns", [null, null, "30", "45"], { label: "Returns", unit: "pcs", direction: "lower_is_better" }),
+        series("wb_orders", [null, null, "1000", "1000"], { label: "Orders", unit: "pcs" }),
+      ]),
+    ).find((x) => x.rule === "ratio")!;
+    expect(r.sentence).toBe("Returns rate rose 1.5 pp vs September, from 3.0% to 4.5%.");
   });
   it("custom thresholds are used", () => {
     expect(analyseFinance(input([series("revenue", [null, null, "100", "110"])], { changePct: 5, riskChangePct: 50 }))).toHaveLength(1);
@@ -178,7 +204,7 @@ describe("finance rules (fixed fixtures)", () => {
     const f = analyseFinance(input([series("defect_pct", [null, null, "2.6", "2.6"], { label: "Defect rate · ХБК", unit: "%", direction: "lower_is_better", target: "2" })]));
     expect(f).toHaveLength(1);
     expect(f[0]).toMatchObject({ rule: "target", severity: "warn" });
-    expect(f[0]!.sentence).toBe("Defect rate · ХБК was 2.6% in October, above the 2% target (off by 0.6%).");
+    expect(f[0]!.sentence).toBe("Defect rate · ХБК was 2.6% in October, above the 2% target (off by 0.6 pp).");
   });
   it("numbers missing for 2+ months; never entered in one info line", () => {
     const f = analyseFinance(
