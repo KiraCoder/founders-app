@@ -224,7 +224,7 @@ export function buildMorningSummary(
  */
 export function buildEveningCheck(s: TodaySummary, parked: readonly (string | ParkedItem)[]): NeutralMessage | null {
   const parkedItems = parked.map(toParked);
-  if (!s.dueToday.length && !s.overdue.length && !parkedItems.length) return null;
+  if (!s.dueToday.length && !parkedItems.length) return null;
   const taskLines = new Map<string, MessageLine>();
   const lines: MessageLine[] = [
     ...section("Still open today", s.dueToday, s.today, { taskLines }),

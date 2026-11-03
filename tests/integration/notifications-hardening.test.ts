@@ -438,7 +438,8 @@ describe("#7 parked items are re-checked at bundle time", () => {
     expect(parked).toHaveLength(1);
     const parkedTask = await getTask(t.ctx("nuraaly"), parked[0]!.taskId!);
 
-    // Deadline moved in the app (not via a button): the evening check must not list it.
+    // Deadline moved in the app (not via a button): the evening check must not list it (with
+    // only overdue tasks left it is not sent at all, review #6), and the parked row is dropped.
     await changeTaskDeadline(t.ctx("nuraaly"), parkedTask.id, "2026-11-10");
     const evening = recorder();
     await dispatch(db, EVENING, { registry: evening.registry });

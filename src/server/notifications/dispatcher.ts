@@ -170,7 +170,7 @@ async function collectParked(ctx: ServiceContext): Promise<{ drop: string[]; ite
 
 type Built =
   | { message: NeutralMessage; dropParked?: string[]; holdingItemIds?: string[]; aiRequestIds?: string[] }
-  | { skip: string };
+  | { skip: string; dropParked?: string[] };
 
 async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
   const kind = item.kind as NotificationKind;
@@ -204,7 +204,7 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
         : buildEveningCheck(summary, parked.items);
     return message
       ? { message, dropParked: parked.drop, holdingItemIds: holding?.itemIds, aiRequestIds: composed?.aiRequestIds }
-      : { skip: "nothing_to_send" };
+      : { skip: "nothing_to_send", dropParked: parked.drop };
   }
   if (kind === REPORT_KIND) {
     const runId = (item.payload as { runId?: string }).runId;
@@ -411,13 +411,13 @@ async function processItem(
 
   const ctx = { ...makeContext(db, user, now), timeZone: tz };
   const built = await buildFor(ctx, item);
-  if ("skip" in built) return cancel(built.skip);
   if (built.dropParked?.length) {
     await db
       .update(notificationsOutbox)
       .set({ status: "cancelled", lastError: "no_longer_relevant" })
       .where(and(inArray(notificationsOutbox.id, built.dropParked), eq(notificationsOutbox.status, "parked")));
   }
+  if ("skip" in built) return cancel(built.skip);
 
   // Fit Telegram's length limit by whole lines; only what made it into the text counts as
   // shown (holding asks, AI requests) or bundled (parked items). The rest waits for the next summary.

@@ -147,3 +147,24 @@ describe("parked reminders are not repeated (whole-app review #5)", () => {
     expect(fitTelegram(m).keptRefs.has(parkedRef("p5"))).toBe(true);
   });
 });
+
+describe("evening check only when there is something new to say (whole-app review #6)", () => {
+  const today = "2026-11-16";
+  const s = (overdue: TaskView[], dueToday: TaskView[] = []) =>
+    ({ today, overdue, dueToday, thisWeek: [], personal: [] }) as unknown as TodaySummary;
+
+  it("is not sent for overdue tasks alone", () => {
+    expect(buildEveningCheck(s([task(1, "2026-11-01"), task(2, "2026-11-02")]), [])).toBeNull();
+  });
+
+  it("is sent when something due today is still open (overdue count as a note)", () => {
+    const m = buildEveningCheck(s([task(1, "2026-11-01")], [task(5, today)]), [])!;
+    expect(renderTelegramText(m)).toContain("Still open today (1)");
+    expect(renderTelegramText(m)).toContain("1 overdue task(s) still waiting");
+  });
+
+  it("is sent when parked items wait that no summary listed yet", () => {
+    const m = buildEveningCheck(s([task(1, "2026-11-01")]), [{ text: "Overdue: x — 15d overdue", taskId: "t1", refs: [parkedRef("p1")] }])!;
+    expect(renderTelegramText(m)).toContain("Parked reminders (1)");
+  });
+});
