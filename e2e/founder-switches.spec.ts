@@ -52,3 +52,18 @@ test("Numbers → Daily: a month average entered under Month totals is kept apar
   await expect(page.getByRole("form", { name: "Month totals" }).getByLabel(`On-time delivery · month average, ${monthShort(3)}`)).toHaveValue(value);
   await expect(page.getByTestId("numbers-grid")).not.toContainText(value);
 });
+
+test("Settings → setup cards: Connect Telegram names what is missing; the reminder clock explains the local database", async ({ page }) => {
+  await login(page, "nuraaly");
+  await page.goto("/settings");
+  // e2e runs without APP_URL and without a bot token (nothing ever reaches Telegram).
+  const tg = page.getByTestId("telegram-setup");
+  await expect(tg.getByTestId("telegram-setup-missing")).toContainText("APP_URL, TELEGRAM_BOT_TOKEN");
+  await expect(tg.getByRole("button", { name: "Connect Telegram" })).toBeDisabled();
+  const clock = page.getByTestId("reminder-clock");
+  await expect(clock.getByTestId("reminder-clock-missing")).toContainText("APP_URL");
+  await expect(clock.getByRole("button", { name: "Start reminder clock" })).toBeDisabled();
+  await clock.getByRole("button", { name: "Check status" }).click();
+  await expect(clock.getByTestId("reminder-clock-result")).toContainText("This database has no pg_cron, pg_net");
+  await expect(clock.getByTestId("reminder-clock-result")).toContainText("cron-job.org");
+});
