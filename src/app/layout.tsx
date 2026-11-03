@@ -27,7 +27,15 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={golos.variable}>
+    <html lang="en" className={golos.variable} suppressHydrationWarning>
+      <head>
+        {/* Prevent flash of wrong theme on load: read localStorage before first paint. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem("fc-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}})()`,
+          }}
+        />
+      </head>
       <body className="min-h-dvh text-[14px] leading-5">{children}</body>
     </html>
   );

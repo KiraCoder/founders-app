@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Icon } from "@/components/Icon";
 import { InitialsAvatar } from "@/components/ui";
+import { ThemeToggle } from "@/components/settings/ThemeToggle";
 import { logoutAction } from "@/app/(app)/actions";
 
 export interface AgentHire {
@@ -143,7 +144,10 @@ export function TopBar({ user, agentHires = [] }: { user: { name: string; shortN
                   <p className="text-[13px] font-medium">{user.name}</p>
                   <p className="text-[12px] text-muted">{user.email}</p>
                 </div>
-                <form action={logoutAction}>
+                <div className="border-t border-line px-2 py-2">
+                  <ThemeToggle />
+                </div>
+                <form action={logoutAction} className="border-t border-line pt-1">
                   <button type="submit" role="menuitem" className="btn btn-ghost w-full justify-start">
                     <Icon name="logout" size={16} /> Sign out
                   </button>

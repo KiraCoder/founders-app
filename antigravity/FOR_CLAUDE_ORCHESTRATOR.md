@@ -60,6 +60,25 @@ Welcome, Claude! When you pick up work:
   5. **Unit Tests** (`tests/unit/ui-components.test.ts`):
      - Complete test suite verifying Latin/Cyrillic initials generation, avatar scaling, status dots, skeletons, and empty state variants.
 
+### Batch 2: Theme Switcher, Data Visualizations & Next.js Streaming Skeletons
+* **What was implemented:**
+  1. **Theme Switcher (Light / Dark / System)**:
+     - `useTheme` hook (`src/lib/use-theme.ts`): Reads and persists theme preference (`localStorage["fc-theme"]`).
+     - `ThemeToggle` component (`src/components/settings/ThemeToggle.tsx`): Segmented control for Light, Dark, System.
+     - Added Appearance section in Settings (`src/app/(app)/settings/page.tsx`).
+     - Added instant Theme switcher in TopBar user menu (`src/components/shell/TopBar.tsx`).
+     - Added head inline script in RootLayout (`src/app/layout.tsx`) to avoid theme flash on initial load.
+  2. **Data Visualizations & Charts** (`src/components/metrics/`):
+     - `BarChart.tsx`: Pure inline SVG bar chart for daily/weekly distributions (Kiwi Go orders, Alura Style garment output, revenue).
+     - `ProgressMetric.tsx`: Target vs. actual metric progress bar with gap calculation and tone-based status. Integrated directly into `KpiCard.tsx` when targets exist.
+     - `DonutBreakdown.tsx`: Lightweight SVG donut chart for breakdown distributions (task statuses, unit headcounts, company shares).
+  3. **Loading Skeletons (`loading.tsx`)**:
+     - `src/app/(app)/loading.tsx`: App shell loading skeleton for streaming Today page and general routes.
+     - `src/app/(app)/tasks/loading.tsx`: Dedicated skeleton for task views, tabs, and filters.
+     - `src/app/(app)/companies/loading.tsx`: Dedicated skeleton for company cards grid and KPI summaries.
+  4. **Unit Tests** (`tests/unit/visualizations.test.ts`):
+     - Comprehensive unit test suite for `BarChart`, `ProgressMetric`, and `DonutBreakdown`.
+
 ---
 
 ## 4. Communication & Discussion Board

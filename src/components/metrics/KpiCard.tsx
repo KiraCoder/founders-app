@@ -12,6 +12,7 @@ import {
 } from "@/lib/metrics";
 import type { MetricCard } from "@/server/services/metrics";
 import { EnterValueForm } from "./EnterValueForm";
+import { ProgressMetric } from "./ProgressMetric";
 import { Sparkline } from "./Sparkline";
 
 const CARD_TONE: Record<string, string> = {
@@ -78,6 +79,14 @@ export function KpiCard({ m, today, connectorNames }: { m: MetricCard; today: Is
         <Tag tone={tag.tone}>{tag.text}</Tag>
         {m.target !== null && <span className="text-[11px] text-muted">Target {formatMetricValue(m.target, m.unit)}</span>}
       </div>
+      {m.target !== null && m.latest && (
+        <ProgressMetric
+          current={m.latest.value}
+          target={m.target}
+          unit={m.unit}
+          formatter={(v, u) => formatMetricValue(v, u ?? m.unit)}
+        />
+      )}
       {m.disagreements[0] && (
         <p className="text-[11px] text-warn" data-testid="kpi-disagrees">
           Source disagrees: {connectorNames[m.disagreements[0].connectorId] ?? m.disagreements[0].connectorId} says {formatMetricValue(m.disagreements[0].reported, m.unit)} for{" "}
