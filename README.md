@@ -508,7 +508,9 @@ company (`ai_role_hires`).
 5. The report page `/ai-roles/runs/<id>`: findings by severity, **Create task** on risk findings
    (a shared task for the company, only when a founder clicks; once per finding), the numbers
    used, and the AI summary box. A tick never changes a report already sent: if numbers are
-   corrected later the page says *Numbers changed* and **Run again** re-analyses (no new push).
+   corrected later the page says *Numbers changed*; if the role was tuned since (numbers it waits
+for, thresholds) it says *Settings changed* instead — two hashes per run (`inputs_hash`,
+`settings_hash`). Either way **Run again** re-analyses (no new push).
 
 **The orchestrator** (`src/server/ai/orchestrator.ts`) runs the roles on every tick and
 composes the morning summary's requests so nothing is asked twice: a number an AI role is

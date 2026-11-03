@@ -383,6 +383,25 @@ describe("0012 AI roles on existing data", () => {
   });
 });
 
+describe("0013 AI roles fixes on existing data", () => {
+  it("adds settings_hash (null for old reports), attempts 0 and next_attempt_at to existing runs", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0013") });
+    const C1 = "33333333-3333-4333-8333-333333333331";
+    const H = "66666666-6666-4666-8666-666666666666";
+    await client.exec(`
+      insert into companies (id, slug, name) values ('${C1}', 'kiwi-go', 'Kiwi Go');
+      insert into ai_role_templates (key, name, description, status, required_data, default_schedule) values
+        ('financial-analyst', 'Financial Analyst', 'd', 'available', '{"byCompanyType":{},"optionalUploads":[]}', '{"kind":"monthly","day":10}');
+      insert into ai_role_hires (id, template_key, company_id, settings, hired_on) values ('${H}', 'financial-analyst', '${C1}', '{}', '2026-11-02');
+      insert into ai_role_runs (hire_id, period, status, inputs_hash) values ('${H}', '2026-10-01', 'reported', 'abc');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rows = await client.query("select status, inputs_hash, settings_hash, attempts, next_attempt_at from ai_role_runs");
+    expect(rows.rows).toEqual([{ status: "reported", inputs_hash: "abc", settings_hash: null, attempts: 0, next_attempt_at: null }]);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();

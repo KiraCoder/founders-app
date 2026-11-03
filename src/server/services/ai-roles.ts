@@ -135,6 +135,8 @@ export interface RunView extends RunSummary {
   missingFromHolding: string[];
   /** A report was made, but its numbers were corrected since ("Run again" re-analyses). */
   inputsChanged: boolean;
+  /** A report was made, but the role was tuned since (required numbers / thresholds). */
+  settingsChanged: boolean;
 }
 
 function findingsOf(run: Pick<AiRoleRun, "findings">): Finding[] {
@@ -402,8 +404,31 @@ function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: rea
   return { missing, inputs, series };
 }
 
-function hashInputs(inputs: AiRunInputs, required: readonly string[], thresholds: HireSettings["thresholds"]): string {
-  return createHash("sha256").update(JSON.stringify({ inputs, required: [...required].sort(), thresholds })).digest("hex");
+const sha256 = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
+
+/** The numbers an analysis used (a correction changes it → "Numbers changed"). */
+function hashInputs(inputs: AiRunInputs): string {
+  return sha256({ inputs });
+}
+
+/** The settings an analysis used (a Tune changes it → "Settings changed"). */
+function hashSettings(required: readonly string[], thresholds: HireSettings["thresholds"]): string {
+  return sha256({ required: [...required].sort(), thresholds: { changePct: thresholds.changePct, riskChangePct: thresholds.riskChangePct } });
+}
+
+/** Rows analysed before 0013 stored one hash over numbers and settings together. */
+function legacyHash(inputs: AiRunInputs, required: readonly string[], thresholds: HireSettings["thresholds"]): string {
+  return sha256({ inputs, required: [...required].sort(), thresholds });
+}
+
+/** What changed since a report was made: its numbers, the role's settings, or neither. */
+function reportDrift(run: Pick<AiRoleRun, "inputsHash" | "settingsHash">, inputs: AiRunInputs, settings: HireSettings): { inputs: boolean; settings: boolean } {
+  if (!run.inputsHash) return { inputs: false, settings: false };
+  if (run.settingsHash === null) {
+    // Legacy row: one combined hash, so a difference can't be split — report it as numbers.
+    return { inputs: legacyHash(inputs, settings.requiredMetricKeys, settings.thresholds) !== run.inputsHash, settings: false };
+  }
+  return { inputs: hashInputs(inputs) !== run.inputsHash, settings: hashSettings(settings.requiredMetricKeys, settings.thresholds) !== run.settingsHash };
 }
 
 // ---------------------------------------------------------------------------
@@ -467,9 +492,9 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
       if (run.status === "analysed" || run.status === "reported") return run;
       return update({ status: "waiting_for_data", missing: ev.missing, error: null });
     }
-    const hash = hashInputs(ev.inputs, required, hc.settings.thresholds);
+    const drift = reportDrift(run, ev.inputs, hc.settings);
     let current = run;
-    if (!((run.status === "analysed" || run.status === "reported") && run.inputsHash === hash)) {
+    if (!((run.status === "analysed" || run.status === "reported") && !drift.inputs && !drift.settings)) {
       if (run.status !== "analysed" && run.status !== "reported") current = await update({ status: "ready", missing: [], error: null });
       const findings = (opts.analyse ?? analyseFinance)({
         companyName: hc.companyName,
@@ -488,7 +513,8 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
         status: current.status === "reported" ? "reported" : "analysed",
         missing: [],
         inputs: ev.inputs,
-        inputsHash: hash,
+        inputsHash: hashInputs(ev.inputs),
+        settingsHash: hashSettings(required, hc.settings.thresholds),
         findings,
         narrative: narrative.text,
         narrativeStatus: narrative.status,
@@ -854,10 +880,15 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
   const fromHolding = run.missing.filter((m) => holdingFed({ key: m.key, sourceKind: defs.find((d) => d.id === m.metricId)?.sourceKind })).map((m) => m.metricId);
   const firstMissing = defs.find((d) => d.id === run.missing.find((m) => !fromHolding.includes(m.metricId))?.metricId);
   let inputsChanged = false;
+  let settingsChanged = false;
   if ((run.status === "reported" || run.status === "analysed") && run.inputsHash) {
     const months = Array.from({ length: HISTORY_MONTHS + 1 }, (_, i) => prevMonth(run.period, HISTORY_MONTHS - i));
     const ev = evaluateNumbers(await loadCompanyNumbers(ctx.db, hire.companyId, months), run.period, hire.settings.requiredMetricKeys);
-    inputsChanged = !ev.missing.length && hashInputs(ev.inputs, hire.settings.requiredMetricKeys, hire.settings.thresholds) !== run.inputsHash;
+    if (!ev.missing.length) {
+      const drift = reportDrift(run, ev.inputs, hire.settings);
+      inputsChanged = drift.inputs;
+      settingsChanged = drift.settings;
+    }
   }
   return {
     ...runSummary(run),
@@ -884,6 +915,7 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
     numbersHref: numbersHref(hire.companySlug, firstMissing?.granularity ?? "month"),
     missingFromHolding: fromHolding,
     inputsChanged,
+    settingsChanged,
   };
 }
 

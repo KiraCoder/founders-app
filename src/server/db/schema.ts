@@ -900,6 +900,16 @@ export const aiRoleRuns = pgTable(
     missing: jsonb("missing").$type<AiRunMissing[]>().notNull().default([]),
     /** sha256 of the numbers the analysis used (a later correction changes it). */
     inputsHash: text("inputs_hash"),
+    /**
+     * sha256 of the settings the analysis used (required numbers, thresholds): a Tune after the
+     * report says "Settings changed", not "Numbers changed". Null on rows from before 0013
+     * (their inputs_hash covered both).
+     */
+    settingsHash: text("settings_hash"),
+    /** Failed attempts in a row (reset when a run succeeds). */
+    attempts: integer("attempts").notNull().default(0),
+    /** After a failure: not retried by the tick before this time (1 h, 6 h, 24 h, …). */
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
     /** The numbers used, per metric and month (exact decimal text). */
     inputs: jsonb("inputs").$type<AiRunInputs | null>(),
     findings: jsonb("findings").$type<unknown[]>().notNull().default([]),
@@ -908,6 +918,10 @@ export const aiRoleRuns = pgTable(
     narrativeStatus: text("narrative_status"),
     /** AI provider id used for the narrative ("none" until one is chosen). */
     provider: text("provider"),
+    /**
+     * The last error. With status failed: the run never produced a report. With analysed /
+     * reported: re-analysing failed and the last good report is kept (status unchanged).
+     */
     error: text("error"),
     /** schedule | manual */
     trigger: text("trigger").notNull().default("schedule"),

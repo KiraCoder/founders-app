@@ -359,6 +359,27 @@ describe("analysis and the report-ready push", () => {
     expect(made[0]).toMatchObject({ visibility: "shared", companyId: kiwiGoId, priority: "high" });
     expect((await getRun(t.ctx("nuraaly"), oct!.id)).findings.find((f) => f.id === risk.id)!.taskId).toBe(a.taskId);
   });
+
+  it("a Tune after the report says 'Settings changed' (not 'Numbers changed'); Run again keeps the task link", async () => {
+    const [oct] = await t.handle.db.select().from(aiRoleRuns).where(eq(aiRoleRuns.period, "2026-10-01"));
+    const ctx = t.ctx("talant", bishkek("2026-12-15", "10:00"));
+    const before = await getRun(ctx, oct!.id);
+    expect(before).toMatchObject({ inputsChanged: false, settingsChanged: false });
+    const linked = before.findings.find((f) => f.taskId)!;
+    await updateHire(ctx, oct!.hireId, { settings: { thresholds: { changePct: 25, riskChangePct: 60 } } });
+    const tuned = await getRun(ctx, oct!.id);
+    expect(tuned).toMatchObject({ inputsChanged: false, settingsChanged: true });
+    const after = await rerunReport(ctx, oct!.id);
+    expect(after).toMatchObject({ inputsChanged: false, settingsChanged: false, status: "reported" });
+    expect(after.findings.find((f) => f.id === linked.id)!.taskId).toBe(linked.taskId);
+    await updateHire(ctx, oct!.hireId, { settings: { thresholds: { changePct: 20, riskChangePct: 50 } } });
+    await rerunReport(ctx, oct!.id);
+    // A report from before 0013 (one combined hash, no settings hash) still compares as before.
+    await t.handle.db.update(aiRoleRuns).set({ settingsHash: null, inputsHash: "old-combined-hash" }).where(eq(aiRoleRuns.id, oct!.id));
+    expect(await getRun(ctx, oct!.id)).toMatchObject({ inputsChanged: true, settingsChanged: false });
+    await rerunReport(ctx, oct!.id);
+    expect(await getRun(ctx, oct!.id)).toMatchObject({ inputsChanged: false, settingsChanged: false });
+  });
 });
 
 describe("report-ready push respects budget, quiet hours and not linked", () => {

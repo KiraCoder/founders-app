@@ -64,8 +64,18 @@ export default async function RunPage({ params }: Props) {
 
       {run.inputsChanged && (
         <div className="card mb-4 flex flex-wrap items-center gap-2 border-warn-line bg-warn-soft px-4 py-3 text-[13px]">
-          <span className="tag tag-warn">Numbers changed</span>
+          <span className="tag tag-warn" data-testid="numbers-changed">Numbers changed</span>
           <span>Some numbers of {run.periodLabel} were corrected after this report. Run it again to update the findings (no new message is sent).</span>
+        </div>
+      )}
+
+      {run.settingsChanged && (
+        <div className="card mb-4 flex flex-wrap items-center gap-2 border-line bg-info-soft px-4 py-3 text-[13px]" data-testid="settings-changed">
+          <span className="tag tag-info">Settings changed</span>
+          <span>
+            The role was tuned after this report (numbers it waits for or thresholds). The numbers are the same — run it again to see the findings with the new
+            settings (no new message is sent).
+          </span>
         </div>
       )}
 
