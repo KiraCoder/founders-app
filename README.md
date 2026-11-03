@@ -30,7 +30,7 @@ Stop `npm run dev` before running `db:*` scripts: the embedded database allows o
 | `npm run db:generate` | Create a new SQL migration after editing `src/server/db/schema.ts` |
 | `npm run db:migrate` | Apply migrations (PGlite or `DATABASE_URL`) |
 | `npm run db:migrate:deploy` | Same, but only when `MIGRATE_ON_BUILD=1` (and `DATABASE_URL` set); otherwise prints "skipped". Uses `MIGRATION_DATABASE_URL` when set. Part of `vercel-build` |
-| `npm run db:seed:deploy` | Seed during a deploy: only with `SEED_ON_BUILD=1` + `DATABASE_URL`, and only while the database has **no founders** (first deploy); same guards as `db:seed`. Otherwise prints "skipped". Part of `vercel-build` |
+| `npm run db:seed:deploy` | Seed during a deploy: only with `SEED_ON_BUILD=1` + `DATABASE_URL`, and only on a production deploy (`VERCEL_ENV` unset or `production`) while the database does not have **both founders and companies** yet (first deploy, or a seed that failed); same guards as `db:seed`. Otherwise prints "skipped". Part of `vercel-build` |
 | `npm run vercel-build` | What Vercel runs (`vercel.json`): `db:migrate:deploy` → `db:seed:deploy` → `next build`. `next build` itself never touches the database |
 | `npm run db:seed` | Load founders, companies, people and (local DB only, by default) `[sample]` tasks. Safe to re-run: existing founders keep their password |
 | `npm run db:reset` | **Local only.** Wipe + migrate + seed. Refuses to run against a non-localhost database |
@@ -70,10 +70,25 @@ digits only): `SESSION_SECRET` = `openssl rand -base64 48`; `TELEGRAM_WEBHOOK_SE
 private password of **12+ characters** (both founders' first password). Telegram bot token:
 see *Telegram setup* step 1 below.
 
-**4. Vercel: import the project.** vercel.com → sign in with GitHub → *Add New… → Project* →
+**4. GitHub: make the app's branch the default one (before Vercel).** Vercel's first deploy
+builds the repository's *default branch*. Today that is `main`, which holds only the brief, so
+the first deploy would fail. Pick **one** of these two:
+- **(a) Approve merging PR #1** (`claude/adoring-brown-rriwam` → `main`) on GitHub: open the
+  pull request → *Merge pull request* → *Confirm merge*. Then `main` holds the app; or
+- **(b)** GitHub → the `founders-app` repository → **Settings → General → Default branch** →
+  the ⇄ button → choose `claude/adoring-brown-rriwam` → *Update* → confirm. Nothing is
+  deleted; `main` stays as it is.
+
+**5. Vercel: import the project.** vercel.com → sign in with GitHub → *Add New… → Project* →
 *Import* `founders-app` (if it is not listed: *Adjust GitHub App Permissions* and allow it).
 Framework: Next.js (detected). Leave *Build Command* alone — `vercel.json` sets it to
-`npm run vercel-build`. Open *Environment Variables* on the same screen and add:
+`npm run vercel-build`. Open *Environment Variables* on the same screen and add the table
+below. **For every variable tick only "Production"** (untick *Preview* and *Development*;
+if the import screen has no tick boxes, change them afterwards in *Settings → Environment
+Variables* → each variable → *Edit*). Then test links of other branches (*previews*) never
+see the real database or the bot; they show an error page — that is expected and harmless.
+(Also as a second lock: preview builds never migrate or seed, even if a variable was set for
+them by mistake — the build log then says `VERCEL_ENV=preview (not production): skipped`.)
 
 | Name | Value | Notes |
 | --- | --- | --- |
@@ -81,8 +96,8 @@ Framework: Next.js (detected). Leave *Build Command* alone — `vercel.json` set
 | `SESSION_SECRET` | from step 3 | required |
 | `AUTH_MODE` | `local` | |
 | `APP_TIMEZONE` | `Asia/Bishkek` | |
-| `MIGRATE_ON_BUILD` | `1` | every deploy applies new migrations first; a failed migration fails the deploy and the old version stays live |
-| `SEED_ON_BUILD` | `1` | the first deploy creates the founders, companies and people; later deploys skip it (the database already has founders) |
+| `MIGRATE_ON_BUILD` | `1` | every production deploy applies new migrations first; a failed migration fails the deploy and the old version stays live |
+| `SEED_ON_BUILD` | `1` | the first deploy creates the founders, companies and people; later deploys skip it (the database already has founders and companies) |
 | `DEV_FOUNDER_PASSWORD` | from step 3 | needed for the first deploy only; you may delete it afterwards |
 | `TELEGRAM_BOT_TOKEN` | from @BotFather | |
 | `TELEGRAM_WEBHOOK_SECRET` | from step 3 | |
@@ -90,17 +105,15 @@ Framework: Next.js (detected). Leave *Build Command* alone — `vercel.json` set
 | `CRON_SECRET` | from step 3 | |
 | `APP_URL` | optional: `https://<your-project>.vercel.app` | empty = Vercel's production address is used (Settings shows which); set it once you add your own domain |
 
-Press **Deploy**. This first deploy builds the `main` branch, which holds only the brief, so
-it may fail or show an empty site — that is expected.
+Press **Deploy**. With step 4 done, this first deploy already builds the app: the build log
+shows `[db:migrate:deploy] … done`, `[db:seed:deploy] seeded …` and then the Next.js build.
+From now on every push to that branch (the production branch) deploys production by itself.
 
-**5. Vercel: deploy the app's branch as production.** Project → *Settings → Environments →
-Production → Branch Tracking* (older screens: *Settings → Git → Production Branch*) → set
-the branch to `claude/adoring-brown-rriwam` → *Save*. Then *Deployments* → **…** (top right)
-→ *Create Deployment* → type `claude/adoring-brown-rriwam` → *Create Deployment*. From now
-on every push to that branch deploys production by itself. The build log shows
-`[db:migrate:deploy] … done`, `[db:seed:deploy] seeded …` and then the Next.js build.
-(Because the database variables are set for *Production* only by default — keep it that
-way: preview builds of other branches then never touch the real database.)
+*Alternative to step 4 (if you skipped it and the first deploy failed or shows an empty
+site):* Vercel project → *Settings → Environments → Production → Branch Tracking* (older
+screens: *Settings → Git → Production Branch*) → set the branch to
+`claude/adoring-brown-rriwam` → *Save*. Then *Deployments* → **…** (top right) → *Create
+Deployment* → type `claude/adoring-brown-rriwam` → *Create Deployment*.
 
 **6. Sign in.** Open the site (*Visit*). Sign in as **`nuraaly@founders.local`** or
 **`talant@founders.local`** with `DEV_FOUNDER_PASSWORD`. The emails can be changed later
@@ -123,7 +136,7 @@ are stored in Supabase Vault), so reminders and the morning summary go out on ti
 **9. Each founder links Telegram.** Each founder: Settings → *Generate link code* → send
 `/start CODE` to the bot within 15 minutes.
 
-**Later.** Every push to `claude/adoring-brown-rriwam` redeploys and migrates by itself.
+**Later.** Every push to the production branch (`main` after merging, or `claude/adoring-brown-rriwam`) redeploys and migrates by itself.
 Changed `CRON_SECRET` or the address? Press *Start reminder clock* again. Changed the bot
 token or the address? Press *Connect Telegram* again.
 
@@ -131,13 +144,22 @@ token or the address? Press *Connect Telegram* again.
 - The app refuses to start without `SESSION_SECRET` or `DATABASE_URL` (it never falls back
   to the embedded local database in production: on Vercel that disk is temporary).
 - `next build` never touches the database; only `db:migrate:deploy` / `db:seed:deploy` do,
-  and only with their `…_ON_BUILD=1` flag.
+  only with their `…_ON_BUILD=1` flag, and only on a **production** deploy (`VERCEL_ENV` =
+  `production`; a preview prints "skipped").
+- **If a deploy fails after its migrations ran** (e.g. the Next.js build step fails), the
+  previous version stays live — now on the new database tables. That is fine: migrations
+  only *add* (tables, columns), so the old version keeps working; fix the build and push
+  again. (`db:seed:deploy` runs in one transaction: a failed first seed leaves nothing
+  behind and the next deploy seeds again.)
+- **One build at a time:** migrations take no lock of their own. Vercel Hobby runs one build
+  at a time, so two deploys never migrate at once. On a paid plan with parallel builds, do not
+  start two production deploys at the same moment.
 - **Migrations through the pooler:** they run through the Transaction pooler (each migration
   is one transaction, no prepared statements). If a future migration ever needs a
   session-level feature, add `MIGRATION_DATABASE_URL` = Supabase *Connect → Session pooler*
   string (same pooler host, port **5432**); migrations then use it, the app keeps
   `DATABASE_URL`.
-- **Manual alternative to steps 4–5's automatic migrate/seed:** from your computer with
+- **Manual alternative to step 5's automatic migrate/seed:** from your computer with
   `DATABASE_URL=<pooler string>` and `DEV_FOUNDER_PASSWORD=<12+ characters>` in `.env.local`:
   `npm run db:migrate && npm run db:seed` (the seed refuses the dev password or anything
   shorter than 12 characters on a real database, adds no `[sample]` tasks there unless
@@ -164,9 +186,9 @@ feature stays off without it.
 | `AUTH_MODE` | No | `local` (default, the only one implemented); `supabase` is a stub |
 | `APP_TIMEZONE` | No | Business timezone for "today", overdue, schedules and shown times. Default `Asia/Bishkek` |
 | `APP_URL` | Recommended | The site's address, e.g. `https://<your-app>.vercel.app`: links in Telegram messages, the webhook *Connect Telegram* sets, the URL *Start reminder clock* calls, an allowed `Origin` for the API; scripts use it to find the app. Empty on Vercel: Vercel's own `VERCEL_PROJECT_PRODUCTION_URL` (then `VERCEL_URL`) is used, with `https://` |
-| `MIGRATE_ON_BUILD` | On Vercel: `1` | `1` makes `npm run db:migrate:deploy` (in `vercel-build`) apply migrations. Default off ("skipped") |
+| `MIGRATE_ON_BUILD` | On Vercel: `1` | `1` makes `npm run db:migrate:deploy` (in `vercel-build`) apply migrations on a production deploy (`VERCEL_ENV` unset or `production`; previews skip). Default off ("skipped") |
 | `MIGRATION_DATABASE_URL` | No | Optional URL for migrations only (Supabase *Session pooler*, port 5432 on the pooler host). Empty: migrations use `DATABASE_URL` |
-| `SEED_ON_BUILD` | On Vercel: `1` | `1` makes `npm run db:seed:deploy` (in `vercel-build`) seed a database that has no founders yet (the first deploy). Default off ("skipped") |
+| `SEED_ON_BUILD` | On Vercel: `1` | `1` makes `npm run db:seed:deploy` (in `vercel-build`) seed a database that has no founders and companies yet (the first deploy), production deploys only. Default off ("skipped") |
 | `DEV_FOUNDER_PASSWORD`, `SEED_RESET_PASSWORDS`, `SEED_SAMPLES` | Seeding only | Used by `npm run db:seed` / `db:seed:deploy` (first deploy), not by the running website. `DEV_FOUNDER_PASSWORD` can be deleted from Vercel after the first deploy |
 | `TELEGRAM_BOT_TOKEN` | For Telegram | Bot token from @BotFather. Empty: messages go to the dev inbox only |
 | `TELEGRAM_WEBHOOK_SECRET` | For Telegram | Random text; Telegram sends it back with every update |
