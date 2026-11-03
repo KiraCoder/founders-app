@@ -19,13 +19,18 @@ import { eq } from "drizzle-orm";
 import type { DbHandle } from "./connect";
 import { seed } from "./seed";
 import { planSeed } from "./seed-config";
-import { users } from "./schema";
+import { nonProductionVercelEnv } from "./migrate";
+import { companies, users } from "./schema";
 
 type Env = Record<string, string | undefined>;
 
 export function seedOnBuildDecision(env: Env): { run: boolean; message: string } {
   if (env.SEED_ON_BUILD?.trim() !== "1") {
     return { run: false, message: "SEED_ON_BUILD is not 1: skipped." };
+  }
+  const notProd = nonProductionVercelEnv(env);
+  if (notProd) {
+    return { run: false, message: `VERCEL_ENV=${notProd} (not production): skipped — only production deploys seed the real database.` };
   }
   if (!env.DATABASE_URL?.trim()) {
     return { run: false, message: "SEED_ON_BUILD=1 but DATABASE_URL is not set: skipped (nothing to seed)." };
@@ -40,11 +45,15 @@ export type DeploySeedResult =
 
 /** The part after the env decision: needs a migrated database. */
 export async function runDeploySeed(handle: DbHandle, env: Env, opts: { bcryptRounds?: number; now?: Date } = {}): Promise<DeploySeedResult> {
-  const existing = await handle.db.select({ id: users.id }).from(users).where(eq(users.role, "founder")).limit(1);
-  if (existing.length > 0) {
+  // Skip only when the seed clearly finished before: founders AND companies exist (deploy
+  // review #2). seed() runs in one transaction, so a failed seed leaves nothing behind; the
+  // companies check also retries a database left half-seeded by an older version.
+  const founder = await handle.db.select({ id: users.id }).from(users).where(eq(users.role, "founder")).limit(1);
+  const company = await handle.db.select({ id: companies.id }).from(companies).limit(1);
+  if (founder.length > 0 && company.length > 0) {
     return {
       status: "skipped",
-      message: "the database already has founders: skipped (nothing is changed on later deploys; run `npm run db:seed` by hand for a full re-seed).",
+      message: "the database already has founders and companies: skipped (nothing is changed on later deploys; run `npm run db:seed` by hand for a full re-seed).",
     };
   }
   const decision = planSeed(handle.driver, env);

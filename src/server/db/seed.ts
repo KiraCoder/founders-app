@@ -143,6 +143,13 @@ export interface SeedResult {
 export async function seed(db: Db, options: SeedOptions = {}): Promise<SeedResult> {
   const password = options.password ?? DEV_PASSWORD_DEFAULT;
   const hash = await bcrypt.hash(password, options.bcryptRounds ?? 10);
+  // One transaction (deploy review #2): a failure half-way leaves nothing behind, so the next
+  // deploy seeds again instead of skipping a database that has founders but no companies.
+  // Works through Supabase's Transaction pooler (one transaction = one server connection).
+  return db.transaction(async (tx) => seedInTransaction(tx as unknown as Db, hash, options));
+}
+
+async function seedInTransaction(db: Db, hash: string, options: SeedOptions): Promise<SeedResult> {
 
   // --- Founders --------------------------------------------------------------
   const userIds = {} as SeedResult["userIds"];

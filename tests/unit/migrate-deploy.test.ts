@@ -15,6 +15,28 @@ describe("db:migrate:deploy guard (whole-app review #2)", () => {
     expect(migrateOnBuildDecision({ MIGRATE_ON_BUILD: "1", DATABASE_URL: "postgresql://x@db.example.com/p" }).run).toBe(true);
   });
 
+  it("skips (with the reason) on a Vercel preview / development build, runs on production (deploy review #1)", () => {
+    const base = { MIGRATE_ON_BUILD: "1", DATABASE_URL: "postgresql://x@db.example.com/p" };
+    for (const VERCEL_ENV of ["preview", "development", "something-else"]) {
+      const d = migrateOnBuildDecision({ ...base, VERCEL_ENV });
+      expect(d.run).toBe(false);
+      expect(d.message).toContain(`VERCEL_ENV=${VERCEL_ENV}`);
+      expect(d.message).toContain("skipped");
+    }
+    expect(migrateOnBuildDecision({ ...base, VERCEL_ENV: "production" }).run).toBe(true);
+    expect(migrateOnBuildDecision({ ...base, VERCEL_ENV: "" }).run).toBe(true); // local build: flags decide
+    // A preview never throws for a missing DATABASE_URL either: it just skips.
+    expect(migrateOnBuildDecision({ MIGRATE_ON_BUILD: "1", VERCEL_ENV: "preview" }).run).toBe(false);
+  });
+
+  it("the npm script prints the preview skip and touches nothing", () => {
+    const out = execFileSync("npx", ["tsx", "scripts/db-migrate-deploy.ts"], {
+      env: { ...process.env, MIGRATE_ON_BUILD: "1", VERCEL_ENV: "preview", DATABASE_URL: "postgresql://nobody@127.0.0.1:1/none" },
+      encoding: "utf8",
+    });
+    expect(out).toContain("VERCEL_ENV=preview");
+  }, 30_000);
+
   it("the npm script exits 0 and touches nothing when the flag is off", () => {
     const out = execFileSync("npx", ["tsx", "scripts/db-migrate-deploy.ts"], {
       env: { ...process.env, MIGRATE_ON_BUILD: "", DATABASE_URL: "postgresql://nobody@127.0.0.1:1/none" },

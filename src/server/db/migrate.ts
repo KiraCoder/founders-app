@@ -29,6 +29,13 @@ export function migrateOnBuildDecision(
   if (env.MIGRATE_ON_BUILD !== "1") {
     return { run: false, message: "MIGRATE_ON_BUILD is not 1: skipped (run `npm run db:migrate` against Supabase yourself)." };
   }
+  const notProd = nonProductionVercelEnv(env);
+  if (notProd) {
+    return {
+      run: false,
+      message: `VERCEL_ENV=${notProd} (not production): skipped — only production deploys migrate the real database.`,
+    };
+  }
   const url = migrationDatabaseUrl(env);
   if (!url) {
     throw new Error("MIGRATE_ON_BUILD=1 but DATABASE_URL is not set: nothing to migrate. Set DATABASE_URL for this environment.");
@@ -46,4 +53,17 @@ export function migrateOnBuildDecision(
  */
 export function migrationDatabaseUrl(env: Record<string, string | undefined> = process.env): string | undefined {
   return env.MIGRATION_DATABASE_URL?.trim() || env.DATABASE_URL?.trim() || undefined;
+}
+
+/**
+ * A Vercel preview / development build must never migrate or seed the real database (deploy
+ * review #1): Drizzle compares only the last applied migration's timestamp, so a branch's
+ * migration applied by a preview could make a later production migration be skipped
+ * silently. Returns the VERCEL_ENV value when it is set and not "production", else null
+ * (local builds have no VERCEL_ENV and are decided by the …_ON_BUILD flags alone).
+ */
+export function nonProductionVercelEnv(env: Record<string, string | undefined> = process.env): string | null {
+  const v = env.VERCEL_ENV?.trim();
+  if (!v || v === "production") return null;
+  return v;
 }
