@@ -23,7 +23,7 @@ Stop `npm run dev` before running `db:*` scripts: the embedded database allows o
 | Command | What it does |
 | --- | --- |
 | `npm run dev` | Development server |
-| `npm run build` / `npm start` | Production build / server (needs `SESSION_SECRET`) |
+| `npm run build` / `npm start` | Production build / server (needs `SESSION_SECRET` and `DATABASE_URL`; for a local test on the embedded database add `ALLOW_LOCAL_DB=1`) |
 | `npm run lint` / `npm run typecheck` | ESLint / TypeScript |
 | `npm test` | Unit + service tests (Vitest, in-memory database) |
 | `npm run test:e2e` | Playwright smoke test (builds and starts the app on port 3100) |
@@ -61,7 +61,9 @@ the Vercel / Supabase dashboards.
    - `APP_TIMEZONE` = `Asia/Bishkek`
    - Telegram and scheduler variables: see *Telegram setup* below
 6. **Deploy.** Vercel builds automatically on every push. The app refuses to start without
-   `SESSION_SECRET`, which protects you from an insecure setup.
+   `SESSION_SECRET` or without `DATABASE_URL` (it never falls back to the embedded local
+   database in production: on Vercel that disk is temporary and the data would be lost),
+   which protects you from an insecure or data-losing setup.
 7. **Already safe by default:** `npm run db:migrate` turns on row-level security for every
    table and removes all access for Supabase's public `anon`/`authenticated` roles, so the
    Supabase anon key can read nothing. The app itself is unaffected.

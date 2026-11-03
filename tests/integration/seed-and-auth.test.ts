@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { localAuthProvider } from "@/server/auth/local";
 import { resolveSessionSecret, verifySessionToken } from "@/server/auth/session-token";
+import { resolveDatabaseUrl } from "@/server/db/connect";
 import { getCompanyBySlug, listCompanyCards } from "@/server/services/companies";
 import { listPeople } from "@/server/services/people";
 import { listTasks } from "@/server/services/tasks";
@@ -121,5 +122,30 @@ describe("local auth", () => {
     expect(() => resolveSessionSecret({ NODE_ENV: "production", SESSION_SECRET: "short" })).toThrow();
     expect(resolveSessionSecret({ NODE_ENV: "production", SESSION_SECRET: "x".repeat(40) })).toBe("x".repeat(40));
     expect(resolveSessionSecret({ NODE_ENV: "development" })).toMatch(/INSECURE-DEV-ONLY/);
+  });
+
+  it("refuses to run in production without DATABASE_URL instead of falling back to PGlite (whole-app review #3)", () => {
+    expect(() => resolveDatabaseUrl({ NODE_ENV: "production" })).toThrow(/DATABASE_URL is not set. Refusing to run in production/);
+    expect(() => resolveDatabaseUrl({ NODE_ENV: "production", DATABASE_URL: "   " })).toThrow(/DATABASE_URL/);
+    expect(resolveDatabaseUrl({ NODE_ENV: "production", DATABASE_URL: "postgresql://u:p@db.example.com:6543/postgres" })).toBe(
+      "postgresql://u:p@db.example.com:6543/postgres",
+    );
+    // A local production test (e2e) may opt in explicitly; development keeps PGlite.
+    expect(resolveDatabaseUrl({ NODE_ENV: "production", ALLOW_LOCAL_DB: "1" })).toBeUndefined();
+    expect(resolveDatabaseUrl({ NODE_ENV: "development" })).toBeUndefined();
+  });
+
+  it("server start (instrumentation) fails fast in production without DATABASE_URL", async () => {
+    const saved = { ...process.env };
+    try {
+      Object.assign(process.env, { NEXT_RUNTIME: "nodejs", NODE_ENV: "production", SESSION_SECRET: "x".repeat(40), DATABASE_URL: "", ALLOW_LOCAL_DB: "" });
+      const { register } = await import("@/instrumentation");
+      await expect(register()).rejects.toThrow(/DATABASE_URL is not set/);
+      process.env.DATABASE_URL = "postgresql://u:p@db.example.com:6543/postgres";
+      await expect(register()).resolves.toBeUndefined();
+    } finally {
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+      Object.assign(process.env, saved);
+    }
   });
 });

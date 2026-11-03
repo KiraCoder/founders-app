@@ -1,5 +1,5 @@
 import "server-only";
-import { connectDb, type Db, type DbHandle } from "./connect";
+import { connectDb, resolveDatabaseUrl, type Db, type DbHandle } from "./connect";
 
 export type { Db } from "./connect";
 
@@ -11,10 +11,13 @@ const globalForDb = globalThis as unknown as { __foundersDb?: Promise<DbHandle> 
 
 export function getDb(): Promise<Db> {
   if (!globalForDb.__foundersDb) {
-    globalForDb.__foundersDb = connectDb().catch((err: unknown) => {
-      globalForDb.__foundersDb = undefined;
-      throw err;
-    });
+    // resolveDatabaseUrl refuses production without DATABASE_URL (no silent PGlite fallback).
+    globalForDb.__foundersDb = Promise.resolve()
+      .then(() => connectDb(resolveDatabaseUrl() ?? ""))
+      .catch((err: unknown) => {
+        globalForDb.__foundersDb = undefined;
+        throw err;
+      });
   }
   return globalForDb.__foundersDb.then((h) => h.db);
 }

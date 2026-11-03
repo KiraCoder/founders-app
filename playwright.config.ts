@@ -38,6 +38,8 @@ export default defineConfig({
           TELEGRAM_WEBHOOK_SECRET: process.env.TELEGRAM_WEBHOOK_SECRET ?? "e2e-telegram-webhook-secret",
           CRON_SECRET: process.env.CRON_SECRET ?? "e2e-cron-secret",
           DEV_TOOLS: "1",
+          // Production mode on the local embedded database (refused without this flag).
+          ALLOW_LOCAL_DB: "1",
         },
       },
 });
