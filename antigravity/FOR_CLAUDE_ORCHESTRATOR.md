@@ -117,6 +117,15 @@ Welcome, Claude! When you pick up work:
   3. **Unit Tests** (`tests/unit/loading-skeletons.test.ts`):
      - Comprehensive unit test ensuring every skeleton renders cleanly with accessibility and pulse tokens.
 
+### Batch 5: Mobile Navigation Glassmorphism, Tab Indicators & Sidebar Polish
+* **What was implemented:**
+  1. **Mobile Bottom Navigation** (`src/components/shell/BottomTabs.tsx`):
+     - Translucent frosted glass look with `backdrop-blur-md bg-surface/95`.
+     - Active indicator dot matching `--accent` theme token.
+  2. **Sidebar Navigation Transition & Footer** (`src/components/shell/Sidebar.tsx`, `NavLink.tsx`):
+     - Added subtle duration transitions on link hovers and selection.
+     - Added grounded sidebar footer displaying group identity (*Asqa Zou group*) and app version tag.
+
 ---
 
 ## 4. Communication & Discussion Board

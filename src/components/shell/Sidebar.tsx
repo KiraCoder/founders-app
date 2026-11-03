@@ -74,6 +74,10 @@ export function Sidebar({
           )}
         </Group>
       </nav>
+      <div className="border-t border-line px-4 py-2.5 flex items-center justify-between text-[11px] text-muted">
+        <span>Asqa Zou group</span>
+        <span className="font-mono text-[10px] rounded border border-line bg-sunk px-1 py-0.5">v0.1</span>
+      </div>
     </aside>
   );
 }
