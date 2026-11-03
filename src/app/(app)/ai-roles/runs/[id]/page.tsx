@@ -53,7 +53,11 @@ export default async function RunPage({ params }: Props) {
             <CompanyDot color={run.hire.companyColor} size={12} /> {run.hire.roleName} · {run.hire.companyName} · {run.periodLabel}
           </span>
         }
-        actions={run.hire.status === "active" ? <RerunButton runId={run.id} label={analysed ? "Run again" : "Check numbers again"} /> : undefined}
+        actions={
+          run.hire.status === "active" ? (
+            <RerunButton runId={run.id} label={analysed ? "Run again" : run.status === "failed" ? "Retry" : "Check numbers again"} />
+          ) : undefined
+        }
       >
         <p className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-muted">
           <RunStatusTag status={run.status} /> <span data-testid="run-summary">{run.summary}</span>
@@ -110,8 +114,24 @@ export default async function RunPage({ params }: Props) {
       )}
 
       {run.status === "failed" && (
-        <div className="card mb-4 px-4 py-3 text-[13px]">
-          <span className="tag tag-risk">Failed</span> <span className="text-muted">{run.error ?? "Unexpected error"} — it is retried on the next scheduler run.</span>
+        <div className="card mb-4 flex flex-wrap items-center gap-2 px-4 py-3 text-[13px]" data-testid="run-failed">
+          <span className="tag tag-risk">{run.gaveUp ? "Failed — Retry" : "Failed"}</span>
+          <span className="text-muted">
+            {run.error ?? "Unexpected error"} —{" "}
+            {run.gaveUp
+              ? `it failed ${run.attempts} times, so it is no longer retried automatically. Fix the cause (usually a number) and click Retry.`
+              : `tried ${run.attempts} time${run.attempts === 1 ? "" : "s"}; retried automatically${run.nextAttemptAt ? ` after ${new Date(run.nextAttemptAt).toLocaleString("ru-RU", { timeZone: "Asia/Bishkek" })}` : ""}.`}
+          </span>
+          {run.hire.status === "active" && <RerunButton runId={run.id} label="Retry" />}
+        </div>
+      )}
+
+      {analysed && run.error && (
+        <div className="card mb-4 flex flex-wrap items-center gap-2 border-warn-line bg-warn-soft px-4 py-3 text-[13px]" data-testid="rerun-failed">
+          <span className="tag tag-warn">Update failed</span>
+          <span>
+            Re-analysing this month failed ({run.error}). This is the last good report{run.status === "analysed" ? "; it is retried automatically" : ""}.
+          </span>
         </div>
       )}
 

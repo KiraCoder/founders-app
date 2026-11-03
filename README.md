@@ -481,7 +481,11 @@ gets reports and whom it asks (both founders by default; founders only) → Hire
 company (`ai_role_hires`).
 
 **What it does each month** (`ai_role_runs`, one per hire and month):
-`waiting_for_data → ready → analysed → reported` (or `failed`, retried on the next tick).
+`waiting_for_data → ready → analysed → reported` (or `failed`). A failed run is retried by
+the tick with a backoff — after 1 h, 6 h, then every 24 h (`attempts`, `next_attempt_at`) — and
+after 5 failures it stops and the report page shows **Failed — Retry** (the founder's Retry runs
+it at once). A failure while re-analysing a run that already has a report keeps that report
+(status stays `reported`, the page says "Update failed").
 
 1. On its schedule day the scheduler tick creates the run for the month that just finished and
    checks the required numbers (C4 rules: monthly numbers need that month's value; daily

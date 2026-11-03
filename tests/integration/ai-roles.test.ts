@@ -457,16 +457,42 @@ describe("report-ready push respects budget, quiet hours and not linked", () => 
     expect(out.filter((s) => s.userId === tt.userIds.nuraaly && s.message.title === "Financial Analyst: report ready")).toHaveLength(0);
   });
 
-  it("a crash in the analysis marks the run failed; the next tick retries it", async () => {
+  it("a crash marks the run failed; retries back off (1 h, 6 h, 24 h), stop after 5 tries until Retry; a later failure keeps the report", async () => {
     const hire = await hireRole(tt.ctx("talant"), { templateKey: "financial-analyst", companyId: tt.companyIds["upsell-group"]! });
     const ctx = tt.ctx("talant", bishkek("2026-11-04", "12:00"));
     const defs = await tt.handle.db.select().from(metricDefinitions).where(eq(metricDefinitions.companyId, tt.companyIds["upsell-group"]!));
     const cells = defs.flatMap((d) => periodsInMonth("2026-10-01", "day").map((p) => ({ metricId: d.id, period: p, value: "5" })));
     await saveMetricGrid(ctx, tt.companyIds["upsell-group"]!, cells);
-    const run = await runHireNow(ctx, hire.id, { analyse: () => { throw new Error("rules crashed"); } });
-    expect(run).toMatchObject({ status: "failed", error: "rules crashed" });
-    await orchestrateTick(tt.handle.db, bishkek("2026-11-04", "12:10"));
-    expect((await getRun(ctx, run.id)).status).toBe("reported");
+    const crash = { analyse: () => { throw new Error("rules crashed"); } };
+    const run = await runHireNow(ctx, hire.id, crash);
+    expect(run).toMatchObject({ status: "failed", error: "rules crashed", attempts: 1, gaveUp: false, nextAttemptAt: bishkek("2026-11-04", "13:00").toISOString() });
+    const state = async () => {
+      const [r] = await tt.handle.db.select().from(aiRoleRuns).where(eq(aiRoleRuns.id, run.id));
+      return { status: r!.status, attempts: r!.attempts, next: r!.nextAttemptAt?.toISOString() ?? null };
+    };
+    // Not retried every tick: only once its backoff is over.
+    await orchestrateTick(tt.handle.db, bishkek("2026-11-04", "12:10"), crash);
+    await orchestrateTick(tt.handle.db, bishkek("2026-11-04", "12:50"), crash);
+    expect(await state()).toEqual({ status: "failed", attempts: 1, next: bishkek("2026-11-04", "13:00").toISOString() });
+    await orchestrateTick(tt.handle.db, bishkek("2026-11-04", "13:00"), crash);
+    expect(await state()).toEqual({ status: "failed", attempts: 2, next: bishkek("2026-11-04", "19:00").toISOString() });
+    await orchestrateTick(tt.handle.db, bishkek("2026-11-04", "19:05"), crash);
+    expect(await state()).toEqual({ status: "failed", attempts: 3, next: bishkek("2026-11-05", "19:05").toISOString() });
+    await orchestrateTick(tt.handle.db, bishkek("2026-11-05", "19:10"), crash);
+    await orchestrateTick(tt.handle.db, bishkek("2026-11-06", "19:15"), crash);
+    expect(await state()).toEqual({ status: "failed", attempts: 5, next: null });
+    // Gave up: no more automatic tries (even without the crash), visible on the page.
+    await orchestrateTick(tt.handle.db, bishkek("2026-11-09", "12:00"));
+    const gaveUp = await getRun(ctx, run.id);
+    expect(gaveUp).toMatchObject({ status: "failed", attempts: 5, gaveUp: true, nextAttemptAt: null });
+    expect(gaveUp.summary).toBe("Failed 5 times — stopped retrying; Retry on the report");
+    // Retry (a founder) runs it now.
+    const retried = await rerunReport(tt.ctx("talant", bishkek("2026-11-09", "12:05")), run.id);
+    expect(retried).toMatchObject({ status: "reported", attempts: 0, gaveUp: false, error: null });
+    // A later re-analysis that fails keeps the last good report.
+    await saveMetricGrid(ctx, tt.companyIds["upsell-group"]!, [{ metricId: defs[0]!.id, period: "2026-10-01", value: "6" }]);
+    const failedAgain = await rerunReport(tt.ctx("talant", bishkek("2026-11-09", "12:10")), run.id, crash);
+    expect(failedAgain).toMatchObject({ status: "reported", error: "rules crashed", attempts: 1, reportedAt: retried.reportedAt, findings: retried.findings });
   });
 
   it("salary data never reaches the provider's prompt (a configured test-double provider captures it)", async () => {

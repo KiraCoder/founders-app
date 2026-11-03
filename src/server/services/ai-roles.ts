@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull, lt, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import {
   addMonths,
   chaseDueToday,
@@ -81,6 +81,10 @@ export const reportDedupeKey = (runId: string) => `ai_report:${runId}`;
 /** A "report ready" push not delivered within a week is dropped (the report stays on the page). */
 const REPORT_PUSH_VALID_MS = 7 * 86_400_000;
 const HISTORY_MONTHS = 3;
+/** A run that keeps failing is tried at most this many times by the scheduler. */
+export const MAX_RUN_ATTEMPTS = 5;
+/** Wait before the scheduler tries a failed run again: after the 1st, 2nd, 3rd+ failure. */
+export const RUN_RETRY_HOURS = [1, 6, 24] as const;
 
 // ---------------------------------------------------------------------------
 // Views
@@ -94,6 +98,12 @@ export interface RunSummary {
   counts: Record<Severity, number>;
   summary: string;
   reportedAt: string | null;
+  /** Failed attempts in a row (0 after a success). */
+  attempts: number;
+  /** The scheduler stopped retrying (MAX_RUN_ATTEMPTS failures): only "Retry" runs it now. */
+  gaveUp: boolean;
+  /** When the scheduler tries it next (failed / re-analysis failed), ISO. */
+  nextAttemptAt: string | null;
 }
 
 export interface HireView {
@@ -155,9 +165,14 @@ function runSummary(run: AiRoleRun): RunSummary {
       run.status === "waiting_for_data"
         ? `Waiting for ${run.missing.length} number${run.missing.length === 1 ? "" : "s"}`
         : run.status === "failed"
-          ? "Failed — will retry"
+          ? run.attempts >= MAX_RUN_ATTEMPTS
+            ? `Failed ${run.attempts} times — stopped retrying; Retry on the report`
+            : "Failed — retried automatically"
           : severitySummary(f),
     reportedAt: run.reportedAt?.toISOString() ?? null,
+    attempts: run.attempts,
+    gaveUp: run.attempts >= MAX_RUN_ATTEMPTS,
+    nextAttemptAt: run.attempts < MAX_RUN_ATTEMPTS ? (run.nextAttemptAt?.toISOString() ?? null) : null,
   };
 }
 
@@ -490,7 +505,7 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
       // A report already made stays (numbers were removed / settings changed later): only a
       // run that has not been analysed goes (back) to waiting.
       if (run.status === "analysed" || run.status === "reported") return run;
-      return update({ status: "waiting_for_data", missing: ev.missing, error: null });
+      return update({ status: "waiting_for_data", missing: ev.missing, error: null, attempts: 0, nextAttemptAt: null });
     }
     const drift = reportDrift(run, ev.inputs, hc.settings);
     let current = run;
@@ -526,6 +541,8 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
             narrativeStatus: narrative.status,
             provider: narrative.provider,
             error: null,
+            attempts: 0,
+            nextAttemptAt: null,
             analysedAt: now,
             updatedAt: now,
           })
@@ -536,13 +553,24 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
     }
     if (current.status === "analysed") {
       await queueReportPushes(db, hc, current, now);
-      current = await update({ status: "reported", reportedAt: current.reportedAt ?? now });
+      current = await update({ status: "reported", reportedAt: current.reportedAt ?? now, error: null, attempts: 0, nextAttemptAt: null });
+    } else if (current.attempts || current.error) {
+      current = await update({ error: null, attempts: 0, nextAttemptAt: null });
     }
     return current;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[ai-roles] run ${run.id} failed: ${message}`);
-    return update({ status: "failed", error: message.slice(0, 500) });
+    const [latest] = await db.select().from(aiRoleRuns).where(eq(aiRoleRuns.id, run.id));
+    const attempts = (latest?.attempts ?? run.attempts) + 1;
+    const hours = RUN_RETRY_HOURS[Math.min(attempts, RUN_RETRY_HOURS.length) - 1]!;
+    return update({
+      // A report already made is kept (last good report); only a run without one is "failed".
+      status: latest?.status === "analysed" || latest?.status === "reported" ? latest.status : "failed",
+      error: message.slice(0, 500),
+      attempts,
+      nextAttemptAt: attempts >= MAX_RUN_ATTEMPTS ? null : new Date(now.getTime() + hours * 3_600_000),
+    });
   }
 }
 
@@ -590,10 +618,19 @@ export async function planAiRoles(db: Db, now: Date, opts: EngineOptions = {}): 
           report.runsCreated++;
         }
       }
+      // A run that failed waits for its backoff (1 h, 6 h, 24 h) and is left alone after
+      // MAX_RUN_ATTEMPTS failures until a founder clicks Retry.
       const open = await db
         .select()
         .from(aiRoleRuns)
-        .where(and(eq(aiRoleRuns.hireId, id), inArray(aiRoleRuns.status, ["waiting_for_data", "ready", "analysed", "failed"])))
+        .where(
+          and(
+            eq(aiRoleRuns.hireId, id),
+            inArray(aiRoleRuns.status, ["waiting_for_data", "ready", "analysed", "failed"]),
+            lt(aiRoleRuns.attempts, MAX_RUN_ATTEMPTS),
+            or(isNull(aiRoleRuns.nextAttemptAt), lte(aiRoleRuns.nextAttemptAt, now)),
+          ),
+        )
         .orderBy(asc(aiRoleRuns.period));
       for (const run of open) {
         await evaluateRun(db, hc, run, now, opts);
