@@ -164,7 +164,9 @@ How it works (all in `src/server/notifications/`):
 
 1. A **tick** (every 5–15 minutes) runs the **planner** and then the **dispatcher**.
 2. The planner queues, per founder and per day (local time, Asia/Bishkek):
-   morning summary (default 08:30), evening check (default 19:00, can be turned off),
+   morning summary (default 08:30), evening check (default 19:00, can be turned off; sent
+   only when something due today is still open or parked items wait that no summary listed
+   yet — overdue tasks alone, already in the morning summary, are no reason to message again),
    due-today nudge at 12:00, and overdue chases at 10:00 on day 1, 3, 7, then every week.
    Each item has a dedupe key, so running the tick again never queues it twice.
 3. **At most one push per task per day.** The due-today nudge, the overdue chase and the
@@ -177,7 +179,13 @@ How it works (all in `src/server/notifications/`):
    - **Daily budget**: the two summaries plus at most 3 other pushes (default). Extra items
      are **parked** and listed in the next summary instead of being sent (no spam). Parked
      lines are rebuilt from the task's current state when the summary is sent; tasks that were
-     closed or whose deadline moved out of today are dropped.
+     closed or whose deadline moved out of today are dropped, and a task already listed in a
+     section of the same message (Overdue, Due today, …) is not repeated under *Parked reminders*.
+   - **Folded into the morning summary:** a non-urgent push that would go out within
+     **60 minutes before** the founder's morning summary, or anywhere between the end of quiet
+     hours and the summary (e.g. a "report ready" push at 08:00 with the summary at 08:30),
+     is not sent on its own: it becomes a line of the summary (with the report link) and uses
+     no budget. Urgent-priority pushes are never folded.
    - **Urgent tasks**: pushes about tasks with priority *urgent* do not use that budget but
      have their own cap of **2 per day**; beyond that they are parked too. Only a notification
      of kind `urgent` (none is created automatically today) skips the budget entirely.
@@ -187,7 +195,13 @@ How it works (all in `src/server/notifications/`):
      `FOR UPDATE SKIP LOCKED`), so overlapping ticks never send the same item twice. A claim
      older than 10 minutes (a crashed run) is taken again and counts as one attempt.
      One broken item is recorded on that item and never stops the run for the others.
-5. **Channel:** Telegram when a bot token is set and the founder linked their chat.
+5. **Message length:** Telegram allows 4096 characters. The morning summary puts the
+   **action items first** (Holding ask, AI role requests), then the task sections, which share
+   what is left and end with "+N more — open the app"; parked items and *Numbers waiting* are
+   kept whole. If a message still had to be shortened, whole lines are dropped from the end,
+   and a Holding ask, AI request or parked item counts as shown only if its line was in the
+   message (otherwise it comes again next time).
+6. **Channel:** Telegram when a bot token is set and the founder linked their chat.
    With a token but no linked chat, nothing is sent: items wait as `not_linked` (no budget
    used, parked items stay for later) and go out once the founder links, if still valid
    (e.g. a morning summary only until 6 hours after its time). Without a token everything
@@ -401,7 +415,8 @@ whether higher or lower is better, an optional target, and its expected source
   Numbers that had data and are late: every day, at most 3 lines grouped by company. On
   **Mondays only**: one line for numbers that were never entered, and one line for numbers
   that wait for a data source that is not set up ("18 numbers wait for data sources (Edil's
-  APIs, WB token)"). No separate pushes; both founders see the same list because company
+  APIs, WB token)"); numbers an AI role is already asking for (by hand or upload until the source
+  is connected) are left out of that line. No separate pushes; both founders see the same list because company
   data is shared. The hook is `staleMetricsFor(ctx)` in
   `src/server/services/metrics.ts`, so a later agent can chase "please upload X".
 
@@ -559,6 +574,10 @@ it at once). A failure while re-analysing a run that already has a report keeps 
 2. Missing → `waiting_for_data` and a **data request** for each founder it asks: ONE line in
    the morning summary, e.g. "Financial Analyst needs October 2026 numbers for Kiwi Go:
    Revenue, COD collected +2 more — enter them: …/companies/kiwi-go?tab=numbers&g=day".
+   When a number the role needs comes from a data source that is not connected yet (e.g.
+   Kiwi Go orders from Edil's APIs), the line says "enter by hand or upload until the data
+   source is connected" instead, and that number is left out of the Monday "N numbers wait
+   for data sources" line while the request is open.
    Anti-spam: at most one line per role per founder per day, every day for 7 days, then
    **weekly**; at most 3 role lines per summary; a new month **supersedes** the older request
    (one line covers "September and October 2026"); pausing or no longer asking a founder closes
@@ -574,7 +593,7 @@ it at once). A failure while re-analysing a run that already has a report keeps 
 4. **One "report ready" push per founder who receives reports, per run** (outbox key
    `ai_report:<run>`, never twice — also not after *Run now* or *Run again*). It is a normal
    push: quiet hours, the daily budget (parked → listed in the next summary) and "not linked"
-   apply.
+   apply, and one due just before the morning summary is folded into it (a line with the link).
 5. The report page `/ai-roles/runs/<id>`: findings by severity, **Create task** on risk findings
    (a shared task for the company, only when a founder clicks; once per finding), the numbers
    used, and the AI summary box. A tick never changes a report already sent: if numbers are
