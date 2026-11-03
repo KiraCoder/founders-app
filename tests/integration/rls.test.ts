@@ -56,6 +56,10 @@ describe("row level security after migrate", () => {
         "intercompany_acts",
         "intercompany_ledger_entries",
         "holding_ask_items",
+        "ai_role_templates",
+        "ai_role_hires",
+        "ai_role_runs",
+        "ai_data_requests",
       ]),
     );
     expect(tables.filter((t) => !t.rls).map((t) => t.name)).toEqual([]);

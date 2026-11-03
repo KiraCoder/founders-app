@@ -349,6 +349,40 @@ describe("0011 holding fixes on existing data", () => {
   });
 });
 
+describe("0012 AI roles on existing data", () => {
+  it("adds the four AI role tables with RLS, keeps outbox rows, enforces one run per hire and month", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0012") });
+    const C1 = "33333333-3333-4333-8333-333333333331";
+    await client.exec(`
+      insert into users (id, email, name, short_name, role) values ('${NURAALY}', 'n@x', 'N', 'N', 'founder');
+      insert into companies (id, slug, name) values ('${C1}', 'kiwi-go', 'Kiwi Go');
+      insert into notifications_outbox (user_id, kind, dedupe_key) values ('${NURAALY}', 'morning_summary', 'morning:2026-11-02');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rls = await client.query<{ relname: string; relrowsecurity: boolean }>(
+      `select relname, relrowsecurity from pg_class where relname in ('ai_role_templates','ai_role_hires','ai_role_runs','ai_data_requests') order by relname`,
+    );
+    expect(rls.rows).toEqual([
+      { relname: "ai_data_requests", relrowsecurity: true },
+      { relname: "ai_role_hires", relrowsecurity: true },
+      { relname: "ai_role_runs", relrowsecurity: true },
+      { relname: "ai_role_templates", relrowsecurity: true },
+    ]);
+    expect((await client.query("select 1 from notifications_outbox")).rows).toHaveLength(1);
+    await client.exec(`
+      insert into ai_role_templates (key, name, description, status, required_data, default_schedule) values
+        ('financial-analyst', 'Financial Analyst', 'd', 'available', '{"byCompanyType":{},"optionalUploads":[]}', '{"kind":"monthly","day":10}');
+      insert into ai_role_hires (id, template_key, company_id, settings, hired_on) values
+        ('66666666-6666-4666-8666-666666666666', 'financial-analyst', '${C1}', '{}', '2026-11-02');
+      insert into ai_role_runs (hire_id, period) values ('66666666-6666-4666-8666-666666666666', '2026-10-01');
+    `);
+    await expect(client.exec(`insert into ai_role_runs (hire_id, period) values ('66666666-6666-4666-8666-666666666666', '2026-10-01')`)).rejects.toThrow();
+    await expect(client.exec(`insert into ai_role_hires (template_key, company_id, settings, hired_on) values ('financial-analyst', '${C1}', '{}', '2026-11-03')`)).rejects.toThrow();
+    await expect(client.exec(`delete from ai_role_hires`)).rejects.toThrow(/foreign key/);
+  });
+});
+
 describe("supabase/policies.sql (applied to a Supabase-like database)", () => {
   it("enforces the app rules for a signed-in client", async () => {
     const { client, db } = await newPglite();

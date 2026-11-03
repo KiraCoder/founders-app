@@ -128,6 +128,8 @@ export interface RunView extends RunSummary {
   analysedAt: string | null;
   /** Deep link to enter the missing numbers. */
   numbersHref: string;
+  /** A report was made, but its numbers were corrected since ("Run again" re-analyses). */
+  inputsChanged: boolean;
 }
 
 function findingsOf(run: Pick<AiRoleRun, "findings">): Finding[] {
@@ -819,6 +821,12 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
   if (!hire) throw new ServiceError("not_found", "Report not found");
   const defs = await companyMetricDefs(ctx.db, hire.companyId);
   const firstMissing = defs.find((d) => d.id === run.missing[0]?.metricId);
+  let inputsChanged = false;
+  if ((run.status === "reported" || run.status === "analysed") && run.inputsHash) {
+    const months = Array.from({ length: HISTORY_MONTHS + 1 }, (_, i) => prevMonth(run.period, HISTORY_MONTHS - i));
+    const ev = evaluateNumbers(await loadCompanyNumbers(ctx.db, hire.companyId, months), run.period, hire.settings.requiredMetricKeys);
+    inputsChanged = !ev.missing.length && hashInputs(ev.inputs, hire.settings.requiredMetricKeys, hire.settings.thresholds) !== run.inputsHash;
+  }
   return {
     ...runSummary(run),
     hire: {
@@ -841,7 +849,21 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
     trigger: run.trigger,
     analysedAt: run.analysedAt?.toISOString() ?? null,
     numbersHref: numbersHref(hire.companySlug, firstMissing?.granularity ?? "month"),
+    inputsChanged,
   };
+}
+
+/**
+ * "Run again" on a report: re-checks that month's numbers now. A report already made is
+ * re-analysed only when its numbers (or the role's settings) changed, and never pushed again.
+ */
+export async function rerunReport(ctx: ServiceContext, runId: unknown, opts: EngineOptions = {}): Promise<RunView> {
+  const view = await getRun(ctx, runId);
+  if (view.hire.status !== "active") throw new ServiceError("validation", "This role is paused — resume it first");
+  const hc = (await hireContext(ctx.db, view.hire.id))!;
+  const [run] = await ctx.db.select().from(aiRoleRuns).where(eq(aiRoleRuns.id, view.id));
+  await evaluateRun(ctx.db, hc, run!, ctx.now, { timeZone: ctx.timeZone, ...opts });
+  return getRun(ctx, view.id);
 }
 
 /**
