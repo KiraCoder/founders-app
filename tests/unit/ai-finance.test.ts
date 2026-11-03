@@ -92,6 +92,15 @@ describe("schedule and chasing cadence", () => {
     expect(scheduleLabel({ kind: "monthly", day: 1 })).toBe("Monthly on the 1st");
     expect(monthsLabel(["2026-10-01", "2026-09-01"])).toBe("September and October 2026");
   });
+  it("request months stay short: ranges for consecutive months, at most 3 named then +N earlier", () => {
+    expect(monthsLabel(["2026-10-01"])).toBe("October 2026");
+    expect(monthsLabel(["2026-08-01", "2026-10-01", "2026-09-01"])).toBe("August–October 2026");
+    expect(monthsLabel(["2026-05-01", "2026-06-01", "2026-07-01", "2026-08-01", "2026-09-01", "2026-10-01"])).toBe("May–October 2026");
+    expect(monthsLabel(["2025-11-01", "2025-12-01", "2026-01-01"])).toBe("November 2025–January 2026");
+    expect(monthsLabel(["2025-12-01", "2026-01-01"])).toBe("December 2025 and January 2026");
+    expect(monthsLabel(["2026-06-01", "2026-08-01", "2026-10-01"])).toBe("June, August and October 2026");
+    expect(monthsLabel(["2026-02-01", "2026-04-01", "2026-06-01", "2026-08-01", "2026-10-01"])).toBe("June, August and October 2026 (+2 earlier)");
+  });
   it("chases daily for 7 days, then weekly, never twice a day", () => {
     const created = "2026-11-10";
     expect(chaseDueToday(created, null, "2026-11-10")).toBe(true);

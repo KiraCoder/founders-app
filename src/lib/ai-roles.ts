@@ -234,15 +234,28 @@ export function monthName(start: IsoDate): string {
   return MONTH_NAMES[Number(start.slice(5, 7)) - 1]!;
 }
 
-/** "October 2026", or "September and October 2026", or "August, September and October 2026". */
+/**
+ * Months for a request line, short however long the list gets:
+ * "October 2026", "September and October 2026", "June, August and October 2026";
+ * consecutive months as a range: "August–October 2026", "November 2025–January 2026";
+ * otherwise at most 3 named (the newest) then "(+N earlier)".
+ */
 export function monthsLabel(starts: readonly IsoDate[]): string {
   const sorted = [...new Set(starts)].sort();
   if (sorted.length === 0) return "";
   if (sorted.length === 1) return monthLabel(sorted[0]!);
-  const sameYear = sorted.every((s) => s.slice(0, 4) === sorted[0]!.slice(0, 4));
-  const names = sorted.map((s) => (sameYear ? monthName(s) : monthLabel(s)));
+  const first = sorted[0]!;
+  const last = sorted.at(-1)!;
+  const consecutive = sorted.every((m, i) => i === 0 || addMonths(sorted[i - 1]!, 1) === m);
+  if (consecutive && sorted.length >= 3) {
+    return first.slice(0, 4) === last.slice(0, 4) ? `${monthName(first)}–${monthLabel(last)}` : `${monthLabel(first)}–${monthLabel(last)}`;
+  }
+  const named = sorted.slice(-3);
+  const earlier = sorted.length - named.length;
+  const sameYear = named.every((s) => s.slice(0, 4) === named[0]!.slice(0, 4));
+  const names = named.map((s) => (sameYear ? monthName(s) : monthLabel(s)));
   const text = `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
-  return sameYear ? `${text} ${sorted[0]!.slice(0, 4)}` : text;
+  return `${sameYear ? `${text} ${named[0]!.slice(0, 4)}` : text}${earlier ? ` (+${earlier} earlier)` : ""}`;
 }
 
 /** The day a month's run is due: `schedule.day` of the following month. */
