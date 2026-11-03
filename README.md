@@ -88,6 +88,37 @@ the Vercel / Supabase dashboards.
    `src/server/auth/supabase.ts`) and, only if a client (e.g. the iOS app) should talk to
    Supabase directly, review and apply `supabase/policies.sql`.
 
+## Environment variables (all of them)
+
+Put them in Vercel → *Settings → Environment Variables* (locally: `.env.local`, see
+`.env.example`). Never in the code. *Required* = the production app refuses to start or that
+feature stays off without it.
+
+| Variable | Needed | What it does |
+| --- | --- | --- |
+| `DATABASE_URL` | **Required in production** | Supabase connection string (Transaction pooler). Empty: embedded local database — development only; production refuses to start |
+| `ALLOW_LOCAL_DB` | No | `1` lets a *local* production run use the embedded database (e2e). Never on Vercel |
+| `SESSION_SECRET` | **Required in production** | Signs the sign-in cookie; 32+ random characters (`openssl rand -base64 48`) |
+| `AUTH_MODE` | No | `local` (default, the only one implemented); `supabase` is a stub |
+| `APP_TIMEZONE` | No | Business timezone for "today", overdue, schedules and shown times. Default `Asia/Bishkek` |
+| `APP_URL` | Recommended | The site's address, e.g. `https://<your-app>.vercel.app`: makes links in Telegram messages clickable and is an allowed `Origin` for the API; scripts use it to find the app |
+| `MIGRATE_ON_BUILD` | No | `1` makes `npm run db:migrate:deploy` (optional Vercel build step) apply migrations. Default off |
+| `DEV_FOUNDER_PASSWORD`, `SEED_RESET_PASSWORDS`, `SEED_SAMPLES` | Seeding only | Used by `npm run db:seed` on your computer (see step 3 above), not by the website |
+| `TELEGRAM_BOT_TOKEN` | For Telegram | Bot token from @BotFather. Empty: messages go to the dev inbox only |
+| `TELEGRAM_WEBHOOK_SECRET` | For Telegram | Random text; Telegram sends it back with every update |
+| `TELEGRAM_BOT_USERNAME` | For Telegram | Bot username without `@` (shown on Settings) |
+| `CRON_SECRET` | For reminders | Protects `/api/cron/tick`; without it the scheduler endpoint always answers 401 |
+| `DEV_TOOLS` | No | `1` shows the dev inbox in a production build (previews only, never the real site) |
+| `FILE_STORAGE` | No | Where document scans go. Empty: local disk in development, **uploads off in production** ("File uploads arrive with Supabase storage"); `local`: local disk on a server with a lasting disk (ignored on Vercel); `supabase`: placeholder, off until written |
+| `HOLDING_ACTS_GRACE_DAYS` | No | Days into the next month before a month's акт is expected (default 10) |
+| `AI_PROVIDER` | No | Empty / `none` (the only value implemented): AI roles run rule-based, no AI summary |
+| `KIWIGO_API_URL`, `KIWIGO_API_TOKEN` | Not used yet | Kiwi Go app data source (from Edil). The connector is a placeholder: no network calls until a developer writes it |
+| `WMS_API_URL`, `WMS_API_TOKEN` | Not used yet | WMS (wms.jobutify.com) data source, same as above |
+| `ALURA_ERP_API_URL`, `ALURA_ERP_API_TOKEN` | Not used yet | Alura Style ERP data source, same as above |
+| `WB_API_TOKEN` | Not used yet | Wildberries seller API token (read-only), same as above |
+| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Not used yet | For the future Supabase Auth / direct-client mode. The anon key can read nothing today (row-level security, step 8) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Not used yet | For the future Supabase Storage adapter. Server-only: never prefix it with `NEXT_PUBLIC_` |
+
 ## How access works
 
 - Every page, server action and API route goes through the service layer in `src/server/services/`.
@@ -229,10 +260,18 @@ The poller fetches updates from Telegram and forwards them to the same webhook h
     select net.http_post(
       url := 'https://<your-app>.vercel.app/api/cron/tick',
       headers := jsonb_build_object('Authorization', 'Bearer ' ||
-        (select decrypted_secret from vault.decrypted_secrets where name = 'cron_secret'))
+        (select decrypted_secret from vault.decrypted_secrets where name = 'cron_secret')),
+      timeout_milliseconds := 60000
     );
   $$);
   ```
+  **Timeouts:** pg_net gives up after **5 seconds** unless told otherwise
+  (`timeout_milliseconds`); a tick can take longer on a busy morning (several Telegram
+  messages, AI roles), so the snippet waits up to 60 s. The route itself may run up to
+  **60 s** on Vercel (`export const maxDuration = 60` in `src/app/api/cron/tick/route.ts`).
+  A tick that is cut short is safe: whatever was not sent goes out on the next tick.
+  (Already scheduled with the old snippet? Run the same `cron.schedule('founders-tick', …)`
+  again: it replaces the job with the same name.)
 - **Or a free external cron** such as cron-job.org: URL `https://<your-app>.vercel.app/api/cron/tick`,
   method POST, header `Authorization: Bearer <CRON_SECRET>`, every 10 minutes.
   (Vercel's own cron on the free plan runs only once a day, too rare for reminders; the

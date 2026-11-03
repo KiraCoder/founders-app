@@ -5,6 +5,12 @@ import { bearerToken, safeEqual } from "@/server/notifications/secrets";
 import { runTick } from "@/server/notifications/tick";
 
 export const dynamic = "force-dynamic";
+/**
+ * Seconds Vercel lets one tick run (plan + AI roles + dispatch). A normal tick takes a few
+ * seconds; this leaves room for slow Telegram calls (10 s timeout each) on a busy morning.
+ * The caller should wait as long (pg_net: timeout_milliseconds := 60000, see README).
+ */
+export const maxDuration = 60;
 
 /**
  * Scheduler entry point: plan + dispatch. Call every 5–15 minutes from Supabase pg_cron,
