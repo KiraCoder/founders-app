@@ -86,6 +86,8 @@ the Vercel / Supabase dashboards.
   founders, never mixed between companies.
 - **Holding** (intercompany flows, акты, договоры, debts, documents) is founders-only
   (`assertHoldingAccess`); documents are served only through an access-checked route.
+- **AI roles** (hires, reports, data requests) are founders-only (`assertAiRolesAccess`); a role
+  only ever asks or notifies the founders.
 - **Salaries are restricted** (see *People and salaries* below): only users in `salary_viewers`
   see or change them. The check is `isSalaryViewer` / `assertSalaryViewer` in `access.ts`, and
   `src/server/services/salaries.ts` is the only code that touches the `salaries` table.
@@ -461,6 +463,72 @@ can't be parked and follows quiet hours and "not linked" holding like the summar
   ("Элмурат, здравствуйте! Пришлите, пожалуйста, акты приёма-передачи за: …"). The founder
   sends it himself; the app never does.
 
+## AI roles
+
+`/ai-roles` (sidebar → AI roles), the **AI roles** tab of each company and the right-hand
+**agent panel**. Founders only (`assertAiRolesAccess` in `access.ts`); logic in
+`src/server/services/ai-roles.ts`, pure rules in `src/server/ai/` and `src/lib/ai-roles.ts`.
+
+**Hiring.** The catalogue lives in code (`ROLE_TEMPLATES` in `src/lib/ai-roles.ts`, copied to
+`ai_role_templates` by `db:seed`): responsibilities, the numbers it needs **per company type**
+(Kiwi Go = delivery: revenue, orders, COD collected, COD paid out; Alura Style = garment
+factory: output, piecework pay total, defect rate; …), optional uploads, default schedule and
+report sections. **Financial Analyst** can be hired; HR, Marketing and Operations are shown as
+*Coming soon*. *Hire* opens a wizard: company → which numbers it waits for → schedule (monthly
+on day 1–28, default the **10th**) and thresholds (warn ±20 %, risk ±50 % by default) → who
+gets reports and whom it asks (both founders by default; founders only) → Hire. *Tune*,
+*Pause/Resume* and *Run now (last month)* are on each hired role. One hire per role and
+company (`ai_role_hires`).
+
+**What it does each month** (`ai_role_runs`, one per hire and month):
+`waiting_for_data → ready → analysed → reported` (or `failed`, retried on the next tick).
+
+1. On its schedule day the scheduler tick creates the run for the month that just finished and
+   checks the required numbers (C4 rules: monthly numbers need that month's value; daily
+   numbers need **every day** of the month, then sum / average / last by the number's
+   aggregation; weekly numbers belong to the month of their Monday).
+2. Missing → `waiting_for_data` and a **data request** for each founder it asks: ONE line in
+   the morning summary, e.g. "Financial Analyst needs October 2026 numbers for Kiwi Go:
+   Revenue, COD collected +2 more — enter them: …/companies/kiwi-go?tab=numbers&g=day".
+   Anti-spam: at most one line per role per founder per day, every day for 7 days, then
+   **weekly**; at most 3 role lines per summary; a new month **supersedes** the older request
+   (one line covers "September and October 2026"); pausing or no longer asking a founder closes
+   theirs. No separate pushes — so no budget use, and quiet hours / "not linked" work like the
+   summary itself.
+3. Complete → the **rule-based analysis** (`src/server/ai/finance-rules.ts`, exact decimals,
+   no AI): change vs the month before and vs the 3-month average beyond the thresholds; ratios
+   when both numbers exist (COD paid out vs collected, revenue per order, piecework pay per
+   piece per factory, returns rate, shipment error rate); numbers missing 2+ months; the
+   Holding's intercompany debt growing 3 months in a row; missed targets. Each finding has a
+   severity (risk / warning / info), the numbers and a plain-English sentence.
+4. **One "report ready" push per founder who receives reports, per run** (outbox key
+   `ai_report:<run>`, never twice — also not after *Run now* or *Run again*). It is a normal
+   push: quiet hours, the daily budget (parked → listed in the next summary) and "not linked"
+   apply.
+5. The report page `/ai-roles/runs/<id>`: findings by severity, **Create task** on risk findings
+   (a shared task for the company, only when a founder clicks; once per finding), the numbers
+   used, and the AI summary box. A tick never changes a report already sent: if numbers are
+   corrected later the page says *Numbers changed* and **Run again** re-analyses (no new push).
+
+**The orchestrator** (`src/server/ai/orchestrator.ts`) runs the roles on every tick and
+composes the morning summary's requests so nothing is asked twice: a number an AI role is
+asking for is removed from *Numbers waiting* (also on days the role's line is parked until its
+next chase day); the intercompany-debt number (derived from акты) is asked by the Holding
+section only, which then notes that the role waits for those акты too. Only the two founders
+are ever asked or notified — people records (Elmurat, Edil) never.
+
+**Without an AI provider (now).** Everything above works with `AI_PROVIDER` empty or `none`
+(the only value implemented): the analysis is deterministic; the run records
+`narrative_skipped` and the report shows "AI summary appears after the AI provider is chosen".
+No LLM SDK, key or network call exists in the app.
+
+**Plugging in a provider later** (after the founders choose one): implement `LlmProvider`
+(`generate({ system, messages, tools?, maxTokens }) → { text, toolCalls?, usage }`) in its own
+file, register it in `PROVIDER_FACTORIES` in `src/server/ai/provider.ts`, set `AI_PROVIDER` to
+its id and its key in the hosting dashboard. Callers don't change. The narrative prompt
+(`src/server/ai/narrative.ts`) is built **only from findings**; salary data can't enter it
+(strict schema + `assertNoSalaryData`, tested).
+
 ## REST API (for the future iOS app)
 
 Session-cookie auth for now; JSON errors look like `{ "error": { "code", "message", "fields?" } }`.
@@ -489,7 +557,11 @@ Session-cookie auth for now; JSON errors look like `{ "error": { "code", "messag
 - `GET /api/v1/holding/debts?asOf=` (pairs, total, ledger entries), `POST /api/v1/holding/debts` `{ kind: "payment" | "opening", debtorCompanyId, creditorCompanyId, entryDate, amount, note? }`
 - `POST /api/v1/holding/files` (multipart `file`) → `{ id }`; `GET /api/v1/holding/files/:id`
 
-Input shapes are the Zod schemas in `src/lib/schemas.ts`, `src/lib/people-schemas.ts`, `src/lib/metric-schemas.ts` and `src/lib/holding-schemas.ts`.
+- `GET /api/v1/ai/roles?companyId=` (role catalogue, hires, provider status), `POST /api/v1/ai/roles` `{ templateKey, companyId, settings?, notes? }` (hire, 201; 409 when already hired)
+- `GET /api/v1/ai/hires/:id` (hire + recent runs), `PATCH /api/v1/ai/hires/:id` `{ settings?: { schedule, thresholds, requiredMetricKeys, recipients, askUserIds }, notes?, status?: "active" | "paused" }`
+- `GET /api/v1/ai/runs/:id` (status, missing numbers, findings, numbers used, narrative status)
+
+Input shapes are the Zod schemas in `src/lib/schemas.ts`, `src/lib/people-schemas.ts`, `src/lib/metric-schemas.ts`, `src/lib/holding-schemas.ts` and `src/lib/ai-roles.ts`.
 
 ## Folder map
 
@@ -504,7 +576,8 @@ src/
       projects/[id]/       Project with tasks and progress
       people/              People list, person page, new person, import wizard (+ server actions)
       holding/             Holding: акты grid + cell panel, Ask Elmurat, debts, договоры, flows (+ server actions)
-      search/ more/ org/ ai-roles/
+      ai-roles/            AI roles: catalogue, Hire/Tune wizard, hired roles; runs/[id] report page (+ server actions)
+      search/ more/ org/
       settings/            Own notification preferences + Telegram link; Access (salary viewers)
       dev/notifications/   Dev inbox (dev tools only)
       actions.ts           Server actions (call the service layer)
@@ -520,7 +593,9 @@ src/
     db/                    schema.ts, connect.ts (PGlite or Postgres), migrate.ts, seed.ts
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
                            people-import, metrics, metrics-import, connectors, search, notifications,
-                           holding, holding-asks, holding-files)
+                           holding, holding-asks, holding-files, ai-roles)
+    ai/                    AI roles: provider.ts (LlmProvider, NoneProvider), finance-rules.ts, month-values.ts,
+                           narrative.ts (prompt builder, no salaries), orchestrator.ts (tick + morning-summary dedupe)
     storage/               FileStorage for documents: local .data/uploads, Supabase placeholder
     import/parse-table.ts  .xlsx/.csv parsing for the people and numbers imports (in memory, 2 MB limit)
     connectors/            Data sources: Connector interface, registry, stubs (no network), runner
@@ -532,7 +607,7 @@ scripts/                   db:migrate / db:seed / db:reset / cron:tick / telegra
 supabase/policies.sql      RLS policies for a future direct-client mode (applied by hand)
 tests/                     Vitest unit + service tests
 e2e/                       Playwright smoke test + screenshots
-docs/screenshots/          UI screenshots (holding-desktop.png, holding-act-panel.png, numbers-grid.png, people-list-salaries.png, …)
+docs/screenshots/          UI screenshots (ai-roles-hire-wizard.png, ai-report.png, holding-desktop.png, holding-act-panel.png, numbers-grid.png, people-list-salaries.png, …)
 docs/samples/              people-sample.csv, kiwi-go-numbers-sample.csv (fake data) for the importers
 docs/reviews/              Independent reviews and how each finding was resolved
 ```
