@@ -207,3 +207,72 @@ gone) with Nuraaly on each chase style:
 | Messages in 30 days | 71 | 58 | 39 |
 | Overdue chase pushes | 32 | 19 | 0 |
 | Max per day / days with 4+ | 6 / 4 | 5 / 3 | 4 / 1 |
+
+## Founder switches review (independent reviewer, commits 65b3993^..bc837de)
+
+The reviewer checked the overdue chase style (`separate` / `grouped` / `summary_only`) and the
+monthly totals for daily numbers. Four findings, all verified:
+
+1. MED (must fix) the grouped push marks its leader row "sent" even when the leader's task is
+   not in the message (`dispatcher.ts`, `sendGroupedChase`, the `finish({ status: "sent" })`
+   after "the leader row carries the message"). The leader is the first row `claimNext` picks
+   (outbox priority, `scheduledFor`, `createdAt`), but the list is re-sorted by task priority
+   and due date (`low` after `normal`, though both map to outbox `normal`), so the leader can
+   fall past the 10-task cap or be cut by `fitTelegram`. It was still finished `sent`
+   (`bundledIntoId` null, not in `groupedTaskIds`), so its snooze reminder later that day was
+   cancelled `already_pushed_today`. Repro: one low task 14 days overdue (leader) + 5 normal
+   tasks 1 day overdue with 290×`&` titles, grouped, tick 10:00.
+2. LOW `ai-roles.ts` `loadCompanyNumbers`: the `hadEarlier` query had no
+   `periodKind = "period"` filter, so a month total before the window flipped "never entered"
+   (info) to "2+ months missing" (warn) even with `acceptMonthlyTotals` off.
+3. LOW a grouped push cut by `fitTelegram` lost the "+N more — open the app" line (it comes
+   after the task lines), and the footer with it.
+4. LOW overlapping ticks on Postgres could produce two grouped pushes per founder per day
+   (each run claims its own leader).
+
+### Resolution
+
+All four fixed on `claude/adoring-brown-rriwam`, one commit each (e760a9b, da30ccf, 1dc2a38,
+0b6886c), README updated with each. No migration. Verified with `npm run db:migrate`, `lint`,
+`typecheck`, `test` (43 files, 439 tests, was 432), `build` and `test:e2e` (14 passed,
+7 skipped). Each new test was checked to fail on the code before its fix.
+
+1. **Leader not listed.** The documented order ("highest priority first, then the longest
+   overdue") is kept. The message, its button tokens and the one budget slot are carried by the
+   first LISTED row (the carrier): sent, `bundledIntoId` null, `payload.groupedTaskIds`; the
+   other listed rows are sent and bundled into it. A leader whose task is not listed is
+   cancelled `grouped_not_listed` (not the day's touch, not counted); a leader that failed its
+   own checks is cancelled with that reason (before, it was finished `sent` too). On a failed
+   send the carrier takes the attempt and backoff, the rest (the leader included) wait with the
+   same backoff. Tests (`overdue-chase-style.test.ts`, "grouped: the leader row is not always
+   listed"): the reviewer's repro (cut by the length budget) and the cap (low leader + 10
+   normal tasks → "+1 more"); each asserts the leader is cancelled, one carrier with
+   3 tokens per listed task and none for the leader, and a reminder for the leader's task at
+   15:00 the same day is sent.
+2. **Month totals before the window.** `loadCompanyNumbers` keeps earlier period values
+   (`hadEarlier`) and earlier month totals (`hadEarlierTotal`) apart. Rule, the same as for the
+   values a hire uses: with `acceptMonthlyTotals` off only period values count as "had data";
+   on, month totals count too (earlier or in the window). Test (`month-totals.test.ts`): only a
+   June 2025 month total for On-time % → off: in "never entered" (info), no "missing" warning;
+   on: "2+ months missing" (warn), not in "never entered".
+3. **"+N more" always survives.** `buildGroupedChase` budgets the task lines like the morning
+   summary: title, footer and the "+N more — open the app" line are reserved from
+   `SUMMARY_TEXT_BUDGET`; a task is listed while it fits (and up to 10), the rest joins
+   "+N more", so `fitTelegram` has nothing left to cut. Unit test: 5 tasks of 1 500 rendered
+   characters → 2 listed, "+3 more", footer last, `fitTelegram` returns the message unchanged;
+   the `fitTelegram` button test now builds its message by hand; the integration test (12 long
+   tasks) asserts "+N more" and the footer are the last lines and no "…".
+4. **One grouped push per founder per day.** In `sendGroupedChase`, under
+   `pg_advisory_xact_lock(hashtext('grouped_chase:<user>:<day>'))` (works on PGlite), the
+   leader is marked `payload.groupedChaseDay = <day>` unless another chase row of that founder
+   carries today's mark and is sent or being sent; then this leader is parked
+   `grouped_already_sent` and listed in the next summary (the carrier also gets the mark when
+   sent). Tests: a chase row claimed after today's grouped push is parked and appears in the
+   next morning's summary; a run that finds another run's leader mid-send (marked, `sending`)
+   parks its rows and sends nothing; two `dispatch` calls at once send one push (PGlite runs
+   one statement at a time, so this last test also passed before the fix — the previous one
+   is the one that pins the guard).
+
+Not re-run: the 30-day simulation table above (grouped style). These fixes change which rows
+carry or skip a grouped push on edge days (long titles, 11+ tasks, overlapping ticks), not
+how many grouped pushes go out on a normal day.
