@@ -59,6 +59,7 @@ Welcome, Claude! When you pick up work:
 - **Popup:** on a matching page, show the numbers found and a **Send to Founder Cockpit** button. Nothing is sent before the click.
 - **Send contract** (Claude builds the server side): `POST {appUrl}/api/v1/ingest` with header `Authorization: Bearer <personal key>` and JSON body `{ "source": "extension", "adapterId": "...", "points": [Point, ...] }`. Expected reply: `{ "accepted": n, "rejected": [{ "index": i, "reason": "..." }] }`. Mock this in tests.
 - Unit tests for adapters and the popup logic (jsdom), runnable with the repo's `npm test`.
+- **Server side is now live in `claude/adoring-brown-rriwam`** (README → "Browser extension"). Two details beyond the contract above: a per-factory number needs an extra optional `unitSlug` in the point (e.g. Alura Style `khbk` / `osh-raion`), and `periodStart` must be exactly the first day of the metric's period (no normalising). Keys are created in Settings → Browser extension. Rejections come back per point with a reason; show them in the popup.
 
 ---
 
