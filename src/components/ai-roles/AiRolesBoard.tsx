@@ -3,9 +3,11 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
-import { runNowAction, tuneAction, type AiActionState } from "@/app/(app)/ai-roles/actions";
+import { hireAction, runNowAction, tuneAction, type AiActionState } from "@/app/(app)/ai-roles/actions";
 import { CompanyDot } from "@/components/ui";
+import type { RoleEngine } from "@/lib/ai-role-config";
 import { HireWizard, type WizardCompany, type WizardSettings, type WizardTarget } from "./HireWizard";
+import { RoleEditor, type CopySource, type EditorMetric, type EditorTarget } from "./RoleEditor";
 
 export interface BoardTemplate {
   key: string;
@@ -15,6 +17,15 @@ export interface BoardTemplate {
   responsibilities: string[];
   reportSections: string[];
   scheduleLabel: string;
+  /** The role editor (template level / custom role definition). */
+  editor: EditorTarget;
+  custom: boolean;
+  /** Custom roles: the company it works for, and its hire there (if hired). */
+  companyId?: string;
+  companyName?: string;
+  hiredId?: string | null;
+  /** The founders renamed / rewrote it (or it has saved check defaults). */
+  edited?: boolean;
 }
 
 export interface BoardHire {
@@ -34,8 +45,11 @@ export interface BoardHire {
   requiredLabels: string[];
   latestRun: { id: string; periodLabel: string; status: string; summary: string } | null;
   /** "org_rules" for the Org Structure Expert (no monthly runs; findings live on the org board). */
-  engine?: "finance" | "org_rules";
+  engine?: RoleEngine;
   orgSummary?: string;
+  /** This hire's own settings in the role editor. */
+  editor: EditorTarget;
+  custom?: boolean;
 }
 
 const RUN_TONE: Record<string, string> = {
@@ -57,7 +71,7 @@ export function RunStatusTag({ status }: { status: string }) {
   return <span className={`tag ${RUN_TONE[status] ?? ""}`}>{RUN_STATUS_LABEL[status] ?? status}</span>;
 }
 
-function HireCard({ hire, onTune }: { hire: BoardHire; onTune: () => void }) {
+function HireCard({ hire, onTune, onEdit }: { hire: BoardHire; onTune: () => void; onEdit: () => void }) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [state, setState] = useState<AiActionState>({});
@@ -69,11 +83,12 @@ function HireCard({ hire, onTune }: { hire: BoardHire; onTune: () => void }) {
       else if (res.ok) router.refresh();
     });
   return (
-    <div className="card flex flex-col gap-2 p-4" data-testid="hire-card" data-company={hire.companySlug}>
+    <div className="card flex flex-col gap-2 p-4" data-testid="hire-card" data-company={hire.companySlug} data-role={hire.templateKey}>
       <div className="flex flex-wrap items-center gap-2">
         <CompanyDot color={hire.companyColor} size={10} />
         <span className="font-semibold">{hire.roleName}</span>
         <span className="text-muted">· {hire.companyName}</span>
+        {hire.custom && <span className="tag">Your role</span>}
         <span className={`tag ${hire.status === "active" ? "tag-ok" : ""} ml-auto`}>{hire.status === "active" ? "Active" : "Paused"}</span>
       </div>
       {hire.engine === "org_rules" ? (
@@ -103,8 +118,13 @@ function HireCard({ hire, onTune }: { hire: BoardHire; onTune: () => void }) {
         )}
       </div>
       <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn btn-sm" onClick={onTune} disabled={pending}>
-          Tune
+        {!hire.custom && (
+          <button type="button" className="btn btn-sm" onClick={onTune} disabled={pending}>
+            Tune
+          </button>
+        )}
+        <button type="button" className="btn btn-sm" onClick={onEdit} disabled={pending}>
+          Edit settings
         </button>
         <button type="button" className="btn btn-sm" disabled={pending} onClick={() => act(() => tuneAction(hire.id, { status: hire.status === "active" ? "paused" : "active" }))}>
           {hire.status === "active" ? "Pause" : "Resume"}
@@ -125,12 +145,74 @@ function HireCard({ hire, onTune }: { hire: BoardHire; onTune: () => void }) {
 }
 
 /** /ai-roles: hired roles (tune, pause, run now, latest report) and the role catalogue with the Hire wizard. */
+function CustomRoleCard({ role, onEdit }: { role: BoardTemplate; onEdit: () => void }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [state, setState] = useState<AiActionState>({});
+  return (
+    <div className="card flex flex-col gap-2 p-4" data-testid="custom-role" data-role={role.key}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[15px] font-semibold">{role.name}</span>
+        <span className="text-muted">· {role.companyName}</span>
+        <span className={`tag ml-auto ${role.hiredId ? "tag-ok" : ""}`}>{role.hiredId ? "Hired" : "Not hired"}</span>
+      </div>
+      {role.description && <p className="text-[13px] text-muted">{role.description}</p>}
+      <p className="text-[12px] text-muted">
+        Watches {role.editor.watched?.length ?? 0} number{role.editor.watched?.length === 1 ? "" : "s"} · {role.scheduleLabel.toLowerCase()}
+      </p>
+      <div className="mt-auto flex flex-wrap gap-2">
+        <button type="button" className="btn btn-sm" onClick={onEdit} disabled={pending}>
+          Edit role
+        </button>
+        {!role.hiredId && (
+          <button
+            type="button"
+            className="btn btn-sm btn-primary"
+            disabled={pending}
+            onClick={() =>
+              start(async () => {
+                const res = await hireAction({ templateKey: role.key, companyId: role.companyId! });
+                setState(res);
+                if (res.ok) router.refresh();
+              })
+            }
+          >
+            Hire for {role.companyName}
+          </button>
+        )}
+      </div>
+      {(state.error || state.message) && (
+        <p className={`text-[12px] ${state.error ? "text-risk" : "text-muted"}`} role="status">
+          {state.error ?? state.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
+const NEW_ROLE: EditorTarget = {
+  mode: "create",
+  title: "New role",
+  engine: "custom",
+  custom: true,
+  identity: { name: "", description: "", responsibilities: [], instructions: "" },
+  inherited: { name: "e.g. Revenue watcher", description: "What it is for", responsibilities: [], instructions: "" },
+  schedule: { kind: "monthly", day: 10 },
+  recipients: [],
+  checks: {},
+  versions: [],
+};
+
 export function AiRolesBoard({
   templates,
   hires,
   companies,
   founders,
   initial,
+  editorCompanies,
+  metricsByCompany,
+  copySources,
+  defaultChecksCustom,
 }: {
   templates: BoardTemplate[];
   hires: BoardHire[];
@@ -138,8 +220,15 @@ export function AiRolesBoard({
   companies: Record<string, WizardCompany[]>;
   founders: { id: string; shortName: string }[];
   initial: WizardTarget | null;
+  editorCompanies: { id: string; name: string }[];
+  metricsByCompany: Record<string, EditorMetric[]>;
+  copySources: CopySource[];
+  defaultChecksCustom: EditorTarget["checks"];
 }) {
   const [target, setTarget] = useState<WizardTarget | null>(initial);
+  const [editing, setEditing] = useState<EditorTarget | null>(null);
+  const builtIn = templates.filter((t) => !t.custom);
+  const custom = templates.filter((t) => t.custom);
   return (
     <>
       <section className="mb-6">
@@ -158,7 +247,31 @@ export function AiRolesBoard({
                 key={h.id}
                 hire={h}
                 onTune={() => setTarget({ templateKey: h.templateKey, roleName: h.roleName, hireId: h.id, companyId: h.companyId, settings: h.settings, notes: h.notes })}
+                onEdit={() => setEditing(h.editor)}
               />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="mb-6" data-testid="your-roles">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <h2 className="eyebrow">Your roles</h2>
+          <span className="text-[12px] text-muted">Made by you: pick a company, the numbers it watches and the checks it runs.</span>
+          <button
+            type="button"
+            className="btn btn-sm btn-primary ml-auto"
+            onClick={() => setEditing({ ...NEW_ROLE, recipients: founders.map((f) => f.id), checks: structuredClone(defaultChecksCustom) })}
+          >
+            Create your own role
+          </button>
+        </div>
+        {custom.length === 0 ? (
+          <div className="card px-4 py-6 text-center text-[13px] text-muted">No roles of your own yet — create one from scratch or as a copy of the Financial Analyst.</div>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2">
+            {custom.map((r) => (
+              <CustomRoleCard key={r.key} role={r} onEdit={() => setEditing(r.editor)} />
             ))}
           </div>
         )}
@@ -167,10 +280,11 @@ export function AiRolesBoard({
       <section className="mb-6">
         <h2 className="eyebrow mb-2">Roles you can hire</h2>
         <div className="grid gap-3 md:grid-cols-2">
-          {templates.map((t) => (
+          {builtIn.map((t) => (
             <div key={t.key} className="card flex flex-col gap-2 p-4" data-testid="role-template" data-role={t.key}>
               <div className="flex items-center gap-2">
                 <span className="text-[15px] font-semibold">{t.name}</span>
+                {t.edited && <span className="tag">Edited</span>}
                 {t.status === "coming_soon" ? <span className="tag tag-info ml-auto">Coming soon</span> : <span className="tag tag-ok ml-auto">Available</span>}
               </div>
               <p className="text-[13px] text-muted">{t.description}</p>
@@ -186,7 +300,7 @@ export function AiRolesBoard({
                   </p>
                 </>
               )}
-              <div className="mt-auto">
+              <div className="mt-auto flex flex-wrap gap-2">
                 <button
                   type="button"
                   className={`btn btn-sm ${t.status === "available" ? "btn-primary" : ""}`}
@@ -195,12 +309,28 @@ export function AiRolesBoard({
                 >
                   {t.status === "available" ? `Hire ${t.name}` : "Not hireable yet"}
                 </button>
+                {t.status === "available" && (
+                  <button type="button" className="btn btn-sm" onClick={() => setEditing(t.editor)}>
+                    Edit role
+                  </button>
+                )}
               </div>
             </div>
           ))}
         </div>
       </section>
 
+      {editing && (
+        <RoleEditor
+          key={`${editing.mode}:${editing.roleKey ?? ""}:${editing.hireId ?? ""}`}
+          target={editing}
+          founders={founders}
+          companies={editorCompanies}
+          metricsByCompany={metricsByCompany}
+          copySources={copySources}
+          onClose={() => setEditing(null)}
+        />
+      )}
       {target && (
         <HireWizard key={`${target.templateKey}:${target.hireId ?? target.companyId ?? ""}`} target={target} companies={companies[target.templateKey] ?? []} founders={founders} onClose={() => setTarget(null)} />
       )}

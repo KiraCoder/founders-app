@@ -5,6 +5,7 @@ import { canEditOrg } from "@/server/services/access";
 import type { ServiceContext } from "@/server/services/context";
 import { buildMetricCards, listMetricDefinitions } from "@/server/services/metrics";
 import { getOrgChart, orgExpertForCompany, orgPeopleOptions } from "@/server/services/org";
+import { orgExpertOptionsFor } from "@/server/services/org-expert";
 import { OrgBoard, type LinkedMetric } from "./OrgBoard";
 import { ApplyTemplateButton } from "./ApplyTemplateButton";
 import { OrgExpertStrip } from "./OrgExpertStrip";
@@ -66,7 +67,7 @@ export async function OrgWorkspace({
     );
   }
 
-  const [people, metricDefs, expert] = await Promise.all([orgPeopleOptions(ctx, company.id), listMetricDefinitions(ctx, company.id), orgExpertForCompany(ctx, company.id)]);
+  const [people, metricDefs, expert] = await Promise.all([orgPeopleOptions(ctx, company.id), listMetricDefinitions(ctx, company.id), orgExpertForCompany(ctx, company.id, await orgExpertOptionsFor(ctx, company.id))]);
   const linkedIds = new Set(chart.divisions.flatMap((d) => [...d.departments, ...d.archivedDepartments]).map((d) => d.metricDefinitionId).filter(Boolean));
   const cards = await buildMetricCards(
     ctx,

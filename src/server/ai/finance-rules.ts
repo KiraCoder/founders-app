@@ -22,6 +22,7 @@
  * Defect rate is itself a percentage: it is covered by "change" and "target".
  */
 import { addMonths, monthLabel, monthName } from "@/lib/ai-roles";
+import type { ChecksConfig, RatioCheck, RoleEngine } from "@/lib/ai-role-config";
 import type { IsoDate } from "@/lib/dates";
 import {
   abs,
@@ -41,7 +42,7 @@ import {
 } from "@/lib/decimal";
 
 export type Severity = "risk" | "warn" | "info";
-export type FindingRule = "change" | "ratio" | "cod_payout" | "missing" | "never_entered" | "debt_trend" | "target";
+export type FindingRule = "change" | "ratio" | "cod_payout" | "missing" | "never_entered" | "debt_trend" | "target" | "defect_max" | "custom_ratio";
 export type Direction = "higher_is_better" | "lower_is_better" | "neutral";
 
 export const SEVERITY_ORDER: Severity[] = ["risk", "warn", "info"];
@@ -72,6 +73,78 @@ export interface FinanceInput {
   period: IsoDate;
   series: MonthSeries[];
   thresholds: { changePct: number; riskChangePct: number };
+  /**
+   * Which checks run and with which thresholds (the AI role editor). Absent = the defaults,
+   * derived from `thresholds` — exactly the analysis from before the editor.
+   */
+  checks?: AnalysisChecks;
+}
+
+/** Resolved check settings for one analysis (percentages as whole numbers). */
+export interface AnalysisChecks {
+  changePrev: { enabled: boolean; warn: number; risk: number };
+  changeAvg: { enabled: boolean; warn: number; risk: number };
+  /** The built-in ratios (revenue per order, …), with the "vs the month before" thresholds. */
+  ratios: boolean;
+  /** COD paid out / collected: warn at or below `warnBelow` %, risk at or below `riskBelow` %. */
+  cod: { enabled: boolean; warnBelow: number; riskBelow: number };
+  defectMax: { enabled: boolean; maxPct: number };
+  debtTrend: { enabled: boolean; months: number };
+  target: boolean;
+  missing: boolean;
+  /** Custom roles: ratio between two chosen numbers with a min / max. */
+  customRatios: RatioCheck[];
+}
+
+/** The defaults: what the Financial Analyst did before checks were editable. */
+export function defaultAnalysisChecks(t: { changePct: number; riskChangePct: number }): AnalysisChecks {
+  return {
+    changePrev: { enabled: true, warn: t.changePct, risk: t.riskChangePct },
+    changeAvg: { enabled: true, warn: t.changePct, risk: t.riskChangePct },
+    ratios: true,
+    cod: { enabled: true, warnBelow: 100 - t.changePct, riskBelow: 100 - t.riskChangePct },
+    defectMax: { enabled: false, maxPct: 3 },
+    debtTrend: { enabled: true, months: 3 },
+    target: true,
+    missing: true,
+    customRatios: [],
+  };
+}
+
+const numOr = (v: unknown, fallback: number): number => (typeof v === "number" ? v : fallback);
+
+/**
+ * Saved checks (src/lib/ai-role-config.ts, already normalized) → the analysis settings.
+ * `thresholds` are the hire's "vs the month before" thresholds (the Tune / editor values).
+ * A custom role has only the generic checks: built-in ratios, COD and debt are off.
+ */
+export function analysisChecksFrom(
+  engine: RoleEngine,
+  checks: ChecksConfig,
+  thresholds: { changePct: number; riskChangePct: number },
+  ratioChecks: readonly RatioCheck[] = [],
+): AnalysisChecks {
+  const d = defaultAnalysisChecks(thresholds);
+  const on = (id: string, dflt: boolean) => (checks[id] ? checks[id]!.enabled === true : dflt);
+  const avg = checks.change_avg ?? { enabled: true };
+  const cod = checks.cod_payout ?? { enabled: true };
+  const custom = engine === "custom";
+  return {
+    changePrev: { enabled: on("change_prev", true), warn: thresholds.changePct, risk: thresholds.riskChangePct },
+    changeAvg: { enabled: on("change_avg", true), warn: numOr(avg.warnPct, thresholds.changePct), risk: numOr(avg.riskPct, thresholds.riskChangePct) },
+    ratios: custom ? false : on("ratios", true),
+    cod: { enabled: custom ? false : on("cod_payout", true), warnBelow: numOr(cod.warnBelowPct, d.cod.warnBelow), riskBelow: numOr(cod.riskBelowPct, d.cod.riskBelow) },
+    defectMax: { enabled: custom ? false : on("defect_max", false), maxPct: numOr(checks.defect_max?.maxPct, 3) },
+    debtTrend: { enabled: custom ? false : on("debt_trend", true), months: numOr(checks.debt_trend?.months, 3) },
+    target: on("target", true),
+    missing: on("missing", true),
+    customRatios: custom ? ratioChecks.filter((r) => r.enabled) : [],
+  };
+}
+
+/** Months of history an analysis needs before the month itself (3, more for a longer debt trend). */
+export function historyMonthsFor(c: AnalysisChecks | undefined): number {
+  return Math.max(3, c?.debtTrend.enabled ? c.debtTrend.months : 3);
 }
 
 export interface FindingNumber {
@@ -144,27 +217,25 @@ interface Comparison {
  * September"), not a risk because it is +87.5% vs the average; 100, 100, 10 → 30 is a risk
  * ("fell 57.1% vs the 3-month average"), not info because it rose vs September.
  */
-function changeRule(s: MonthSeries, input: FinanceInput): Finding | null {
+function changeRule(s: MonthSeries, input: FinanceInput, checks: AnalysisChecks): Finding | null {
   const p = input.period;
   const cur = value(s, p);
   if (cur === null) return null;
-  const T = dec(input.thresholds.changePct);
-  const R = dec(input.thresholds.riskChangePct);
   const prevP = addMonths(p, -1);
   const prev = value(s, prevP);
   const hist = [1, 2, 3].map((n) => value(s, addMonths(p, -n)));
   const avg = hist.every((v) => v !== null) ? divInt(sum(hist as Dec[]), 3) : null;
 
   const hits: Comparison[] = [];
-  for (const [basis, base, label] of [
-    ["prev", prev, monthName(prevP)],
-    ["avg", avg, "the 3-month average"],
+  for (const [basis, base, label, c] of [
+    ["prev", prev, monthName(prevP), checks.changePrev],
+    ["avg", avg, "the 3-month average", checks.changeAvg],
   ] as const) {
-    if (base === null || !changeAtLeast(cur, base, T)) continue;
+    if (!c.enabled || base === null || !changeAtLeast(cur, base, dec(c.warn))) continue;
     hits.push({
       basis,
       base,
-      severity: severityFor(s.direction, cmp(cur, base) > 0, changeAtLeast(cur, base, R)),
+      severity: severityFor(s.direction, cmp(cur, base) > 0, changeAtLeast(cur, base, dec(c.risk))),
       phrase: movePhrase(cur, base, s.unit, label),
     });
   }
@@ -221,12 +292,12 @@ function ratioAt(num: MonthSeries, den: MonthSeries, p: IsoDate, unit: string): 
   return unit === "%" ? pctOf(n, d) : div(n, d);
 }
 
-function ratioRules(input: FinanceInput): Finding[] {
+function ratioRules(input: FinanceInput, checks: AnalysisChecks): Finding[] {
   const out: Finding[] = [];
   const p = input.period;
   const prevP = addMonths(p, -1);
-  const T = dec(input.thresholds.changePct);
-  const R = dec(input.thresholds.riskChangePct);
+  const T = dec(checks.changePrev.warn);
+  const R = dec(checks.changePrev.risk);
   for (const r of RATIO_RULES) {
     for (const num of input.series.filter((s) => s.key === r.numerator)) {
       const den = input.series.find((s) => s.key === r.denominator && s.unitSlug === num.unitSlug);
@@ -258,7 +329,7 @@ function ratioRules(input: FinanceInput): Finding[] {
   return out;
 }
 
-function codPayoutRule(input: FinanceInput): Finding | null {
+function codPayoutRule(input: FinanceInput, checks: AnalysisChecks): Finding | null {
   const collected = input.series.find((s) => s.key === "cod_collected");
   const paid = input.series.find((s) => s.key === "cod_paid_out");
   if (!collected || !paid) return null;
@@ -268,8 +339,7 @@ function codPayoutRule(input: FinanceInput): Finding | null {
   if (c === null || o === null || c <= 0n) return null;
   const share = pctOf(o, c)!;
   const hundred = dec(100);
-  const T = dec(input.thresholds.changePct);
-  const R = dec(input.thresholds.riskChangePct);
+  const T = dec(checks.changePrev.warn);
   const numbers = [
     { label: `${collected.label} · ${monthLabel(p)}`, value: formatDec(c, collected.unit) },
     { label: `${paid.label} · ${monthLabel(p)}`, value: formatDec(o, paid.unit) },
@@ -283,10 +353,11 @@ function codPayoutRule(input: FinanceInput): Finding | null {
     metricKeys: [paid.key, collected.key],
     numbers,
   };
-  if (cmp(sub(hundred, share), T) >= 0) {
+  // share ≤ warnBelow ⇔ (100 − share) ≥ (100 − warnBelow): the default warnBelow = 100 − T.
+  if (cmp(share, dec(checks.cod.warnBelow)) <= 0) {
     return {
       ...base,
-      severity: cmp(sub(hundred, share), R) >= 0 ? "risk" : "warn",
+      severity: cmp(share, dec(checks.cod.riskBelow)) <= 0 ? "risk" : "warn",
       sentence: `Only ${formatDec(share, "%")} of COD collected in ${monthName(p)} was paid out to shops: ${formatDec(c, collected.unit)} collected, ${formatDec(o, paid.unit)} paid out (${formatDec(sub(c, o), collected.unit)} not paid out yet).`,
     };
   }
@@ -337,14 +408,15 @@ function missingRules(input: FinanceInput): Finding[] {
   return out;
 }
 
-function debtTrendRule(input: FinanceInput): Finding | null {
+function debtTrendRule(input: FinanceInput, months: number): Finding | null {
   const s = input.series.find((x) => x.key === "intercompany_debt");
   if (!s) return null;
-  const months = [3, 2, 1, 0].map((n) => addMonths(input.period, -n));
-  const vals = months.map((m) => value(s, m));
+  const ms = Array.from({ length: months + 1 }, (_, i) => addMonths(input.period, i - months));
+  const vals = ms.map((m) => value(s, m));
   if (vals.some((v) => v === null)) return null;
   const v = vals as Dec[];
-  if (!(v[0]! < v[1]! && v[1]! < v[2]! && v[2]! < v[3]!)) return null;
+  if (!v.every((x, i) => i === 0 || v[i - 1]! < x)) return null;
+  const last = v.length - 1;
   return {
     id: "debt_trend:intercompany_debt:",
     rule: "debt_trend",
@@ -352,19 +424,19 @@ function debtTrendRule(input: FinanceInput): Finding | null {
     company: input.companyName,
     metrics: [s.label],
     metricKeys: [s.key],
-    numbers: months.map((m, i) => ({ label: `${s.label} · ${monthLabel(m)}`, value: formatDec(v[i]!, s.unit) })),
-    sentence: `${s.label} grew 3 months in a row: ${v.map((x) => formatDec(x, s.unit)).join(" → ")} (${shortMonth(months[0]!)}–${shortMonth(months[3]!)}), +${formatDec(sub(v[3]!, v[0]!), s.unit)} in total.`,
+    numbers: ms.map((m, i) => ({ label: `${s.label} · ${monthLabel(m)}`, value: formatDec(v[i]!, s.unit) })),
+    sentence: `${s.label} grew ${months} months in a row: ${v.map((x) => formatDec(x, s.unit)).join(" → ")} (${shortMonth(ms[0]!)}–${shortMonth(ms[last]!)}), +${formatDec(sub(v[last]!, v[0]!), s.unit)} in total.`,
   };
 }
 
-function targetRule(s: MonthSeries, input: FinanceInput): Finding | null {
+function targetRule(s: MonthSeries, input: FinanceInput, checks: AnalysisChecks): Finding | null {
   if (s.target === null || s.direction === "neutral") return null;
   const cur = value(s, input.period);
   if (cur === null) return null;
   const target = dec(s.target);
   const missed = s.direction === "higher_is_better" ? cmp(cur, target) < 0 : cmp(cur, target) > 0;
   if (!missed) return null;
-  const R = dec(input.thresholds.riskChangePct);
+  const R = dec(checks.changePrev.risk);
   const where = s.direction === "higher_is_better" ? "below" : "above";
   return {
     id: `target:${s.key}:${s.unitSlug ?? ""}`,
@@ -381,26 +453,86 @@ function targetRule(s: MonthSeries, input: FinanceInput): Finding | null {
   };
 }
 
-const RULE_ORDER: FindingRule[] = ["debt_trend", "cod_payout", "target", "change", "ratio", "missing", "never_entered"];
+/** Defect rate above a ceiling (editor check, off by default). */
+function defectMaxRule(s: MonthSeries, input: FinanceInput, maxPct: number): Finding | null {
+  if (s.key !== "defect_pct") return null;
+  const cur = value(s, input.period);
+  if (cur === null || cmp(cur, dec(maxPct)) <= 0) return null;
+  return {
+    id: `defect_max:${s.key}:${s.unitSlug ?? ""}`,
+    rule: "defect_max",
+    severity: "warn",
+    company: input.companyName,
+    metrics: [s.label],
+    metricKeys: [s.key],
+    numbers: [
+      { label: `${s.label} · ${monthLabel(input.period)}`, value: formatDec(cur, "%") },
+      { label: `${s.label} · ceiling`, value: formatDec(dec(maxPct), "%") },
+    ],
+    sentence: `${s.label} was ${pct1(cur)} in ${monthName(input.period)}, above the ${maxPct}% ceiling.`,
+  };
+}
+
+/** A custom role's ratio between two chosen numbers outside its min / max. */
+function customRatioRules(input: FinanceInput, ratios: readonly RatioCheck[]): Finding[] {
+  const out: Finding[] = [];
+  const p = input.period;
+  for (const r of ratios) {
+    for (const num of input.series.filter((s) => s.key === r.numeratorKey)) {
+      const den = input.series.find((s) => s.key === r.denominatorKey && s.unitSlug === num.unitSlug) ?? input.series.find((s) => s.key === r.denominatorKey);
+      if (!den) continue;
+      const unit = r.percent ? "%" : "";
+      const cur = ratioAt(num, den, p, r.percent ? "%" : "ratio");
+      if (cur === null) continue;
+      const low = r.min !== null && cmp(cur, dec(r.min)) < 0;
+      const high = r.max !== null && cmp(cur, dec(r.max)) > 0;
+      if (!low && !high) continue;
+      const label = `${num.label} / ${den.label}`;
+      const limit = low ? r.min! : r.max!;
+      const shown = (v: Dec) => formatDec(v, unit || undefined);
+      out.push({
+        id: `custom_ratio:${r.id}:${num.unitSlug ?? ""}`,
+        rule: "custom_ratio",
+        severity: "warn",
+        company: input.companyName,
+        metrics: [num.label, den.label],
+        metricKeys: [num.key, den.key],
+        numbers: [
+          { label: `${label} · ${monthLabel(p)}`, value: shown(cur) },
+          { label: `${label} · ${low ? "minimum" : "maximum"}`, value: shown(dec(limit)) },
+        ],
+        sentence: `${label} was ${shown(cur)} in ${monthName(p)}, ${low ? "below the minimum" : "above the maximum"} of ${shown(dec(limit))}.`,
+      });
+    }
+  }
+  return out;
+}
+
+const RULE_ORDER: FindingRule[] = ["debt_trend", "cod_payout", "target", "defect_max", "change", "ratio", "custom_ratio", "missing", "never_entered"];
 
 /** All findings for one company and month, most severe first. Deterministic for the same input. */
 export function analyseFinance(input: FinanceInput): Finding[] {
+  const checks = input.checks ?? defaultAnalysisChecks(input.thresholds);
   const out: Finding[] = [];
-  const debt = debtTrendRule(input);
+  const debt = checks.debtTrend.enabled ? debtTrendRule(input, checks.debtTrend.months) : null;
   if (debt) out.push(debt);
-  const cod = codPayoutRule(input);
+  const cod = checks.cod.enabled ? codPayoutRule(input, checks) : null;
   if (cod) out.push(cod);
   for (const s of input.series) {
-    const t = targetRule(s, input);
+    const t = checks.target ? targetRule(s, input, checks) : null;
     if (t) out.push(t);
+    const d = checks.defectMax.enabled ? defectMaxRule(s, input, checks.defectMax.maxPct) : null;
+    if (d) out.push(d);
   }
   for (const s of input.series) {
     // The debt trend has its own rule; a growing debt is not also a "change".
     if (s.key === "intercompany_debt" && debt) continue;
-    const c = changeRule(s, input);
+    const c = changeRule(s, input, checks);
     if (c) out.push(c);
   }
-  out.push(...ratioRules(input), ...missingRules(input));
+  if (checks.ratios) out.push(...ratioRules(input, checks));
+  out.push(...customRatioRules(input, checks.customRatios));
+  if (checks.missing) out.push(...missingRules(input));
   return out.sort(
     (a, b) =>
       SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity) ||

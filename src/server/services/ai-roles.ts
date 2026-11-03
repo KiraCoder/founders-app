@@ -6,7 +6,6 @@ import {
   addMonths,
   chaseDueToday,
   companyTypeFor,
-  defaultSettings,
   firstPeriodFor,
   hireCreateSchema,
   hirePatchSchema,
@@ -14,10 +13,9 @@ import {
   monthLabel,
   prevMonth,
   monthStart,
+  runBased,
   runDueOn,
   scheduledPeriod,
-  templateByKey,
-  templateEngine,
   templateScheduleLabel,
   ROLE_TEMPLATES,
   type CompanyType,
@@ -26,8 +24,20 @@ import {
   type HireSettings,
   type RoleTemplate,
 } from "@/lib/ai-roles";
+import { ChecksError, cleanProfile, normalizeChecks, type ChecksConfig, type RoleEngine } from "@/lib/ai-role-config";
 import { addDays, todayInTimeZone, type IsoDate } from "@/lib/dates";
-import { analyseFinance, countBySeverity, severitySummary, type Finding, type MonthSeries, type Severity } from "@/server/ai/finance-rules";
+import {
+  analyseFinance,
+  analysisChecksFrom,
+  countBySeverity,
+  defaultAnalysisChecks,
+  historyMonthsFor,
+  severitySummary,
+  type AnalysisChecks,
+  type Finding,
+  type MonthSeries,
+  type Severity,
+} from "@/server/ai/finance-rules";
 import { monthlyName, monthTotalKind, monthTotalMark, monthValue, periodsInMonth, type Granularity } from "@/server/ai/month-values";
 import { generateNarrative, salaryLikeFinding } from "@/server/ai/narrative";
 import { getLlmProvider, type LlmProvider } from "@/server/ai/provider";
@@ -54,6 +64,7 @@ import { listFounders } from "@/server/notifications/founders";
 import { enqueue } from "@/server/notifications/outbox";
 import type { NeutralMessage } from "@/server/notifications/types";
 import { assertAiRolesAccess, assertCompanyAccess, assertValidId } from "./access";
+import { hireChecks, isSalaryMetric, loadConfigRows, logSettingsChange, resolveAllRoles, resolveFrom, resolveRole, roleDefaultSettings, type ResolvedRole } from "./ai-role-defs";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { DEBT_METRIC_KEY } from "./holding";
@@ -113,7 +124,19 @@ export interface RunSummary {
 export interface HireView {
   id: string;
   templateKey: string;
+  /** The hire's name (its own override, else the role's). */
   roleName: string;
+  /** The role's name (without the hire's override). */
+  roleBaseName: string;
+  engine: RoleEngine;
+  /** A founder-made role (ai_role_configs.kind = custom). */
+  custom: boolean;
+  /** Effective job description / responsibilities / instructions (hire override, else the role's). */
+  description: string;
+  responsibilities: string[];
+  instructions: string | null;
+  /** Effective rule checks (on/off + thresholds). */
+  checks: ChecksConfig;
   companyId: string;
   companySlug: string;
   companyName: string;
@@ -186,17 +209,33 @@ function runSummary(run: AiRoleRun): RunSummary {
 }
 
 /** Settings as stored, completed with defaults (older rows, partial input). */
-function settingsOf(hire: Pick<AiRoleHire, "settings">, template: RoleTemplate, type: CompanyType, founderIds: string[]): HireSettings {
-  const d = defaultSettings(template, type, founderIds);
+function settingsOf(hire: Pick<AiRoleHire, "settings">, template: ResolvedRole, type: CompanyType, founderIds: string[]): HireSettings {
+  const d = roleDefaultSettings(template, type, founderIds);
   const s = (hire.settings ?? {}) as Partial<AiHireSettingsJson>;
+  let schedule = s.schedule ?? d.schedule;
+  // Org roles always sent their line on Mondays; a row from before 0021 stored "monthly 1".
+  if (template.engine === "org_rules" && schedule.kind === "monthly" && schedule.day === 1) schedule = { kind: "weekly", weekday: 1 };
   return {
-    schedule: s.schedule ?? d.schedule,
+    schedule,
     thresholds: s.thresholds ?? d.thresholds,
     requiredMetricKeys: s.requiredMetricKeys ?? d.requiredMetricKeys,
     recipients: s.recipients ?? d.recipients,
     askUserIds: s.askUserIds ?? d.askUserIds,
     acceptMonthlyTotals: s.acceptMonthlyTotals ?? false,
     ...(s.maxDepartmentsPerHead ? { maxDepartmentsPerHead: s.maxDepartmentsPerHead } : {}),
+    ...(s.checks ? { checks: s.checks } : {}),
+    ...(s.profile && cleanProfile(s.profile) ? { profile: cleanProfile(s.profile) } : {}),
+  };
+}
+
+/** The hire's identity: its own overrides, else the role's. */
+function identityOf(role: ResolvedRole, settings: HireSettings) {
+  const p = settings.profile ?? {};
+  return {
+    roleName: p.name || role.name,
+    description: p.description || role.description,
+    responsibilities: p.responsibilities?.length ? p.responsibilities : role.responsibilities,
+    instructions: p.instructions || role.instructions || null,
   };
 }
 
@@ -229,15 +268,25 @@ async function toHireViews(db: Db, rows: HireRow[]): Promise<HireView[]> {
     .from(aiRoleRuns)
     .where(inArray(aiRoleRuns.hireId, rows.map((r) => r.hire.id)))
     .orderBy(desc(aiRoleRuns.period));
-  return rows.map(({ hire, companySlug, companyName, companyColor, hiredByName }) => {
-    const template = templateByKey(hire.templateKey)!;
+  const configs = await loadConfigRows(db);
+  return rows.flatMap(({ hire, companySlug, companyName, companyColor, hiredByName }) => {
+    const template = resolveFrom(hire.templateKey, configs.get(hire.templateKey));
+    if (!template) return [];
     const type = companyTypeFor(companySlug);
     const settings = settingsOf(hire, template, type, founderIds);
     const latest = runs.find((r) => r.hireId === hire.id);
+    const identity = identityOf(template, settings);
     return {
       id: hire.id,
       templateKey: hire.templateKey,
-      roleName: template?.name ?? hire.templateKey,
+      roleName: identity.roleName,
+      roleBaseName: template.name,
+      engine: template.engine,
+      custom: template.custom,
+      description: identity.description,
+      responsibilities: identity.responsibilities,
+      instructions: identity.instructions,
+      checks: hireChecks(template, settings),
       companyId: hire.companyId,
       companySlug,
       companyName,
@@ -258,6 +307,12 @@ async function toHireViews(db: Db, rows: HireRow[]): Promise<HireView[]> {
 
 export function listTemplates(): RoleTemplate[] {
   return [...ROLE_TEMPLATES].sort((a, b) => a.sort - b.sort);
+}
+
+/** Every role the founders can hire or edit: built-ins (with their edits) and custom roles. */
+export async function listRoles(ctx: ServiceContext): Promise<ResolvedRole[]> {
+  assertAiRolesAccess(ctx);
+  return resolveAllRoles(ctx.db);
 }
 
 export async function listHires(ctx: ServiceContext, opts: { companyId?: string } = {}): Promise<HireView[]> {
@@ -294,6 +349,7 @@ export interface CompanyMetricOption {
 
 interface MetricDef extends CompanyMetricOption {
   name: string;
+  aliases: string[];
   /** Factory / unit name ("ХБК"), null for the whole company. */
   unitName: string | null;
   unitSlug: string | null;
@@ -331,6 +387,7 @@ async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]
     id: d.id,
     key: d.key,
     name: d.name,
+    aliases: d.aliases ?? [],
     label: unitName ? `${d.name} · ${unitName}` : d.name,
     unitName: unitName ?? null,
     unit: d.unit,
@@ -344,15 +401,35 @@ async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]
   }));
 }
 
-/** The metrics a role can wait for in this company (for the Tune wizard), one entry per key. */
-export async function companyMetricOptions(ctx: ServiceContext, companyId: string): Promise<{ key: string; label: string; granularity: Granularity; unit: string }[]> {
+/**
+ * The metrics a role can wait for in this company (for the Tune wizard and the role editor),
+ * one entry per key. `payData`: a custom role may never watch it (salary guard).
+ */
+export async function companyMetricOptions(
+  ctx: ServiceContext,
+  companyId: string,
+): Promise<{ key: string; label: string; granularity: Granularity; unit: string; payData: boolean }[]> {
   assertAiRolesAccess(ctx);
   assertValidId(companyId, "Company");
   await assertCompanyAccess(ctx, companyId);
   const defs = await companyMetricDefs(ctx.db, companyId);
-  const byKey = new Map<string, { key: string; label: string; granularity: Granularity; unit: string }>();
-  for (const d of defs) if (!byKey.has(d.key)) byKey.set(d.key, { key: d.key, label: d.name, granularity: d.granularity, unit: d.unit });
+  const byKey = new Map<string, { key: string; label: string; granularity: Granularity; unit: string; payData: boolean }>();
+  for (const d of defs) {
+    const prev = byKey.get(d.key);
+    if (!prev) byKey.set(d.key, { key: d.key, label: d.name, granularity: d.granularity, unit: d.unit, payData: isSalaryMetric(d) });
+    else if (isSalaryMetric(d)) prev.payData = true;
+  }
   return [...byKey.values()];
+}
+
+/**
+ * The numbers a hire analyses: every number of the company, or — for a custom role — only
+ * the ones it watches, never pay data (the salary guard, also re-checked here at run time).
+ */
+function analysedDefs(defs: MetricDef[], role: Pick<ResolvedRole, "custom" | "watchedMetricKeys">): MetricDef[] {
+  if (!role.custom) return defs;
+  const watched = new Set(role.watchedMetricKeys);
+  return defs.filter((d) => watched.has(d.key) && !isSalaryMetric(d));
 }
 
 interface CompanyNumbers {
@@ -370,8 +447,14 @@ interface CompanyNumbers {
   hadEarlierTotal: Set<string>;
 }
 
-async function loadCompanyNumbers(db: Db, companyId: string, months: IsoDate[]): Promise<CompanyNumbers> {
-  const defs = await companyMetricDefs(db, companyId);
+async function loadCompanyNumbers(
+  db: Db,
+  companyId: string,
+  months: IsoDate[],
+  role?: Pick<ResolvedRole, "custom" | "watchedMetricKeys">,
+): Promise<CompanyNumbers> {
+  const all = await companyMetricDefs(db, companyId);
+  const defs = role ? analysedDefs(all, role) : all;
   const values = new Map<string, Map<IsoDate, string>>();
   const monthTotals = new Map<string, Map<IsoDate, string>>();
   const hadEarlier = new Set<string>();
@@ -421,8 +504,8 @@ interface Evaluation {
  * One value per metric and month. With `acceptMonthlyTotals` a daily number whose days are
  * incomplete takes the month total a founder entered (complete days always win).
  */
-function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: readonly string[], acceptMonthlyTotals = false): Evaluation {
-  const months = Array.from({ length: HISTORY_MONTHS + 1 }, (_, i) => prevMonth(period, HISTORY_MONTHS - i));
+function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: readonly string[], acceptMonthlyTotals = false, history = HISTORY_MONTHS): Evaluation {
+  const months = monthsFor(period, history);
   const missing: AiRunMissing[] = [];
   const series: MonthSeries[] = [];
   const inputs: AiRunInputs = { months, metrics: [] };
@@ -480,6 +563,22 @@ function evaluateNumbers(numbers: CompanyNumbers, period: IsoDate, required: rea
 
 const sha256 = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
 
+/** The month analysed and the `history` months before it, oldest first. */
+function monthsFor(period: IsoDate, history: number): IsoDate[] {
+  return Array.from({ length: history + 1 }, (_, i) => prevMonth(period, history - i));
+}
+
+/**
+ * What the analysis of a hire depends on besides the numbers: its checks (only when they
+ * differ from the defaults, so reports made before the editor keep their hash) and, for a
+ * custom role, the numbers it watches and its ratio checks.
+ */
+function analysisKey(hc: Pick<HireContext, "analysis" | "settings" | "template">): string | undefined {
+  const differs = JSON.stringify(hc.analysis) !== JSON.stringify(defaultAnalysisChecks(hc.settings.thresholds));
+  if (!differs && !hc.template.custom) return undefined;
+  return JSON.stringify({ analysis: hc.analysis, ...(hc.template.custom ? { watched: [...hc.template.watchedMetricKeys].sort() } : {}) });
+}
+
 /** The numbers an analysis used (a correction changes it → "Numbers changed"). */
 function hashInputs(inputs: AiRunInputs): string {
   return sha256({ inputs });
@@ -489,11 +588,12 @@ function hashInputs(inputs: AiRunInputs): string {
  * The settings an analysis used (a Tune changes it → "Settings changed"). "Accept monthly
  * totals" is part of it only when on, so reports made before the switch existed keep their hash.
  */
-function hashSettings(required: readonly string[], thresholds: HireSettings["thresholds"], acceptMonthlyTotals = false): string {
+function hashSettings(required: readonly string[], thresholds: HireSettings["thresholds"], acceptMonthlyTotals = false, checks?: string): string {
   return sha256({
     required: [...required].sort(),
     thresholds: { changePct: thresholds.changePct, riskChangePct: thresholds.riskChangePct },
     ...(acceptMonthlyTotals ? { acceptMonthlyTotals: true } : {}),
+    ...(checks ? { checks } : {}),
   });
 }
 
@@ -503,7 +603,7 @@ function legacyHash(inputs: AiRunInputs, required: readonly string[], thresholds
 }
 
 /** What changed since a report was made: its numbers, the role's settings, or neither. */
-function reportDrift(run: Pick<AiRoleRun, "inputsHash" | "settingsHash">, inputs: AiRunInputs, settings: HireSettings): { inputs: boolean; settings: boolean } {
+function reportDrift(run: Pick<AiRoleRun, "inputsHash" | "settingsHash">, inputs: AiRunInputs, settings: HireSettings, checks?: string): { inputs: boolean; settings: boolean } {
   if (!run.inputsHash) return { inputs: false, settings: false };
   if (run.settingsHash === null) {
     // Legacy row: one combined hash, so a difference can't be split — report it as numbers.
@@ -511,7 +611,7 @@ function reportDrift(run: Pick<AiRoleRun, "inputsHash" | "settingsHash">, inputs
   }
   return {
     inputs: hashInputs(inputs) !== run.inputsHash,
-    settings: hashSettings(settings.requiredMetricKeys, settings.thresholds, settings.acceptMonthlyTotals) !== run.settingsHash,
+    settings: hashSettings(settings.requiredMetricKeys, settings.thresholds, settings.acceptMonthlyTotals, checks) !== run.settingsHash,
   };
 }
 
@@ -529,8 +629,14 @@ export interface EngineOptions {
 
 interface HireContext {
   hire: AiRoleHire;
-  template: RoleTemplate;
+  template: ResolvedRole;
   settings: HireSettings;
+  /** The hire's name (its own override, else the role's). */
+  roleName: string;
+  instructions: string | null;
+  checks: ChecksConfig;
+  /** The checks as the analysis runs them (finance / custom roles). */
+  analysis: AnalysisChecks;
   companyName: string;
   companySlug: string;
 }
@@ -538,13 +644,20 @@ interface HireContext {
 async function hireContext(db: Db, hireId: string): Promise<HireContext | null> {
   const [row] = await loadHireRows(db, eq(aiRoleHires.id, hireId));
   if (!row) return null;
-  const template = templateByKey(row.hire.templateKey);
+  const template = await resolveRole(db, row.hire.templateKey);
   if (!template) return null;
   const founderIds = (await listFounders(db)).map((f) => f.id);
+  const settings = settingsOf(row.hire, template, companyTypeFor(row.companySlug), founderIds);
+  const checks = hireChecks(template, settings);
+  const identity = identityOf(template, settings);
   return {
     hire: row.hire,
     template,
-    settings: settingsOf(row.hire, template, companyTypeFor(row.companySlug), founderIds),
+    settings,
+    roleName: identity.roleName,
+    instructions: identity.instructions,
+    checks,
+    analysis: analysisChecksFrom(template.engine, checks, settings.thresholds, template.ratioChecks),
     companyName: row.companyName,
     companySlug: row.companySlug,
   };
@@ -567,16 +680,18 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
   };
   try {
     const required = hc.settings.requiredMetricKeys;
-    const months = Array.from({ length: HISTORY_MONTHS + 1 }, (_, i) => prevMonth(run.period, HISTORY_MONTHS - i));
-    const numbers = await loadCompanyNumbers(db, hc.hire.companyId, months);
-    const ev = evaluateNumbers(numbers, run.period, required, hc.settings.acceptMonthlyTotals);
+    const history = historyMonthsFor(hc.analysis);
+    const months = monthsFor(run.period, history);
+    const numbers = await loadCompanyNumbers(db, hc.hire.companyId, months, hc.template);
+    const ev = evaluateNumbers(numbers, run.period, required, hc.settings.acceptMonthlyTotals, history);
+    const checksHash = analysisKey(hc);
     if (ev.missing.length) {
       // A report already made stays (numbers were removed / settings changed later): only a
       // run that has not been analysed goes (back) to waiting.
       if (run.status === "analysed" || run.status === "reported") return run;
       return update({ status: "waiting_for_data", missing: ev.missing, error: null, attempts: 0, nextAttemptAt: null });
     }
-    const drift = reportDrift(run, ev.inputs, hc.settings);
+    const drift = reportDrift(run, ev.inputs, hc.settings, checksHash);
     let current = run;
     if (!((run.status === "analysed" || run.status === "reported") && !drift.inputs && !drift.settings)) {
       if (run.status !== "analysed" && run.status !== "reported") current = await update({ status: "ready", missing: [], error: null });
@@ -585,9 +700,10 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
         period: run.period,
         series: ev.series,
         thresholds: hc.settings.thresholds,
+        checks: hc.analysis,
       });
       const narrative = await generateNarrative(
-        { roleName: hc.template.name, companyName: hc.companyName, periodLabel: monthLabel(run.period), findings },
+        { roleName: hc.roleName, companyName: hc.companyName, periodLabel: monthLabel(run.period), instructions: hc.instructions, findings },
         opts.provider ?? getLlmProvider(),
       );
       // Written under the row lock that "Create task" also takes: the task links are read from
@@ -604,7 +720,7 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
             missing: [],
             inputs: ev.inputs,
             inputsHash: hashInputs(ev.inputs),
-            settingsHash: hashSettings(required, hc.settings.thresholds, hc.settings.acceptMonthlyTotals),
+            settingsHash: hashSettings(required, hc.settings.thresholds, hc.settings.acceptMonthlyTotals, checksHash),
             findings,
             narrative: narrative.text,
             narrativeStatus: narrative.status,
@@ -681,9 +797,9 @@ export async function planAiRoles(db: Db, now: Date, opts: EngineOptions = {}): 
       if (!hc || hc.template.status !== "available") continue;
       // The Org Structure Expert has no monthly runs: its checks are live (org board) and its
       // Monday line is composed with the morning summary (orchestrator).
-      if (templateEngine(hc.template) !== "finance") continue;
+      if (!runBased(hc.template.engine)) continue;
       const period = scheduledPeriod(todayIso, hc.settings.schedule);
-      if (period >= firstPeriodFor(hc.hire.hiredOn)) {
+      if (period && period >= firstPeriodFor(hc.hire.hiredOn)) {
         const [exists] = await db.select({ id: aiRoleRuns.id }).from(aiRoleRuns).where(and(eq(aiRoleRuns.hireId, id), eq(aiRoleRuns.period, period)));
         if (!exists) {
           await ensureRun(db, id, period, "schedule", now);
@@ -887,7 +1003,7 @@ export async function collectAiRequests(ctx: ServiceContext, opts: { registry?: 
     out.push({
       requestId: r.id,
       hireId: r.hireId,
-      roleName: hc.template.name,
+      roleName: hc.roleName,
       companyName: hc.companyName,
       companySlug: hc.companySlug,
       months: waiting.map((w) => w.period),
@@ -919,8 +1035,17 @@ export async function markRequestsShown(db: Db, ids: readonly string[], todayIso
 // Hire / tune / pause / run now
 // ---------------------------------------------------------------------------
 
-async function validateSettings(ctx: ServiceContext, companyId: string, s: HireSettings): Promise<HireSettings> {
+async function validateSettings(ctx: ServiceContext, companyId: string, s: HireSettings, role?: ResolvedRole): Promise<HireSettings> {
   const parsed = hireSettingsSchema.parse(s);
+  let checks: ChecksConfig | undefined;
+  if (parsed.checks) {
+    try {
+      checks = normalizeChecks(role?.engine ?? "finance", parsed.checks);
+    } catch (err) {
+      if (err instanceof ChecksError) throw new ServiceError("validation", err.message, { checks: [err.message] });
+      throw err;
+    }
+  }
   const founders = new Set((await listFounders(ctx.db)).map((f) => f.id));
   for (const [field, ids] of [["recipients", parsed.recipients], ["askUserIds", parsed.askUserIds]] as const) {
     if (ids.some((id) => !founders.has(id))) {
@@ -932,38 +1057,52 @@ async function validateSettings(ctx: ServiceContext, companyId: string, s: HireS
   if (unknown.length) {
     throw new ServiceError("validation", `Not a number of this company: ${unknown.join(", ")}`, { requiredMetricKeys: ["Choose numbers this company tracks"] });
   }
+  if (role?.custom) {
+    // A custom role waits only for numbers it watches (and so never for pay data).
+    const notWatched = parsed.requiredMetricKeys.filter((k) => !role.watchedMetricKeys.includes(k));
+    if (notWatched.length) {
+      throw new ServiceError("validation", `The role does not watch: ${notWatched.join(", ")}`, { requiredMetricKeys: ["Choose numbers the role watches"] });
+    }
+  }
+  const { checks: _raw, profile: rawProfile, ...rest } = parsed;
+  void _raw;
+  const profile = cleanProfile(rawProfile);
   return {
-    ...parsed,
+    ...rest,
     requiredMetricKeys: [...new Set(parsed.requiredMetricKeys)],
     recipients: [...new Set(parsed.recipients)],
     askUserIds: [...new Set(parsed.askUserIds)],
     acceptMonthlyTotals: parsed.acceptMonthlyTotals ?? false,
+    ...(checks ? { checks } : {}),
+    ...(profile ? { profile } : {}),
   };
 }
 
 export async function hireRole(ctx: ServiceContext, input: HireCreateInput): Promise<HireView> {
   assertAiRolesAccess(ctx);
   const data = hireCreateSchema.parse(input);
-  const template = templateByKey(data.templateKey);
+  const template = await resolveRole(ctx.db, data.templateKey);
   if (!template) throw new ServiceError("not_found", "Role not found");
   if (template.status !== "available") throw new ServiceError("validation", `${template.name} is coming soon and can't be hired yet`);
   await assertCompanyAccess(ctx, data.companyId);
+  // A custom role works for its own company only (isolation).
+  if (template.custom && template.companyId !== data.companyId) throw new ServiceError("validation", `${template.name} works for another company`);
   const [company] = await ctx.db.select({ slug: companies.slug, name: companies.name }).from(companies).where(eq(companies.id, data.companyId));
   const defs = await companyMetricDefs(ctx.db, data.companyId);
-  const orgRules = templateEngine(template) === "org_rules";
+  const orgRules = template.engine === "org_rules";
   if (!defs.length && !orgRules) {
     throw new ServiceError("validation", `${company!.name} has no numbers yet, so the ${template.name} would have nothing to analyse`);
   }
   const founderIds = (await listFounders(ctx.db)).map((f) => f.id);
   const type = companyTypeFor(company!.slug);
-  const defaults = defaultSettings(template, type, founderIds);
-  if (!defaults.requiredMetricKeys.length && !orgRules) defaults.requiredMetricKeys = [...new Set(defs.filter((d) => d.granularity === "month").map((d) => d.key))];
+  const defaults = roleDefaultSettings(template, type, founderIds);
+  if (!defaults.requiredMetricKeys.length && !orgRules && !template.custom) defaults.requiredMetricKeys = [...new Set(defs.filter((d) => d.granularity === "month").map((d) => d.key))];
   // The org checks need no numbers and ask nobody: whoever gets its line is also "asked".
   if (orgRules) {
     defaults.requiredMetricKeys = [];
     if (data.settings?.recipients?.length) defaults.askUserIds = [...data.settings.recipients];
   }
-  const settings = await validateSettings(ctx, data.companyId, { ...defaults, ...(data.settings ?? {}) } as HireSettings);
+  const settings = await validateSettings(ctx, data.companyId, { ...defaults, ...(data.settings ?? {}) } as HireSettings, template);
   await syncAiTemplates(ctx.db);
   const rows = await ctx.db
     .insert(aiRoleHires)
@@ -980,39 +1119,69 @@ export async function hireRole(ctx: ServiceContext, input: HireCreateInput): Pro
     .onConflictDoNothing({ target: [aiRoleHires.templateKey, aiRoleHires.companyId] })
     .returning({ id: aiRoleHires.id });
   if (!rows[0]) throw new ServiceError("conflict", `The ${template.name} is already hired for ${company!.name} — tune it instead`);
+  await logSettingsChange(ctx.db, { scope: "hire", roleKey: template.key, hireId: rows[0].id, action: "create", before: null, after: hireSnapshot(settings, data.notes ?? null), userId: ctx.user.id, now: ctx.now });
   return getHire(ctx, rows[0].id);
 }
 
 /** Tune (settings, notes) and/or pause / resume. Pausing closes the hire's data requests. */
-export async function updateHire(ctx: ServiceContext, id: unknown, input: HirePatchInput): Promise<HireView> {
+export async function updateHire(ctx: ServiceContext, id: unknown, input: HirePatchInput, opts: { revertedTo?: number } = {}): Promise<HireView> {
   const current = await getHire(ctx, id);
   const data = hirePatchSchema.parse(input);
   const set: Partial<typeof aiRoleHires.$inferInsert> = { updatedAt: ctx.now };
-  if (data.settings) set.settings = await validateSettings(ctx, current.companyId, { ...current.settings, ...data.settings } as HireSettings);
+  const role = await resolveRole(ctx.db, current.templateKey);
+  const [stored] = await ctx.db.select({ settings: aiRoleHires.settings, notes: aiRoleHires.notes }).from(aiRoleHires).where(eq(aiRoleHires.id, current.id));
+  if (data.settings) {
+    // `null` in a patch clears an override (checks / profile → the role's again).
+    const merged: Record<string, unknown> = { ...current.settings, ...data.settings };
+    for (const k of ["checks", "profile"] as const) if (data.settings[k] === null) delete merged[k];
+    set.settings = await validateSettings(ctx, current.companyId, merged as HireSettings, role ?? undefined);
+  }
   if (data.notes !== undefined) set.notes = data.notes;
   if (data.status && data.status !== current.status) {
     set.status = data.status;
     set.pausedAt = data.status === "paused" ? ctx.now : null;
   }
   await ctx.db.update(aiRoleHires).set(set).where(eq(aiRoleHires.id, current.id));
+  const before = hireSnapshot(stored!.settings as HireSettings, stored!.notes);
+  const after = hireSnapshot((set.settings ?? stored!.settings) as HireSettings, set.notes !== undefined ? (set.notes ?? null) : stored!.notes);
+  if (JSON.stringify(before) !== JSON.stringify(after)) {
+    await logSettingsChange(ctx.db, {
+      scope: "hire",
+      roleKey: current.templateKey,
+      hireId: current.id,
+      action: opts.revertedTo ? "revert" : "edit",
+      revertedTo: opts.revertedTo,
+      before,
+      after,
+      userId: ctx.user.id,
+      now: ctx.now,
+    });
+  }
   if (data.status === "paused") {
     await ctx.db
       .update(aiDataRequests)
       .set({ status: "cancelled", reason: "paused", resolvedAt: ctx.now })
       .where(and(eq(aiDataRequests.hireId, current.id), eq(aiDataRequests.status, "active")));
   } else if (set.settings) {
-    const hc = await hireContext(ctx.db, current.id);
-    if (hc && hc.hire.status === "active") {
-      // Re-check runs that are not done with the new settings (numbers needed may have changed).
-      const open = await ctx.db
-        .select()
-        .from(aiRoleRuns)
-        .where(and(eq(aiRoleRuns.hireId, current.id), inArray(aiRoleRuns.status, ["waiting_for_data", "failed"])));
-      for (const run of open) await evaluateRun(ctx.db, hc, run, ctx.now);
-      await syncDataRequests(ctx.db, hc, today(ctx), ctx.now);
-    }
+    await recheckOpenRuns(ctx.db, current.id, ctx.now, today(ctx));
   }
   return getHire(ctx, current.id);
+}
+
+/**
+ * After a settings change (a hire's, or its role's): re-checks the runs that are not done
+ * with the new settings (the numbers needed may have changed) and keeps the data requests
+ * in step. Reports already made stay as they are ("Settings changed" on the report).
+ */
+export async function recheckOpenRuns(db: Db, hireId: string, now: Date, todayIso: IsoDate): Promise<void> {
+  const hc = await hireContext(db, hireId);
+  if (!hc || hc.hire.status !== "active" || !runBased(hc.template.engine)) return;
+  const open = await db
+    .select()
+    .from(aiRoleRuns)
+    .where(and(eq(aiRoleRuns.hireId, hireId), inArray(aiRoleRuns.status, ["waiting_for_data", "failed"])));
+  for (const run of open) await evaluateRun(db, hc, run, now);
+  await syncDataRequests(db, hc, todayIso, now);
 }
 
 /**
@@ -1023,7 +1192,7 @@ export async function runHireNow(ctx: ServiceContext, hireId: unknown, opts: Eng
   const view = await getHire(ctx, hireId);
   if (view.status !== "active") throw new ServiceError("validation", "This role is paused — resume it first");
   const hc = (await hireContext(ctx.db, view.id))!;
-  if (templateEngine(hc.template) !== "finance") {
+  if (!runBased(hc.template.engine)) {
     throw new ServiceError("validation", `The ${hc.template.name} has no monthly report: its checks are live on the Org structure page`);
   }
   const period = prevMonth(monthStart(today(ctx)));
@@ -1048,16 +1217,18 @@ export async function getRun(ctx: ServiceContext, id: unknown): Promise<RunView>
   const firstMissing = defs.find((d) => d.id === run.missing.find((m) => !fromHolding.includes(m.metricId))?.metricId);
   let inputsChanged = false;
   let settingsChanged = false;
-  if ((run.status === "reported" || run.status === "analysed") && run.inputsHash) {
-    const months = Array.from({ length: HISTORY_MONTHS + 1 }, (_, i) => prevMonth(run.period, HISTORY_MONTHS - i));
+  const hc = (run.status === "reported" || run.status === "analysed") && run.inputsHash ? await hireContext(ctx.db, hire.id) : null;
+  if (hc) {
+    const history = historyMonthsFor(hc.analysis);
     const ev = evaluateNumbers(
-      await loadCompanyNumbers(ctx.db, hire.companyId, months),
+      await loadCompanyNumbers(ctx.db, hire.companyId, monthsFor(run.period, history), hc.template),
       run.period,
       hire.settings.requiredMetricKeys,
       hire.settings.acceptMonthlyTotals,
+      history,
     );
     if (!ev.missing.length) {
-      const drift = reportDrift(run, ev.inputs, hire.settings);
+      const drift = reportDrift(run, ev.inputs, hire.settings, analysisKey(hc));
       inputsChanged = drift.inputs;
       settingsChanged = drift.settings;
     }
@@ -1213,3 +1384,8 @@ export function requestDueOn(period: IsoDate, settings: HireSettings): IsoDate {
 }
 
 export { periodsInMonth };
+
+/** What a hire's settings log stores per version: its settings and notes. */
+function hireSnapshot(settings: HireSettings, notes: string | null): Record<string, unknown> {
+  return { settings, notes };
+}

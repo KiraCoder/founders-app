@@ -915,7 +915,7 @@ export const aiRoleTemplates = pgTable("ai_role_templates", {
   responsibilities: jsonb("responsibilities").$type<string[]>().notNull().default([]),
   /** { byCompanyType: { delivery: ["revenue", …] }, optionalUploads: [...] } */
   requiredData: jsonb("required_data").$type<{ byCompanyType: Record<string, string[]>; optionalUploads: string[] }>().notNull(),
-  defaultSchedule: jsonb("default_schedule").$type<{ kind: "monthly"; day: number }>().notNull(),
+  defaultSchedule: jsonb("default_schedule").$type<AiScheduleJson>().notNull(),
   reportSections: jsonb("report_sections").$type<string[]>().notNull().default([]),
   sort: integer("sort").notNull().default(100),
   updatedAt: updatedAt(),
@@ -941,8 +941,10 @@ export const aiRoleHires = pgTable(
   (t) => [uniqueIndex("ai_role_hires_template_company_uq").on(t.templateKey, t.companyId)],
 );
 
+export type AiScheduleJson = { kind: "monthly"; day: number } | { kind: "weekly"; weekday: number } | { kind: "off" };
+
 export interface AiHireSettingsJson {
-  schedule: { kind: "monthly"; day: number };
+  schedule: AiScheduleJson;
   thresholds: { changePct: number; riskChangePct: number };
   requiredMetricKeys: string[];
   recipients: string[];
@@ -954,7 +956,69 @@ export interface AiHireSettingsJson {
   acceptMonthlyTotals?: boolean;
   /** Org Structure Expert only: flag a person heading more than this many departments (default 4). */
   maxDepartmentsPerHead?: number;
+  /** This hire's own rule checks (absent = the role's), see src/lib/ai-role-config.ts. */
+  checks?: Record<string, { enabled: boolean } & Record<string, number | boolean | null>>;
+  /** This hire's own name / job description / responsibilities / instructions (absent = the role's). */
+  profile?: { name?: string; description?: string; responsibilities?: string[]; instructions?: string };
 }
+
+/**
+ * Role-level settings edited in the cockpit (0021): for a built-in role (key = its template
+ * key) the founders' edits of its identity, default schedule / recipients and check
+ * defaults; for a custom role (kind = custom, key = "custom-…") its whole definition: the
+ * company, the numbers it watches, its generic checks. Custom roles also get a row in
+ * ai_role_templates so hires reference them like built-ins. Founders only.
+ */
+export const aiRoleConfigs = pgTable(
+  "ai_role_configs",
+  {
+    key: text("key").primaryKey(),
+    kind: text("kind").$type<"builtin" | "custom">().notNull(),
+    /** Custom roles: the company it works for (one company per custom role). */
+    companyId: uuid("company_id").references(() => companies.id, { onDelete: "restrict" }),
+    /** Custom roles copied from a built-in role: its key. */
+    basedOn: text("based_on"),
+    /** See RoleConfig in src/lib/ai-role-config.ts. */
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    /** Version of `config` (1 = created; +1 per edit or revert; see ai_role_settings_log). */
+    version: integer("version").notNull().default(0),
+    createdBy: uuid("created_by").references(() => users.id, { onDelete: "set null" }),
+    updatedBy: uuid("updated_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    check("ai_role_configs_kind", sql`${t.kind} in ('builtin', 'custom')`),
+    check("ai_role_configs_custom_company", sql`${t.kind} <> 'custom' or ${t.companyId} is not null`),
+  ],
+);
+
+/**
+ * Every edit of a role's or a hire's settings (who / when / before / after), numbered per
+ * scope ("role:<key>" or "hire:<id>"). A revert restores an earlier version's `after` and is
+ * logged as a new version itself. Rows are never changed or deleted.
+ */
+export const aiRoleSettingsLog = pgTable(
+  "ai_role_settings_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeKey: text("scope_key").notNull(),
+    roleKey: text("role_key").notNull(),
+    hireId: uuid("hire_id").references(() => aiRoleHires.id, { onDelete: "restrict" }),
+    version: integer("version").notNull(),
+    /** create | edit | revert */
+    action: text("action").notNull(),
+    revertedTo: integer("reverted_to"),
+    before: jsonb("before").$type<Record<string, unknown> | null>(),
+    after: jsonb("after").$type<Record<string, unknown>>().notNull(),
+    changedBy: uuid("changed_by").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("ai_role_settings_log_scope_version_uq").on(t.scopeKey, t.version),
+    check("ai_role_settings_log_action", sql`${t.action} in ('create', 'edit', 'revert')`),
+  ],
+);
 
 /** One run of a hire for one month: waiting_for_data → ready → analysed → reported (or failed). */
 export const aiRoleRuns = pgTable(

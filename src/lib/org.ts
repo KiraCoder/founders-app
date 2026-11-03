@@ -397,15 +397,25 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
  * Findings for one chart, warnings first. Every rule produces at most ONE finding (grouped),
  * so the strip and the weekly summary line stay short however large the chart is.
  */
-export function orgExpertFindings(input: OrgCheckInput, opts: { maxDepartmentsPerHead?: number } = {}): OrgFinding[] {
+export interface OrgExpertOptions {
+  maxDepartmentsPerHead?: number;
+  /** A department with at least this many overdue tasks is flagged (default 5). */
+  overdueTasksMin?: number;
+  /** Checks turned off in the AI role editor (rule ids). */
+  disabled?: readonly string[];
+}
+
+export function orgExpertFindings(input: OrgCheckInput, opts: OrgExpertOptions = {}): OrgFinding[] {
   if (!input.hasChart) {
     return [{ rule: "no_chart", severity: "info", text: "No org chart yet — apply the Vysotsky template to start", count: 0, items: [], ids: [] }];
   }
   const max = opts.maxDepartmentsPerHead ?? DEFAULT_MAX_DEPARTMENTS_PER_HEAD;
+  const overdueMin = opts.overdueTasksMin ?? OVERDUE_TASKS_THRESHOLD;
+  const off = new Set(opts.disabled ?? []);
   const out: OrgFinding[] = [];
   const depts = [...input.departments].sort((a, b) => a.number - b.number);
   const add = (rule: OrgRule, severity: OrgSeverity, list: { id: string; label: string }[], sentence: (n: number) => string) => {
-    if (!list.length) return;
+    if (!list.length || off.has(rule)) return;
     out.push({ rule, severity, text: sentence(list.length), count: list.length, items: list.slice(0, 5).map((x) => x.label), ids: list.map((x) => x.id) });
   };
 
@@ -424,7 +434,7 @@ export function orgExpertFindings(input: OrgCheckInput, opts: { maxDepartmentsPe
   const byHead = new Map<string, string[]>();
   for (const d of depts) if (d.headPersonId) byHead.set(d.headPersonId, [...(byHead.get(d.headPersonId) ?? []), d.id]);
   const overloaded = [...byHead.entries()].filter(([, ids]) => ids.length > max);
-  if (overloaded.length) {
+  if (overloaded.length && !off.has("head_overloaded")) {
     const names = overloaded.map(([pid, ids]) => `${input.personNames[pid] ?? "Someone"} (${ids.length})`);
     out.push({
       rule: "head_overloaded",
@@ -457,8 +467,8 @@ export function orgExpertFindings(input: OrgCheckInput, opts: { maxDepartmentsPe
   add(
     "overdue_tasks",
     "warning",
-    depts.filter((d) => d.overdueTasks >= OVERDUE_TASKS_THRESHOLD).map((d) => ({ id: d.id, label: `${deptLabel(d)} (${d.overdueTasks})` })),
-    (n) => `${plural(n, "department has", "departments have")} ${OVERDUE_TASKS_THRESHOLD}+ overdue tasks`,
+    depts.filter((d) => d.overdueTasks >= overdueMin).map((d) => ({ id: d.id, label: `${deptLabel(d)} (${d.overdueTasks})` })),
+    (n) => `${plural(n, "department has", "departments have")} ${overdueMin}+ overdue tasks`,
   );
   add(
     "function_no_responsible",
@@ -494,7 +504,8 @@ export function orgExpertSummaryLine(companies: readonly { companyName: string; 
   for (const c of companies) {
     const relevant = c.findings.filter((f) => f.severity === "warning" && !SUMMARY_SKIP.has(f.rule));
     if (!relevant.length) continue;
-    const shown = relevant.slice(0, 2).map((f) => SHORT[f.rule](f.count));
+    // A tuned overdue threshold ("3+ overdue tasks") is read from the finding's own sentence.
+    const shown = relevant.slice(0, 2).map((f) => (f.rule === "overdue_tasks" ? SHORT[f.rule](f.count).replace(/\d+\+/, f.text.match(/(\d+)\+/)?.[0] ?? `${OVERDUE_TASKS_THRESHOLD}+`) : SHORT[f.rule](f.count)));
     parts.push(`${c.companyName}: ${shown.join(", ")}${relevant.length > 2 ? ` +${relevant.length - 2} more` : ""}`);
   }
   if (!parts.length) return null;

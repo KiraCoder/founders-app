@@ -18,6 +18,7 @@ import {
   type DepartmentPatch,
   type DivisionPatch,
   type FunctionPatch,
+  type OrgExpertOptions,
   type OrgFinding,
   type OrgNewPersonInput,
 } from "@/lib/org";
@@ -1109,7 +1110,7 @@ export interface OrgExpertResult {
  * The expert's findings for a company: one result per chart (the whole-company chart and
  * any unit charts), or one "no chart yet" result. Reads as `ctx` (tasks it can see).
  */
-export async function orgExpertForCompany(ctx: ServiceContext, companyId: string, opts: { maxDepartmentsPerHead?: number } = {}): Promise<OrgExpertResult[]> {
+export async function orgExpertForCompany(ctx: ServiceContext, companyId: string, opts: OrgExpertOptions = {}): Promise<OrgExpertResult[]> {
   await assertOrgRead(ctx, companyId);
   const [company] = await ctx.db.select({ slug: companies.slug, name: companies.name }).from(companies).where(eq(companies.id, companyId));
   const charts = await ctx.db

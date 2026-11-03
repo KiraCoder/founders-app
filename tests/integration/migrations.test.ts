@@ -795,3 +795,36 @@ describe("0020 org integrity on existing data", () => {
     ).rejects.toThrow();
   });
 });
+
+describe("0021 AI role editor on existing data", () => {
+  it("adds the role config and settings log tables (RLS), and makes the org expert's Monday line explicit; other hires untouched", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0020") });
+    const C1 = "33333333-3333-4333-8333-333333333331";
+    await client.exec(`
+      insert into companies (id, slug, name) values ('${C1}', 'kiwi-go', 'Kiwi Go');
+      insert into ai_role_templates (key, name, description, status, required_data, default_schedule) values
+        ('financial-analyst', 'Financial Analyst', 'd', 'available', '{"byCompanyType": {}, "optionalUploads": []}', '{"kind": "monthly", "day": 10}'),
+        ('org-structure-expert', 'Org Structure Expert', 'd', 'available', '{"byCompanyType": {}, "optionalUploads": []}', '{"kind": "monthly", "day": 1}');
+      insert into ai_role_hires (template_key, company_id, settings, hired_on) values
+        ('financial-analyst', '${C1}', '{"schedule": {"kind": "monthly", "day": 10}, "thresholds": {"changePct": 20, "riskChangePct": 50}}', '2026-11-01'),
+        ('org-structure-expert', '${C1}', '{"schedule": {"kind": "monthly", "day": 1}, "maxDepartmentsPerHead": 3}', '2026-11-01');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const hires = await client.query<{ template_key: string; settings: { schedule: unknown; maxDepartmentsPerHead?: number } }>("select template_key, settings from ai_role_hires order by template_key");
+    expect(hires.rows.map((r) => [r.template_key, r.settings.schedule, r.settings.maxDepartmentsPerHead ?? null])).toEqual([
+      ["financial-analyst", { kind: "monthly", day: 10 }, null],
+      ["org-structure-expert", { kind: "weekly", weekday: 1 }, 3],
+    ]);
+    const tpl = await client.query<{ default_schedule: unknown }>("select default_schedule from ai_role_templates where key = 'org-structure-expert'");
+    expect(tpl.rows[0]!.default_schedule).toEqual({ kind: "weekly", weekday: 1 });
+    const rls = await client.query<{ relname: string; relrowsecurity: boolean }>(
+      "select relname, relrowsecurity from pg_class where relname in ('ai_role_configs', 'ai_role_settings_log') order by relname",
+    );
+    expect(rls.rows).toEqual([
+      { relname: "ai_role_configs", relrowsecurity: true },
+      { relname: "ai_role_settings_log", relrowsecurity: true },
+    ]);
+    await expect(client.query(`insert into ai_role_configs (key, kind) values ('custom-x', 'custom')`)).rejects.toThrow();
+  });
+});

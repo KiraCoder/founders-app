@@ -3,6 +3,8 @@
 import { revalidatePath } from "next/cache";
 import type { HireCreateInput, HirePatchInput } from "@/lib/ai-roles";
 import { getPageContext } from "@/server/context";
+import type { CustomRoleCreateInput } from "@/lib/ai-role-config";
+import { createCustomRole, revertHire, revertRole, updateRoleConfig } from "@/server/services/ai-role-editor";
 import { createTaskFromFinding, enterMonthTotalForRun, hireRole, rerunReport, runHireNow, updateHire } from "@/server/services/ai-roles";
 import { toServiceError } from "@/server/services/errors";
 
@@ -81,5 +83,51 @@ export async function monthTotalAction(runId: string, metricId: string, value: s
     const r = await enterMonthTotalForRun(ctx, runId, metricId, value);
     revalidatePath(`/ai-roles/runs/${runId}`);
     return { message: r.status === "waiting_for_data" ? "Saved. Still waiting for other numbers." : "Saved and checked again." };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// AI role editor (role level, per hire, custom roles, versions)
+// ---------------------------------------------------------------------------
+
+/** Saves a role's settings (template level, or a custom role's definition) as a new version. */
+export async function saveRoleAction(key: string, config: unknown): Promise<AiActionState> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const role = await updateRoleConfig(ctx, key, config);
+    return { message: `Saved — version ${role.version}.` };
+  });
+}
+
+/** A hire's own settings (overrides) and notes, as a new version. */
+export async function saveHireSettingsAction(hireId: string, input: HirePatchInput): Promise<AiActionState> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    await updateHire(ctx, hireId, input);
+    return { message: "Saved." };
+  });
+}
+
+export async function createCustomRoleAction(input: CustomRoleCreateInput): Promise<AiActionState> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const role = await createCustomRole(ctx, input);
+    return { message: `${role.name} created. Hire it to start.` };
+  });
+}
+
+export async function revertRoleAction(key: string, version: number): Promise<AiActionState> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const role = await revertRole(ctx, key, version);
+    return { message: `Back to version ${version} (saved as version ${role.version}).` };
+  });
+}
+
+export async function revertHireAction(hireId: string, version: number): Promise<AiActionState> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    await revertHire(ctx, hireId, version);
+    return { message: `Back to version ${version}.` };
   });
 }

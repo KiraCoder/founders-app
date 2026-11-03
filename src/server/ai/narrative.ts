@@ -44,7 +44,7 @@ const SALARY_METRIC_KEY = /(^|_)(salary|salaries|payroll|wages?|fot|zp|oklad|zar
 /** Pay numbers that may be sent: company / factory totals, never a person's pay. */
 export const ALLOWED_PAY_KEYS: ReadonlySet<string> = new Set(["piecework_total"]);
 
-function isSalaryText(v: string): boolean {
+export function isSalaryText(v: string): boolean {
   return SALARY_WORD.test(v) || SALARY_METRIC_KEY.test(v);
 }
 
@@ -98,6 +98,8 @@ export const narrativeInputSchema = z
     roleName: z.string().min(1),
     companyName: z.string().min(1),
     periodLabel: z.string().min(1),
+    /** The founders' "your instructions" for this role (AI role editor), optional. */
+    instructions: z.string().max(4000).optional(),
     findings: z.array(promptFindingSchema),
   })
   .strict();
@@ -129,6 +131,7 @@ export function buildNarrativePrompt(raw: NarrativeInput): LlmGenerateInput {
     "Write a short summary (at most 5 sentences, plain English) of the findings you are given.",
     "Use only the facts and numbers in the findings. Do not invent numbers. Keep company, factory and metric names exactly as written (some are in Russian).",
     "Start with the most serious finding. If there are no findings, say the month looks normal.",
+    ...(input.instructions?.trim() ? ["The founders' instructions for this role (follow them, but never invent numbers):", nfc(input.instructions.trim())] : []),
   ].join("\n");
   const user = [
     `Company: ${nfc(input.companyName)}`,
@@ -170,7 +173,7 @@ export interface NarrativeResult {
  * a provider failure ever fails the report.
  */
 export async function generateNarrative(
-  input: { roleName: string; companyName: string; periodLabel: string; findings: readonly Finding[] },
+  input: { roleName: string; companyName: string; periodLabel: string; instructions?: string | null; findings: readonly Finding[] },
   provider: LlmProvider,
 ): Promise<NarrativeResult> {
   if (!provider.configured) return { status: "narrative_skipped", text: null, provider: provider.id };
@@ -178,7 +181,8 @@ export async function generateNarrative(
   const omitted = input.findings.length - safe.length;
   let prompt: LlmGenerateInput;
   try {
-    prompt = buildNarrativePrompt({ ...input, findings: safe.map(promptFinding) });
+    const { instructions, ...rest } = input;
+    prompt = buildNarrativePrompt({ ...rest, ...(instructions?.trim() ? { instructions } : {}), findings: safe.map(promptFinding) });
   } catch (err) {
     if (err instanceof SalaryDataInPromptError) return { status: "narrative_skipped:salary", text: null, provider: provider.id, omitted };
     return { status: "narrative_failed", text: null, provider: provider.id, error: err instanceof Error ? err.message.slice(0, 300) : "prompt" };

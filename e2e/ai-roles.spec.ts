@@ -38,7 +38,7 @@ test("hire the Financial Analyst for Kiwi Go → enter last month's numbers → 
   await page.goto("/ai-roles");
   await expect(page.getByTestId("ai-provider-status")).toContainText("AI provider: not chosen yet");
   await expect(page.locator('[data-testid="role-template"][data-role="hr"]')).toContainText("Coming soon");
-  const card = page.locator('[data-testid="hire-card"][data-company="kiwi-go"]');
+  const card = page.locator('[data-testid="hire-card"][data-company="kiwi-go"][data-role="financial-analyst"]');
   if (await card.count()) {
     await card.getByRole("button", { name: "Tune" }).click();
     const dialog = page.getByRole("dialog", { name: "Tune Financial Analyst" });
@@ -97,7 +97,7 @@ test("hire the Financial Analyst for Kiwi Go → enter last month's numbers → 
 
   // 4. The report is also in the company's AI roles tab and the agent panel.
   await page.goto("/companies/kiwi-go?tab=ai");
-  await expect(page.getByTestId("company-hire")).toContainText(label);
+  await expect(page.getByTestId("company-hire").filter({ hasText: "Financial Analyst" })).toContainText(label);
   await page.getByRole("button", { name: "Agent" }).click();
   await expect(page.getByRole("complementary", { name: "Agent panel" }).getByTestId("agent-hire").first()).toContainText("Financial Analyst");
 });

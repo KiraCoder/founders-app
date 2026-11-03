@@ -7,7 +7,11 @@
  * Pure (no DB, no clock): callers pass `today` (Asia/Bishkek calendar day).
  */
 import { z } from "zod";
-import { addDays, daysBetween, type IsoDate } from "./dates";
+import { checksSchema, profileSchema, runBased, scheduleSchema, WEEKDAY_NAMES, type RoleEngine, type Schedule } from "./ai-role-config";
+import { addDays, daysBetween, isoWeekday, type IsoDate } from "./dates";
+
+export type { RoleEngine, Schedule } from "./ai-role-config";
+export { runBased } from "./ai-role-config";
 
 export type TemplateStatus = "available" | "coming_soon";
 
@@ -43,12 +47,6 @@ export function companyTypeFor(slug: string): CompanyType {
   return COMPANY_TYPE_BY_SLUG[slug] ?? "other";
 }
 
-export interface Schedule {
-  kind: "monthly";
-  /** Day of the month the role runs for the month that just finished (1–28). */
-  day: number;
-}
-
 export interface RoleTemplate {
   key: string;
   name: string;
@@ -66,16 +64,17 @@ export interface RoleTemplate {
   /**
    * How it works: "finance" = monthly runs over company numbers (the Financial Analyst's
    * engine, the default); "org_rules" = deterministic checks of the company's org chart,
-   * shown live on the board and once a week (Mondays) in the morning summary — no runs.
+   * shown live on the board and once a week (Mondays) in the morning summary — no runs;
+   * "custom" = a founder-made role (services/ai-role-defs.ts), monthly runs with generic checks.
    */
-  engine?: "finance" | "org_rules";
+  engine?: RoleEngine;
 }
 
 export const FINANCIAL_ANALYST = "financial-analyst";
 export const ORG_STRUCTURE_EXPERT = "org-structure-expert";
 
 /** Which engine a template runs on (finance unless stated). */
-export function templateEngine(t: Pick<RoleTemplate, "engine"> | undefined): "finance" | "org_rules" {
+export function templateEngine(t: Pick<RoleTemplate, "engine"> | undefined): RoleEngine {
   return t?.engine ?? "finance";
 }
 
@@ -122,7 +121,7 @@ export const ROLE_TEMPLATES: RoleTemplate[] = [
     ],
     requiredData: {},
     optionalUploads: [],
-    defaultSchedule: { kind: "monthly", day: 1 },
+    defaultSchedule: { kind: "weekly", weekday: 1 },
     reportSections: ["Findings on the org board", "Monday summary line", "Advice (after the AI provider is chosen)"],
     sort: 15,
   },
@@ -183,7 +182,7 @@ const pct = (max: number) => z.coerce.number().int().min(1).max(max);
 
 export const hireSettingsSchema = z
   .object({
-    schedule: z.object({ kind: z.literal("monthly"), day: z.coerce.number().int().min(1).max(28) }).strict(),
+    schedule: scheduleSchema,
     thresholds: z
       .object({ changePct: pct(500), riskChangePct: pct(1000) })
       .strict()
@@ -203,6 +202,14 @@ export const hireSettingsSchema = z
     acceptMonthlyTotals: z.boolean().optional(),
     /** Org Structure Expert: one person heading more than this many departments is flagged (default 4). */
     maxDepartmentsPerHead: z.coerce.number().int().min(1).max(21).optional(),
+    /**
+     * This hire's own rule checks (on/off + thresholds), overriding the role's. Absent = the
+     * role's checks. The change thresholds stay in `thresholds` (the "vs the month before"
+     * check) and the Org Expert's head limit in `maxDepartmentsPerHead`, as before.
+     */
+    checks: checksSchema.optional(),
+    /** This hire's own name / job description / responsibilities / instructions (absent = the role's). */
+    profile: profileSchema.optional(),
   })
   .strict();
 export type HireSettings = z.infer<typeof hireSettingsSchema>;
@@ -220,7 +227,8 @@ export type HireCreateInput = z.input<typeof hireCreateSchema>;
 export const hirePatchSchema = z
   .object({
     status: z.enum(["active", "paused"]).optional(),
-    settings: hireSettingsSchema.partial().optional(),
+    // `checks: null` / `profile: null` clear the hire's own override (back to the role's).
+    settings: hireSettingsSchema.partial().extend({ checks: checksSchema.nullable().optional(), profile: profileSchema.nullable().optional() }).optional(),
     notes: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? null : v), z.string().trim().max(2000).nullable().optional()),
   })
   .strict()
@@ -305,18 +313,45 @@ export function monthsLabel(starts: readonly IsoDate[]): string {
   return `${sameYear ? `${text} ${named[0]!.slice(0, 4)}` : text}${earlier ? ` (+${earlier} earlier)` : ""}`;
 }
 
-/** The day a month's run is due: `schedule.day` of the following month. */
+/** Never (a role whose schedule is off). */
+export const NEVER: IsoDate = "9999-12-31";
+
+/** The first `weekday` (ISO, 1 = Monday) of the month starting `month`. */
+export function firstWeekdayOfMonth(month: IsoDate, weekday: number): IsoDate {
+  const first = monthStart(month);
+  return addDays(first, (weekday - isoWeekday(first) + 7) % 7);
+}
+
+/** Day of the month a month's run is due: monthly → `day`; weekly → the first such weekday. */
+function dueDayIn(month: IsoDate, schedule: Schedule): IsoDate {
+  if (schedule.kind === "monthly") return addDays(monthStart(month), schedule.day - 1);
+  if (schedule.kind === "weekly") return firstWeekdayOfMonth(month, schedule.weekday);
+  return NEVER;
+}
+
+/**
+ * The day a month's run is due: `schedule.day` of the following month (weekly: the first
+ * such weekday of the following month; off: never).
+ */
 export function runDueOn(period: IsoDate, schedule: Schedule): IsoDate {
-  return addDays(addMonths(period, 1), schedule.day - 1);
+  return dueDayIn(addMonths(period, 1), schedule);
 }
 
 /**
  * The finished month whose run is due at `today`: last month once today is on or after the
- * schedule day, otherwise the month before that.
+ * schedule day, otherwise the month before that. Null when the schedule is off.
  */
-export function scheduledPeriod(today: IsoDate, schedule: Schedule): IsoDate {
+export function scheduledPeriod(today: IsoDate, schedule: Schedule): IsoDate | null {
+  if (schedule.kind === "off") return null;
   const last = prevMonth(monthStart(today));
-  return Number(today.slice(8, 10)) >= schedule.day ? last : prevMonth(last);
+  return today >= dueDayIn(today, schedule) ? last : prevMonth(last);
+}
+
+/** A summary-line role (Org Structure Expert): is today one of its days? */
+export function summaryLineDueOn(today: IsoDate, schedule: Schedule): boolean {
+  if (schedule.kind === "weekly") return isoWeekday(today) === schedule.weekday;
+  if (schedule.kind === "monthly") return Number(today.slice(8, 10)) === schedule.day;
+  return false;
 }
 
 /** The first month a hire analyses: the month that had just finished when it was hired. */
@@ -326,11 +361,19 @@ export function firstPeriodFor(hiredOn: IsoDate): IsoDate {
 
 /** "Weekly on Mondays" for the org checks, otherwise "Monthly on the 10th". */
 export function templateScheduleLabel(t: Pick<RoleTemplate, "engine" | "defaultSchedule">, s: Schedule = t.defaultSchedule): string {
-  return templateEngine(t) === "org_rules" ? "Weekly on Mondays" : scheduleLabel(s);
+  if (s.kind === "off") return runBased(templateEngine(t)) ? "Off (Run now only)" : "Off";
+  // Org roles store their weekday; legacy monthly-day-1 rows (before 0021) meant Mondays.
+  if (templateEngine(t) === "org_rules" && s.kind === "monthly" && s.day === 1 && t.defaultSchedule.kind === "weekly") return "Weekly on Mondays";
+  return scheduleLabel(s, templateEngine(t));
 }
 
-/** "Monthly on the 10th". */
-export function scheduleLabel(s: Schedule): string {
+/** "Monthly on the 10th", "Weekly on Mondays" (run roles: "Monthly on the first Monday"). */
+export function scheduleLabel(s: Schedule, engine: RoleEngine = "finance"): string {
+  if (s.kind === "off") return runBased(engine) ? "Off (Run now only)" : "Off";
+  if (s.kind === "weekly") {
+    const name = WEEKDAY_NAMES[s.weekday - 1]!;
+    return engine === "org_rules" ? `Weekly on ${name}s` : `Monthly on the first ${name}`;
+  }
   const d = s.day;
   const suffix = d % 10 === 1 && d !== 11 ? "st" : d % 10 === 2 && d !== 12 ? "nd" : d % 10 === 3 && d !== 13 ? "rd" : "th";
   return `Monthly on the ${d}${suffix}`;

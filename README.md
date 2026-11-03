@@ -805,6 +805,55 @@ and the run records `narrative_skipped:salary` — the report itself never fails
 Only the factory's piecework pay **total** (`piecework_total`) is allowed, by explicit key.
 Without a provider no prompt is built at all.
 
+### Tuning roles (AI role editor)
+
+"Tune AI inside the cockpit" — founders only, on `/ai-roles`. Logic in
+`src/server/services/ai-role-editor.ts` (editing, custom roles, versions) and
+`src/server/services/ai-role-defs.ts` (a role as tuned: code catalogue + edits); the check
+catalogue and schemas are pure (`src/lib/ai-role-config.ts`). Tables (migration
+`0021_ai_role_editor.sql`, additive, RLS + revoke): `ai_role_configs` (role-level settings,
+one row per edited built-in role or custom role) and `ai_role_settings_log` (every version).
+
+- **Edit role** (on each role card, template level) and **Edit settings** (on each hire, its
+  own overrides): name, job description, responsibilities (one per line), **your
+  instructions** (free text, stored now and used by the AI summary only after the AI provider
+  is chosen — the rule checks never depend on it; it goes through the same no-salary check as
+  the prompt, so instructions naming salaries mean no AI summary), schedule (**monthly** on a
+  day, **weekly** on a weekday — for report roles the first such weekday of the month, for the
+  Org Expert its line's weekday —, or **off**: Run now only / no line), recipients (founders
+  only), and **every rule check on/off with its own thresholds**:
+  - Financial Analyst: change vs the month before (warn / risk %, = the hire's Tune
+    thresholds), change vs the 3-month average (own warn / risk %, empty = same as the month
+    before), ratios, COD paid out vs collected (warn below / risk below %, empty = 100 − the
+    warn / risk %), defect-rate ceiling (off by default, max %), intercompany debt growing N
+    months in a row (2–6, default 3), target missed, missing numbers.
+  - Org Structure Expert: each check on/off, the head limit (more than N departments) and the
+    overdue-tasks threshold (default 5).
+  - **Defaults = the behaviour before the editor** (tested: identical findings and unchanged
+    report hashes). A hire without its own checks follows the role's; *Use the role's checks*
+    clears a hire's override; empty name / description fields use the role's text. The
+    "vs the month before" thresholds have always been per hire (Tune): on the role they are
+    the starting values of new hires. Changing what the analysis uses (checks, thresholds,
+    numbers watched) marks existing reports **Settings changed** (Run again re-analyses, no new
+    push); renaming or new instructions do not.
+- **Create your own role** (section *Your roles*): from scratch or as a **copy** of a built-in
+  role that analyses numbers (Financial Analyst; HR / Marketing / Operations too). A custom
+  role picks **one company**, the **numbers it watches** (from that company's metrics; each
+  can be "waits for it"), and generic checks: change vs the month before, vs the 3-month
+  average, missing numbers, target missed, and **ratio checks** between two watched numbers
+  with a min and / or max (plain or as %). *Hire for <company>* hires it like a built-in; it
+  runs through the same run → report → "report ready" push pipeline and the same anti-spam
+  rules (one grouped data-request line per role per founder per day, daily for 7 days then
+  weekly; "never entered" / data-source lines stay Monday-only in *Numbers waiting*).
+- **Salary guard.** A custom role can never watch pay data: a number whose key, name or
+  aliases name salaries / payroll / wages / зарплата / ФОТ / оклад (the narrative's word list)
+  is refused when the role is saved (shown as "pay data — never watched") and dropped again at
+  run time (a forged config analyses nothing of it). Only `piecework_total` (a factory total)
+  is allowed, by key.
+- **Versions.** Every save is a numbered version per role / per hire (who, when, before,
+  after; creating a role or a hire is version 1). *History → Revert to this* restores that
+  version's settings and is logged as a new version. Nothing is deleted.
+
 ## Org structure (Vysotsky model)
 
 `/org` (sidebar → Org structure; company switcher, Kiwi Go first) and each company's **Org
@@ -925,7 +974,7 @@ src/
       projects/[id]/       Project with tasks and progress
       people/              People list, person page, new person, import wizard (+ server actions)
       holding/             Holding: акты grid + cell panel, Ask for акты (per person), debts, договоры, flows (+ server actions)
-      ai-roles/            AI roles: catalogue, Hire/Tune wizard, hired roles; runs/[id] report page (+ server actions)
+      ai-roles/            AI roles: catalogue, Hire/Tune wizard, role editor (Edit role / Edit settings / Create your own role), hired roles; runs/[id] report page (+ server actions)
       org/                 Org structure board (+ server actions); components/org/ holds the board, panels, expert strip
       search/ more/
       settings/            Own notification preferences + Telegram link; Access (salary viewers);
@@ -946,7 +995,7 @@ src/
     app-url.ts             The site's address (APP_URL, else Vercel's)
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
                            people-import, metrics, metrics-import, connectors, search, notifications,
-                           holding, holding-asks, holding-files, ai-roles, org, org-expert)
+                           holding, holding-asks, holding-files, ai-roles, ai-role-defs, ai-role-editor, org, org-expert)
     ai/                    AI roles: provider.ts (LlmProvider, NoneProvider), finance-rules.ts, month-values.ts,
                            narrative.ts (prompt builder, no salaries), orchestrator.ts (tick + morning-summary dedupe)
     storage/               FileStorage for documents: local .data/uploads, Supabase placeholder

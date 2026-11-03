@@ -148,6 +148,13 @@
       "when": 1793727423704,
       "tag": "0020_org_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1793744735389,
+      "tag": "0021_ai_role_editor",
+      "breakpoints": true
     }
   ]
 }

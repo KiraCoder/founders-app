@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, useTransition } from "react";
 import { hireAction, tuneAction, type AiActionState } from "@/app/(app)/ai-roles/actions";
 import { Icon } from "@/components/Icon";
-import { defaultAcceptMonthlyTotals, ORG_STRUCTURE_EXPERT } from "@/lib/ai-roles";
+import { defaultAcceptMonthlyTotals, ORG_STRUCTURE_EXPERT, scheduleLabel, type Schedule } from "@/lib/ai-roles";
 
 export interface WizardCompany {
   id: string;
@@ -19,7 +19,7 @@ export interface WizardCompany {
 }
 
 export interface WizardSettings {
-  schedule: { kind: "monthly"; day: number };
+  schedule: Schedule;
   thresholds: { changePct: number; riskChangePct: number };
   requiredMetricKeys: string[];
   recipients: string[];
@@ -70,7 +70,8 @@ export function HireWizard({
   const company = companies.find((c) => c.id === companyId) ?? null;
   const allFounders = founders.map((f) => f.id);
   const [keys, setKeys] = useState<string[]>(target.settings?.requiredMetricKeys ?? company?.defaultKeys ?? []);
-  const [day, setDay] = useState(String(target.settings?.schedule.day ?? 10));
+  const savedSchedule = target.settings?.schedule;
+  const [day, setDay] = useState(String(savedSchedule?.kind === "monthly" ? savedSchedule.day : 10));
   const [changePct, setChangePct] = useState(String(target.settings?.thresholds.changePct ?? 20));
   const [riskPct, setRiskPct] = useState(String(target.settings?.thresholds.riskChangePct ?? 50));
   const [recipients, setRecipients] = useState<string[]>(target.settings?.recipients ?? allFounders);
@@ -116,7 +117,8 @@ export function HireWizard({
       const settings = org
         ? { requiredMetricKeys: [], recipients, askUserIds: recipients, maxDepartmentsPerHead: Number(maxHeads) }
         : {
-            schedule: { kind: "monthly" as const, day: Number(day) },
+            // A weekly / off schedule (set in Edit settings) is kept unless the day is changed here.
+            ...(savedSchedule && savedSchedule.kind !== "monthly" && day === "10" ? {} : { schedule: { kind: "monthly" as const, day: Number(day) } }),
             thresholds: { changePct: Number(changePct), riskChangePct: Number(riskPct) },
             requiredMetricKeys: keys,
             recipients,
@@ -236,6 +238,9 @@ export function HireWizard({
 
           {stepName === "Schedule" && (
             <div className="flex flex-col gap-3">
+              {savedSchedule && savedSchedule.kind !== "monthly" && (
+                <p className="text-[12px] text-muted">Now: {scheduleLabel(savedSchedule)} (changed in Edit settings). Enter a day to run monthly instead.</p>
+              )}
               <label className="text-[13px]">
                 <span className="label">Runs monthly on day (for the month that just finished)</span>
                 <input className="input w-24" inputMode="numeric" value={day} onChange={(e) => setDay(e.target.value)} aria-label="Day of the month" />

@@ -1,14 +1,19 @@
 import { AiRolesBoard, type BoardHire, type BoardTemplate } from "@/components/ai-roles/AiRolesBoard";
 import type { WizardCompany, WizardTarget } from "@/components/ai-roles/HireWizard";
+import type { CopySource, EditorTarget, EditorVersion } from "@/components/ai-roles/RoleEditor";
+import { defaultChecks } from "@/lib/ai-role-config";
+import { formatDisplayDateTime } from "@/lib/dates";
+import { listHireVersions, listRoleVersions, type SettingsVersion } from "@/server/services/ai-role-editor";
+import { orgExpertOptionsFor } from "@/server/services/org-expert";
 import { PageHeader } from "@/components/ui";
 import Link from "next/link";
 import { OrgExpertStrip } from "@/components/org/OrgExpertStrip";
-import { COMPANY_TYPE_LABELS, companyTypeFor, requiredKeysFor, templateByKey, templateEngine, templateScheduleLabel } from "@/lib/ai-roles";
+import { COMPANY_TYPE_LABELS, companyTypeFor, requiredKeysFor, templateScheduleLabel } from "@/lib/ai-roles";
 import { orgExpertForCompany } from "@/server/services/org";
 import { providerStatus } from "@/server/ai/provider";
 import { getPageContext } from "@/server/context";
 import { canUseAiRoles } from "@/server/services/access";
-import { companyMetricOptions, listHires, listTemplates } from "@/server/services/ai-roles";
+import { companyMetricOptions, listHires, listRoles } from "@/server/services/ai-roles";
 import { listCompanies } from "@/server/services/companies";
 import { listFounders } from "@/server/services/people";
 
@@ -27,12 +32,19 @@ export default async function AiRolesPage({ searchParams }: Props) {
     );
   }
   const { hire: hireParam, company: companyParam } = await searchParams;
-  const [templates, hires, companies, founders] = await Promise.all([listTemplates(), listHires(ctx), listCompanies(ctx), listFounders(ctx)]);
+  const [templates, hires, companies, founders] = await Promise.all([listRoles(ctx), listHires(ctx), listCompanies(ctx), listFounders(ctx)]);
   const provider = providerStatus();
+  const founderIds = founders.map((f) => f.id);
+  const asVersions = (list: SettingsVersion[]): EditorVersion[] =>
+    list.map((v) => ({ version: v.version, action: v.action, revertedTo: v.revertedTo, at: formatDisplayDateTime(v.at, ctx.timeZone), byName: v.byName, changed: v.changed }));
+  const [roleVersions, hireVersions] = await Promise.all([
+    Promise.all(templates.map(async (t) => [t.key, asVersions(await listRoleVersions(ctx, t.key))] as const)).then((e) => new Map(e)),
+    Promise.all(hires.map(async (h) => [h.id, asVersions(await listHireVersions(ctx, h.id))] as const)).then((e) => new Map(e)),
+  ]);
 
   const metricsByCompany = new Map(await Promise.all(companies.map(async (c) => [c.id, await companyMetricOptions(ctx, c.id)] as const)));
   const wizardCompanies: Record<string, WizardCompany[]> = {};
-  for (const t of templates.filter((x) => x.status === "available")) {
+  for (const t of templates.filter((x) => x.status === "available" && !x.custom)) {
     wizardCompanies[t.key] = companies.map((c) => {
       const type = companyTypeFor(c.slug);
       const metrics = metricsByCompany.get(c.id) ?? [];
@@ -49,17 +61,64 @@ export default async function AiRolesPage({ searchParams }: Props) {
     });
   }
 
-  const boardTemplates: BoardTemplate[] = templates.map((t) => ({
-    key: t.key,
-    name: t.name,
-    description: t.description,
-    status: t.status,
-    responsibilities: t.responsibilities,
-    reportSections: t.reportSections,
-    scheduleLabel: templateScheduleLabel(t),
-  }));
+  const boardTemplates: BoardTemplate[] = templates.map((t) => {
+    const p = t.config.profile ?? {};
+    const editor: EditorTarget = {
+      mode: "role",
+      title: t.name,
+      roleKey: t.key,
+      engine: t.engine,
+      custom: t.custom,
+      identity: t.custom
+        ? { name: t.name, description: t.description, responsibilities: t.responsibilities, instructions: t.instructions ?? "" }
+        : { name: p.name ?? "", description: p.description ?? "", responsibilities: p.responsibilities ?? [], instructions: p.instructions ?? "" },
+      inherited: t.base
+        ? { name: t.base.name, description: t.base.description, responsibilities: t.base.responsibilities, instructions: "" }
+        : { name: "", description: "", responsibilities: [], instructions: "" },
+      schedule: t.defaultSchedule,
+      recipients: t.config.recipients?.length ? t.config.recipients : founderIds,
+      checks: t.checks,
+      companyId: t.companyId ?? undefined,
+      watched: t.custom ? t.watchedMetricKeys : undefined,
+      required: t.custom ? (t.config.requiredMetricKeys ?? t.watchedMetricKeys) : undefined,
+      ratioChecks: t.custom ? t.ratioChecks.map((r) => ({ ...r, min: r.min ?? null, max: r.max ?? null })) : undefined,
+      versions: roleVersions.get(t.key) ?? [],
+    };
+    return {
+      key: t.key,
+      name: t.name,
+      description: t.description,
+      status: t.status,
+      responsibilities: t.responsibilities,
+      reportSections: t.reportSections,
+      scheduleLabel: templateScheduleLabel(t),
+      editor,
+      custom: t.custom,
+      companyId: t.companyId ?? undefined,
+      companyName: companies.find((c) => c.id === t.companyId)?.name,
+      hiredId: t.custom ? (hires.find((h) => h.templateKey === t.key)?.id ?? null) : undefined,
+      edited: !t.custom && t.version > 0 && Object.keys(t.config).length > 0,
+    };
+  });
+  const copySources: CopySource[] = templates
+    .filter((t) => !t.custom && t.engine === "finance")
+    .map((t) => ({
+      key: t.key,
+      name: t.name,
+      description: t.description,
+      responsibilities: t.responsibilities,
+      instructions: t.instructions ?? "",
+      schedule: t.defaultSchedule,
+      checks: t.checks,
+      keysByCompany: Object.fromEntries(
+        companies.map((c) => {
+          const metrics = metricsByCompany.get(c.id) ?? [];
+          return [c.id, requiredKeysFor(t, companyTypeFor(c.slug)).filter((k) => metrics.some((m) => m.key === k && !m.payData))];
+        }),
+      ),
+    }));
   // Org Structure Expert: its deterministic findings for every company (shown below and on hire cards).
-  const orgResults = (await Promise.all(companies.map((c) => orgExpertForCompany(ctx, c.id)))).flat();
+  const orgResults = (await Promise.all(companies.map(async (c) => orgExpertForCompany(ctx, c.id, await orgExpertOptionsFor(ctx, c.id))))).flat();
   const orgWarnings = (companyId: string) =>
     orgResults.filter((r) => r.companyId === companyId && r.chartId).reduce((n, r) => n + r.findings.filter((f) => f.severity === "warning").length, 0);
   const boardHires: BoardHire[] = hires.map((h) => {
@@ -80,15 +139,45 @@ export default async function AiRolesPage({ searchParams }: Props) {
       askNames: h.askNames,
       requiredLabels: h.settings.requiredMetricKeys.map((k) => metrics.find((m) => m.key === k)?.label ?? k),
       latestRun: h.latestRun ? { id: h.latestRun.id, periodLabel: h.latestRun.periodLabel, status: h.latestRun.status, summary: h.latestRun.summary } : null,
-      engine: templateEngine(templateByKey(h.templateKey)),
+      engine: h.engine,
+      custom: h.custom,
+      editor: hireEditor(h),
       orgSummary:
-        templateEngine(templateByKey(h.templateKey)) === "org_rules"
+        h.engine === "org_rules"
           ? orgResults.some((r) => r.companyId === h.companyId && r.chartId)
             ? `${orgWarnings(h.companyId) || "Nothing"} to fix on the org chart`
             : "No org chart yet — apply the template"
           : undefined,
     };
   });
+
+  function hireEditor(h: (typeof hires)[number]): EditorTarget {
+    const own = h.settings.profile ?? {};
+    const role = templates.find((t) => t.key === h.templateKey);
+    return {
+      mode: "hire",
+      title: `${h.roleName} · ${h.companyName}`,
+      hireId: h.id,
+      roleKey: h.templateKey,
+      engine: h.engine,
+      custom: h.custom,
+      identity: { name: own.name ?? "", description: own.description ?? "", responsibilities: own.responsibilities ?? [], instructions: own.instructions ?? "" },
+      inherited: {
+        name: h.roleBaseName,
+        description: role?.description ?? "",
+        responsibilities: role?.responsibilities ?? [],
+        instructions: role?.instructions ?? "",
+      },
+      schedule: h.settings.schedule,
+      recipients: h.settings.recipients,
+      askUserIds: h.settings.askUserIds,
+      checks: h.checks,
+      ownChecks: !!h.settings.checks,
+      companyId: h.companyId,
+      notes: h.notes,
+      versions: hireVersions.get(h.id) ?? [],
+    };
+  }
 
   // Deep link from a company page: /ai-roles?hire=financial-analyst&company=<id> opens the wizard
   // (or Tune when that role is already hired there).
@@ -139,7 +228,17 @@ export default async function AiRolesPage({ searchParams }: Props) {
           {!orgResults.some((r) => r.chartId) && <div className="card px-4 py-6 text-center text-[13px] text-muted">No company has an org chart yet.</div>}
         </div>
       </section>
-      <AiRolesBoard templates={boardTemplates} hires={boardHires} companies={wizardCompanies} founders={founders.map((f) => ({ id: f.id, shortName: f.shortName }))} initial={initial} />
+      <AiRolesBoard
+        templates={boardTemplates}
+        hires={boardHires}
+        companies={wizardCompanies}
+        founders={founders.map((f) => ({ id: f.id, shortName: f.shortName }))}
+        initial={initial}
+        editorCompanies={companies.map((c) => ({ id: c.id, name: c.name }))}
+        metricsByCompany={Object.fromEntries(metricsByCompany)}
+        copySources={copySources}
+        defaultChecksCustom={defaultChecks("custom")}
+      />
     </>
   );
 }
