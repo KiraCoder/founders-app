@@ -37,8 +37,23 @@ import { allowedOrigins } from "./request-guard";
 
 const EXTENSION_ORIGIN = /^chrome-extension:\/\/[A-Za-z0-9_-]{1,64}$/;
 
-export function isExtensionOrigin(origin: string | null): origin is string {
-  return !!origin && EXTENSION_ORIGIN.test(origin);
+/**
+ * EXTENSION_ALLOWED_IDS (optional): comma-separated Chrome extension IDs. Empty / unset = any
+ * extension ID is accepted (development); set = only those (production: the founders' own
+ * extension). Read on every call, so a change takes effect on the next deploy / restart.
+ */
+export function allowedExtensionIds(env: Record<string, string | undefined> = process.env): Set<string> | null {
+  const ids = (env.EXTENSION_ALLOWED_IDS ?? "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  return ids.length ? new Set(ids) : null;
+}
+
+export function isExtensionOrigin(origin: string | null, env: Record<string, string | undefined> = process.env): origin is string {
+  if (!origin || !EXTENSION_ORIGIN.test(origin)) return false;
+  const allowed = allowedExtensionIds(env);
+  return !allowed || allowed.has(origin.slice("chrome-extension://".length));
 }
 
 function corsHeaders(origin: string | null): Record<string, string> {

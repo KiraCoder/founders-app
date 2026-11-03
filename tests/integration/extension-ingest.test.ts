@@ -363,3 +363,41 @@ describe("deleting a key keeps its log (C5b #9)", () => {
     expect(row).toMatchObject({ keyName: "Deleted key", status: "ok" });
   });
 });
+
+describe("CORS: EXTENSION_ALLOWED_IDS (C5b #10)", () => {
+  const OURS = "chrome-extension://oursoursoursoursoursoursoursours";
+  const THEIRS = "chrome-extension://theirstheirstheirstheirstheirsxx";
+  const preflight = (origin: string) => handleIngestPreflight(new Request("http://app.test/api/v1/ingest", { method: "OPTIONS", headers: { origin } }));
+  const prev = process.env.EXTENSION_ALLOWED_IDS;
+  afterAll(() => {
+    if (prev === undefined) delete process.env.EXTENSION_ALLOWED_IDS;
+    else process.env.EXTENSION_ALLOWED_IDS = prev;
+  });
+
+  it("unset or empty: any extension ID is accepted", async () => {
+    for (const v of [undefined, "", " , "]) {
+      if (v === undefined) delete process.env.EXTENSION_ALLOWED_IDS;
+      else process.env.EXTENSION_ALLOWED_IDS = v;
+      expect(preflight(OURS).status).toBe(204);
+      expect(preflight(THEIRS).status).toBe(204);
+    }
+  });
+
+  it("set: only the listed IDs (preflight and POST); others are refused like any web origin", async () => {
+    process.env.EXTENSION_ALLOWED_IDS = " oursoursoursoursoursoursoursours , another";
+    expect(preflight(OURS).status).toBe(204);
+    expect(preflight(OURS).headers.get("access-control-allow-origin")).toBe(OURS);
+    const refused = preflight(THEIRS);
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get("access-control-allow-origin")).toBeNull();
+    now = new Date(FIXED_NOW.getTime() + 30_000_000);
+    const ok = await send(post(env([]), { origin: OURS }));
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("access-control-allow-origin")).toBe(OURS);
+    const theirs = await send(post(env([]), { origin: THEIRS }));
+    expect(theirs.status).toBe(403);
+    expect(theirs.headers.get("access-control-allow-origin")).toBeNull();
+    // Scripts without an Origin still work (the key is the proof).
+    expect((await send(post(env([])))).status).toBe(200);
+  });
+});

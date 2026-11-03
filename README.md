@@ -969,7 +969,7 @@ The founders' Chrome extension reads numbers from web pages (seller cabinets, da
 sends them here. Founders only. Logic in `src/server/services/extension.ts` and
 `src/server/http/ingest.ts`; tables `extension_keys` and `extension_ingest_log` (migration
 `0022_extension_ingest.sql`, additive, RLS + revoke; it also adds the number source
-`extension`).
+`extension`) and `ingest_rate_counters` (0023, RLS + revoke).
 
 **Create a key.** *Settings → Browser extension* → name it ("Laptop Chrome") → **Create key**.
 The key (`fcx_…`) is shown **once** — copy it into the extension's settings. Only its SHA-256
@@ -1011,18 +1011,29 @@ Content-Type: application/json
     accepted (nothing written). Among automatic values (extension, data sources) the **latest
     wins**, with history kept. The card says "via the browser extension".
   - Two points for the same number and period in one request are both rejected.
-- Errors: 401 missing / wrong / revoked key; 403 a web page origin; 415 not JSON; 400 bad JSON
-  or envelope (`source`, `adapterId`, more than 500 points); 413 over 256 KB; **429** over 60
-  requests per key per minute (`Retry-After: 60`). Error bodies are
-  `{ "error": { "code", "message" } }`.
+- Errors: 401 missing / malformed / wrong / revoked key; 403 a web page origin (or an
+  extension ID not on `EXTENSION_ALLOWED_IDS`); 415 not JSON; 400 bad JSON or envelope
+  (`source`, `adapterId`, more than 500 points); 413 over 256 KB; **429** over 60 requests per
+  key per minute, or over 20 failed key checks per IP per minute (`Retry-After`: seconds until
+  the minute ends). Error bodies are `{ "error": { "code", "message" } }`.
+- **Limits** are fixed one-minute windows counted atomically in `ingest_rate_counters`
+  (migration 0023) **before** a request is processed, so parallel requests can't slip past;
+  refused and failing calls count too. A header that can't be a key (`Bearer fcx_` + 43
+  characters) is refused without a database query; an IP over the failed-check limit is refused
+  before the key lookup for the rest of the minute.
 - **CORS:** this route only, for `chrome-extension://…` origins (preflight answered:
-  `POST, OPTIONS`, headers `Authorization, Content-Type`). Other web origins get 403; calls
-  without an `Origin` (scripts, curl) are fine. The route is exempt from the session cookie and
+  `POST, OPTIONS`, headers `Authorization, Content-Type`). Optional `EXTENSION_ALLOWED_IDS`
+  (comma-separated extension IDs, see `.env.example`): when set, only those IDs; empty = any
+  extension (development). Other web origins get 403; calls without an `Origin` (scripts, curl)
+  are fine. Exactly `/api/v1/ingest` (nothing below it) is exempt from the session cookie and
   the same-origin guard (`src/middleware.ts`) because the bearer key is the proof.
 - Each authenticated call is logged (`extension_ingest_log`: key, owner, adapter, counts, the
-  first 50 rejections); rate-limited calls are not. Each call that writes creates a
-  connector-like run per company (`connector_runs`, `extension:<adapterId>`) that records
-  conflicts.
+  first 50 rejections); rate-limited calls are not. Deleting a key (or its founder) keeps the
+  log rows ("Deleted key", 0026). Each call that writes, conflicts with or agrees with a
+  founder's number creates a connector-like run per company (`connector_runs`,
+  `extension:<adapterId>`); a call that changes nothing leaves none. "Source disagrees" is
+  decided per number and period by the newest run that mentions it, so later calls about other
+  numbers never hide it.
 
 ## Folder map
 
