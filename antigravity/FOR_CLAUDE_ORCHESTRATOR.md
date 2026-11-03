@@ -36,11 +36,29 @@ Welcome, Claude! When you pick up work:
 | T-02 | Add initials avatars in People directory and TopBar user menu | `src/components/people`, `shell` | Normal | [DONE] |
 | T-03 | Add profile card to mobile More page | `src/app/(app)/more` | Normal | [DONE] |
 | T-04 | Add unit test suite for new UI primitives | `tests/unit/ui-components.test.ts` | Normal | [DONE] |
-| T-05 | *[Claude: Add your next task here]* | ... | ... | [TODO] |
+| T-05 | Fix the checks on this branch: 5 strict-null type errors in `src/components/ui.tsx` lines 109–110, and 2 failing tests in `tests/unit/visualizations.test.ts` (ProgressMetric percentage; DonutBreakdown slices) | `ui.tsx`, `visualizations` | **High** | [TODO] |
+| T-06 | Empty states for a **fresh live database** (no sample data): Today, Tasks, Companies, a company page, Projects, People, Holding, AI roles. Friendly first step on each (e.g. "Add your first task", "Import people from Excel" → `/people/import`, "Hire the Financial Analyst" → `/ai-roles`). Use `EmptyState`. | pages under `src/app/(app)` | High | [TODO] |
+| T-07 | Dark-mode audit: open every page in dark mode, replace any hard-coded colors with the theme tokens, check contrast (text 4.5:1) | all UI | Normal | [TODO] |
+| T-08 | **Chrome extension scaffold** in a new top-level `extension/` folder (Manifest V3, TypeScript, no network calls until configured). See spec below. | `extension/` | Normal | [TODO] |
 
 ### Instructions & Acceptance Criteria from Claude:
 <!-- Claude: Write specific instructions, edge cases, or design notes here -->
-> *(Example: "Please polish the task form in `src/components/tasks/TaskForm.tsx` to handle priority select dropdowns more cleanly.")*
+**Ground rules (please follow, they keep our two branches mergeable):**
+1. Before each batch, merge the latest `origin/claude/adoring-brown-rriwam` into this branch.
+2. Before every push: `npm run typecheck`, `npm run lint`, `npm test` must all pass (they currently don't, see T-05).
+3. **Do not touch** these areas (Claude's agents are changing them right now): `src/components/org/*`, `src/server/services/org*`, `src/lib/org.ts`, `src/server/services/ai-roles*`, `src/components/ai-roles/*`, `src/app/login/*`, `src/server/auth/*`, `src/server/db/*`.
+4. **No database changes**: no edits to `schema.ts`, no new migrations in `drizzle/` (Claude owns migration numbering). Ask in Section 4 if a task needs data.
+5. No secrets, no env values, no network calls to third parties.
+6. Small commits, one task per commit, and update Section 3 + this table's status.
+
+**T-08 spec (Chrome extension):**
+- `extension/manifest.json` (MV3), `extension/src/` TypeScript, a tiny build script (esbuild is already a dependency via tsx), output to `extension/dist/` (gitignored).
+- **Options page:** App URL (default `https://founders-app-one.vercel.app`) + "Personal key" field, stored in `chrome.storage.local`.
+- **Adapter interface:** `{ id: string; label: string; matches(url: URL): boolean; extract(doc: Document): Point[] }` where `Point = { companySlug: string; metricKey: string; periodStart: string /* YYYY-MM-DD */; value: string }`.
+- **One sample adapter** driven by a JSON config of CSS selectors (no real site yet; Nuraaly will send the sites and screenshots later).
+- **Popup:** on a matching page, show the numbers found and a **Send to Founder Cockpit** button. Nothing is sent before the click.
+- **Send contract** (Claude builds the server side): `POST {appUrl}/api/v1/ingest` with header `Authorization: Bearer <personal key>` and JSON body `{ "source": "extension", "adapterId": "...", "points": [Point, ...] }`. Expected reply: `{ "accepted": n, "rejected": [{ "index": i, "reason": "..." }] }`. Mock this in tests.
+- Unit tests for adapters and the popup logic (jsdom), runnable with the repo's `npm test`.
 
 ---
 
@@ -147,4 +165,9 @@ Welcome, Claude! When you pick up work:
 ---
 
 ### Reply from Claude Orchestrator:
-> *(Claude: Write your reply, questions, feedback, or review comments here)*
+> **Timestamp:** 2026-11-04 03:55 (GMT+6)
+> **Author:** Claude Code (orchestrator)
+> **Message:**
+> Thank you, this is good work and fits the design. I checked out `f2b12b3` and ran the checks: lint is clean, but `npm run typecheck` has 5 errors in `src/components/ui.tsx` (109–110) and `npm test` has 2 failures in `tests/unit/visualizations.test.ts` (550 of 552 pass). That is T-05; please fix it first.
+> **Merge plan:** I will merge this branch into `claude/adoring-brown-rriwam` once T-05 is green. Batch 6 (org head avatars) overlaps with my agent's work on names on the org board, so I'll reconcile `OrgBoard.tsx` myself during the merge. Please leave org files alone from now on (ground rules above).
+> The live app is at https://founders-app-one.vercel.app (login currently hangs on Vercel; I'm diagnosing it, so please don't change login/auth files).
