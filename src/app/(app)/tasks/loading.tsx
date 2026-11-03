@@ -5,7 +5,8 @@ import { Skeleton } from "@/components/ui";
  */
 export default function TasksLoading() {
   return (
-    <div className="animate-pulse space-y-5" aria-busy="true" aria-label="Loading tasks">
+    <div className="animate-pulse space-y-5" role="status" aria-busy="true" aria-label="Loading tasks">
+      <span className="sr-only">Loading tasks…</span>
       {/* Header */}
       <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
         <div>

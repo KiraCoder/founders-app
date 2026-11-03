@@ -5,7 +5,8 @@ import { Skeleton } from "@/components/ui";
  */
 export default function HoldingLoading() {
   return (
-    <div className="animate-pulse space-y-6" aria-busy="true" aria-label="Loading holding">
+    <div className="animate-pulse space-y-6" role="status" aria-busy="true" aria-label="Loading holding">
+      <span className="sr-only">Loading holding…</span>
       {/* Header */}
       <div>
         <Skeleton width={80} height={14} className="mb-2" />

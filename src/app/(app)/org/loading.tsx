@@ -5,7 +5,8 @@ import { Skeleton } from "@/components/ui";
  */
 export default function OrgLoading() {
   return (
-    <div className="animate-pulse space-y-6" aria-busy="true" aria-label="Loading org structure">
+    <div className="animate-pulse space-y-6" role="status" aria-busy="true" aria-label="Loading org structure">
+      <span className="sr-only">Loading org structure…</span>
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>

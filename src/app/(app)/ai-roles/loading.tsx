@@ -5,7 +5,8 @@ import { Skeleton } from "@/components/ui";
  */
 export default function AiRolesLoading() {
   return (
-    <div className="animate-pulse space-y-6" aria-busy="true" aria-label="Loading AI roles">
+    <div className="animate-pulse space-y-6" role="status" aria-busy="true" aria-label="Loading AI roles">
+      <span className="sr-only">Loading AI roles…</span>
       {/* Header */}
       <div>
         <Skeleton width={90} height={14} className="mb-2" />

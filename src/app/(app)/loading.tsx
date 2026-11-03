@@ -6,7 +6,8 @@ import { Skeleton } from "@/components/ui";
  */
 export default function AppLoading() {
   return (
-    <div className="animate-pulse space-y-6" aria-busy="true" aria-label="Loading page">
+    <div className="animate-pulse space-y-6" role="status" aria-busy="true" aria-label="Loading page">
+      <span className="sr-only">Loading page…</span>
       {/* Page Header skeleton */}
       <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
         <div>

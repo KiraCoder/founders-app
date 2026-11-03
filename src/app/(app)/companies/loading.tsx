@@ -5,7 +5,8 @@ import { Skeleton } from "@/components/ui";
  */
 export default function CompaniesLoading() {
   return (
-    <div className="animate-pulse space-y-5" aria-busy="true" aria-label="Loading companies">
+    <div className="animate-pulse space-y-5" role="status" aria-busy="true" aria-label="Loading companies">
+      <span className="sr-only">Loading companies…</span>
       {/* Header */}
       <div className="mb-5">
         <Skeleton width={110} height={14} className="mb-2" />
