@@ -4,6 +4,7 @@
  */
 import { daysBetween, formatDueDate, isoWeekday, type IsoDate } from "@/lib/dates";
 import type { TaskView, TodaySummary } from "@/server/services/tasks";
+import { renderedLineLength, renderTelegramTitleLength, TELEGRAM_MAX_TEXT } from "./render-telegram";
 import {
   TASK_ACTION_LABELS,
   TASK_ACTIONS,
@@ -26,21 +27,85 @@ export function taskLine(t: Pick<TaskView, "title" | "dueDate" | "company" | "pr
   if (t.priority === "urgent" || t.priority === "high") bits.push(t.priority);
   return bits.length ? `${t.title} — ${bits.join(" · ")}` : t.title;
 }
+const MORE_IN_APP = (n: number) => `+${n} more — open the app`;
 
-function section(heading: string, items: TaskView[], today: IsoDate): MessageLine[] {
+/**
+ * Room for the morning summary's text, a little under Telegram's 4096 characters. Action items
+ * (Holding, AI requests), parked items and "Numbers waiting" are always kept; the task
+ * sections share what is left and end with "+N more — open the app" when it runs out.
+ */
+export const SUMMARY_TEXT_BUDGET = TELEGRAM_MAX_TEXT - 64;
+
+/** A parked item for a summary: its line, the outbox rows it stands for, and its task. */
+export interface ParkedItem {
+  text: string;
+  /** parkedRef(outboxId) of every parked row this line covers. */
+  refs?: string[];
+  taskId?: string | null;
+}
+
+type TaskLike = Pick<TaskView, "id" | "title" | "dueDate" | "company" | "priority" | "visibility">;
+
+function cost(lines: readonly MessageLine[]): number {
+  return lines.reduce((n, l) => n + renderedLineLength(l), 0);
+}
+
+/**
+ * A task section. With a `budget` (characters), items are added while they fit and the rest
+ * becomes "+N more — open the app"; `taskLines` records the line of each task shown.
+ */
+function section(
+  heading: string,
+  items: readonly TaskLike[],
+  today: IsoDate,
+  opts: { budget?: { left: number }; taskLines?: Map<string, MessageLine> } = {},
+): MessageLine[] {
   if (!items.length) return [];
-  const lines: MessageLine[] = [{ text: `${heading} (${items.length})`, style: "heading" }];
-  for (const t of items.slice(0, MAX_PER_SECTION)) lines.push({ text: taskLine(t, today), style: "item" });
-  if (items.length > MAX_PER_SECTION) lines.push({ text: `+${items.length - MAX_PER_SECTION} more in the app`, style: "muted" });
+  const head: MessageLine = { text: `${heading} (${items.length})`, style: "heading" };
+  const lines: MessageLine[] = [head];
+  const budget = opts.budget;
+  const moreCost = renderedLineLength({ text: MORE_IN_APP(items.length), style: "muted" });
+  let left = budget ? budget.left - renderedLineLength(head) : Infinity;
+  let shown = 0;
+  for (const t of items.slice(0, MAX_PER_SECTION)) {
+    const line: MessageLine = { text: taskLine(t, today), style: "item" };
+    const len = renderedLineLength(line);
+    const isLast = shown === items.length - 1;
+    if (len + (isLast ? 0 : moreCost) > left) break;
+    left -= len;
+    lines.push(line);
+    opts.taskLines?.set(t.id, line);
+    shown++;
+  }
+  if (shown < items.length) {
+    const more: MessageLine = { text: MORE_IN_APP(items.length - shown), style: "muted" };
+    lines.push(more);
+    left -= renderedLineLength(more);
+  }
+  if (budget) budget.left = left;
   return lines;
 }
 
-function parkedSection(parked: string[]): MessageLine[] {
-  if (!parked.length) return [];
+function toParked(p: string | ParkedItem): ParkedItem {
+  return typeof p === "string" ? { text: p } : p;
+}
+
+/**
+ * "Parked reminders", minus tasks already listed in a section of the same message: their
+ * parked rows are attached to that task's line instead (bundled only if that line is shown).
+ */
+function parkedSection(parked: readonly ParkedItem[], taskLines?: Map<string, MessageLine>): MessageLine[] {
+  const rest: ParkedItem[] = [];
+  for (const p of parked) {
+    const line = p.taskId ? taskLines?.get(p.taskId) : undefined;
+    if (line) line.refs = [...(line.refs ?? []), ...(p.refs ?? [])];
+    else rest.push(p);
+  }
+  if (!rest.length) return [];
   return [
-    { text: `Parked reminders (${parked.length})`, style: "heading" },
-    ...parked.slice(0, MAX_PER_SECTION).map((text) => ({ text, style: "item" as const })),
-    ...(parked.length > MAX_PER_SECTION ? [{ text: `+${parked.length - MAX_PER_SECTION} more`, style: "muted" as const }] : []),
+    { text: `Parked reminders (${rest.length})`, style: "heading" },
+    ...rest.slice(0, MAX_PER_SECTION).map((p) => ({ text: p.text, style: "item" as const, ...(p.refs?.length ? { refs: p.refs } : {}) })),
+    ...(rest.length > MAX_PER_SECTION ? [{ text: `+${rest.length - MAX_PER_SECTION} more`, style: "muted" as const }] : []),
   ];
 }
 
@@ -106,10 +171,14 @@ export function numbersWaitingSection(items: readonly WaitingNumber[], today?: I
   return lines;
 }
 
-/** Morning summary: overdue, due today, this week, personal todos, parked items, numbers waiting. */
+/**
+ * Morning summary. Order: counts, then the ACTION items (Holding ask, AI role requests) so
+ * they can never be cut off, then the task sections (sharing a character budget), parked
+ * items (minus tasks already listed above) and "Numbers waiting".
+ */
 export function buildMorningSummary(
   s: TodaySummary,
-  parked: string[],
+  parked: readonly (string | ParkedItem)[],
   firstName: string,
   numbersWaiting: readonly WaitingNumber[] = [],
   holding: { lines: MessageLine[]; actions: MessageAction[] } | null = null,
@@ -117,36 +186,50 @@ export function buildMorningSummary(
 ): NeutralMessage {
   const listed = new Set([...s.overdue, ...s.dueToday, ...s.thisWeek].map((t) => t.id));
   const personalRest = s.personal.filter((t) => !listed.has(t.id));
-  const lines: MessageLine[] = [
-    {
-      text: `${s.overdue.length} overdue · ${s.dueToday.length} due today · ${s.thisWeek.length} this week`,
-      style: "text",
-    },
-    ...section("Overdue", s.overdue, s.today),
-    ...section("Due today", s.dueToday, s.today),
-    ...section("Due this week", s.thisWeek, s.today),
-    ...section("My personal todos", personalRest, s.today),
-    ...parkedSection(parked),
+  const parkedItems = parked.map(toParked);
+  const title = `Good morning, ${firstName}`;
+  const header: MessageLine = {
+    text: `${s.overdue.length} overdue · ${s.dueToday.length} due today · ${s.thisWeek.length} this week`,
+    style: "text",
+  };
+  const actionLines: MessageLine[] = [...(holding?.lines ?? []), ...aiLines];
+  const numbers = numbersWaitingSection(numbersWaiting, s.today);
+  const hasTasks = s.overdue.length + s.dueToday.length + s.thisWeek.length + personalRest.length > 0;
+  const nothing: MessageLine[] = !hasTasks && !parkedItems.length ? [{ text: "Nothing on your plate today.", style: "muted" }] : [];
+  // Everything except the task sections is kept whole; parked is counted before de-duplication
+  // (it can only get shorter).
+  const fixed =
+    renderTelegramTitleLength(title) + cost([header, ...actionLines, ...nothing, ...numbers]) + cost(parkedSection(parkedItems));
+  const budget = { left: SUMMARY_TEXT_BUDGET - fixed };
+  const taskLines = new Map<string, MessageLine>();
+  const opts = { budget, taskLines };
+  const tasks = [
+    ...section("Overdue", s.overdue, s.today, opts),
+    ...section("Due today", s.dueToday, s.today, opts),
+    ...section("Due this week", s.thisWeek, s.today, opts),
+    ...section("My personal todos", personalRest, s.today, opts),
   ];
-  if (lines.length === 1) lines.push({ text: "Nothing on your plate today.", style: "muted" });
-  lines.push(...numbersWaitingSection(numbersWaiting, s.today));
-  // AI roles: data requests composed by the orchestrator (deduped against "Numbers waiting").
-  lines.push(...aiLines);
-  if (holding?.lines.length) lines.push(...holding.lines);
+  const lines: MessageLine[] = [header, ...nothing, ...actionLines, ...tasks, ...parkedSection(parkedItems), ...numbers];
   return {
-    title: `Good morning, ${firstName}`,
+    title,
     lines,
     ...(holding?.actions.length ? { actions: holding.actions } : {}),
   };
 }
 
-/** Evening check: what is still open today. Null when there is nothing to say. */
-export function buildEveningCheck(s: TodaySummary, parked: string[]): NeutralMessage | null {
-  if (!s.dueToday.length && !s.overdue.length && !parked.length) return null;
+/**
+ * Evening check: what is still open today. Sent only when something due today is still open
+ * or parked items are waiting that no summary listed yet; overdue tasks alone (already in
+ * the morning summary) are no reason to message again. Null when there is nothing to say.
+ */
+export function buildEveningCheck(s: TodaySummary, parked: readonly (string | ParkedItem)[]): NeutralMessage | null {
+  const parkedItems = parked.map(toParked);
+  if (!s.dueToday.length && !s.overdue.length && !parkedItems.length) return null;
+  const taskLines = new Map<string, MessageLine>();
   const lines: MessageLine[] = [
-    ...section("Still open today", s.dueToday, s.today),
+    ...section("Still open today", s.dueToday, s.today, { taskLines }),
     ...(s.overdue.length ? [{ text: `${s.overdue.length} overdue task(s) still waiting for a new deadline.`, style: "text" as const }] : []),
-    ...parkedSection(parked),
+    ...parkedSection(parkedItems),
     { text: "Close what is done or move the deadline in the app.", style: "muted" },
   ];
   return { title: "Evening check", lines };
@@ -191,13 +274,15 @@ export function parkedLine(
 }
 
 export function buildTasksList(s: TodaySummary): NeutralMessage {
+  const title = "Your open tasks";
+  const opts = { budget: { left: SUMMARY_TEXT_BUDGET - renderTelegramTitleLength(title) } };
   const lines = [
-    ...section("Overdue", s.overdue, s.today),
-    ...section("Due today", s.dueToday, s.today),
-    ...section("Due this week", s.thisWeek, s.today),
-    ...section("My personal todos", s.personal, s.today),
+    ...section("Overdue", s.overdue, s.today, opts),
+    ...section("Due today", s.dueToday, s.today, opts),
+    ...section("Due this week", s.thisWeek, s.today, opts),
+    ...section("My personal todos", s.personal, s.today, opts),
   ];
-  return { title: "Your open tasks", lines: lines.length ? lines : [{ text: "No open tasks. Nice.", style: "muted" }] };
+  return { title, lines: lines.length ? lines : [{ text: "No open tasks. Nice.", style: "muted" }] };
 }
 
 export function buildHelp(): NeutralMessage {

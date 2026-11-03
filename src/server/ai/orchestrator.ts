@@ -2,7 +2,7 @@ import "server-only";
 import { monthStart, monthsLabel } from "@/lib/ai-roles";
 import type { IsoDate } from "@/lib/dates";
 import type { Db } from "@/server/db/connect";
-import type { MessageLine } from "@/server/notifications/types";
+import { aiRequestRef, type MessageLine } from "@/server/notifications/types";
 import type { WaitingNumber } from "@/server/notifications/messages";
 import { appUrl, collectAiRequests, numbersHref, planAiRoles, type AiPlanReport, type AiRequestItem, type EngineOptions } from "@/server/services/ai-roles";
 import type { ServiceContext } from "@/server/services/context";
@@ -87,22 +87,20 @@ export function composeRequests(
     return !w.waitingFor || months.has(monthStart(w.waitingFor));
   };
   const holdingAsks = !!holding?.lines.length;
-  const lines: string[] = [];
-  const shownIds: string[] = [];
+  const lines: { text: string; requestId: string }[] = [];
   const waitingOnActs: string[] = [];
   for (const item of items) {
     // Defence in depth: a holding-fed number is never asked by a role, however it got here.
     const own = item.missing.filter((m) => m.key !== DEBT_METRIC_KEY);
     if (holdingAsks && (item.waitingOnHolding.length || own.length < item.missing.length)) waitingOnActs.push(`${item.roleName} (${item.companyName})`);
     if (!item.dueToday || !own.length) continue;
-    lines.push(roleLine(item, own));
-    shownIds.push(item.requestId);
+    lines.push({ text: roleLine(item, own), requestId: item.requestId });
   }
   const visible = lines.slice(0, MAX_REQUEST_LINES);
   const aiLines: MessageLine[] = visible.length
     ? [
         { text: "AI roles · numbers needed", style: "heading" },
-        ...visible.map((text) => ({ text, style: "item" as const })),
+        ...visible.map((l) => ({ text: l.text, style: "item" as const, refs: [aiRequestRef(l.requestId)] })),
         ...(lines.length > visible.length ? [{ text: `+${lines.length - visible.length} more on the AI roles page`, style: "muted" as const }] : []),
       ]
     : [];
@@ -117,7 +115,7 @@ export function composeRequests(
     waiting: waiting.filter((w) => !isCovered(w)),
     holding: composedHolding,
     aiLines,
-    aiRequestIds: shownIds.slice(0, MAX_REQUEST_LINES),
+    aiRequestIds: visible.map((l) => l.requestId),
   };
 }
 

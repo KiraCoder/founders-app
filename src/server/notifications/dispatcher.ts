@@ -13,9 +13,10 @@ import { mintActionTokens } from "./action-tokens";
 import { createChannelRegistry, type ChannelRegistry } from "./channels";
 import { getFounder, listFounders } from "./founders";
 import { getLinkForUser } from "./linking";
-import { buildEveningCheck, buildMorningSummary, buildTaskMessage, parkedLine } from "./messages";
+import { buildEveningCheck, buildMorningSummary, buildTaskMessage, parkedLine, type ParkedItem } from "./messages";
 import { loadPreferences, type Preferences } from "./preferences";
-import { isSummaryKind, SUMMARY_KINDS, type NeutralMessage, type NotificationKind } from "./types";
+import { fitTelegram } from "./render-telegram";
+import { aiRequestRef, holdingRef, isSummaryKind, parkedRef, SUMMARY_KINDS, type NeutralMessage, type NotificationKind } from "./types";
 
 export const MAX_ATTEMPTS = 5;
 /** Retry delays after the 1st, 2nd, 3rd, 4th failure. */
@@ -121,9 +122,9 @@ function budgetFilter(cls: Exclude<BudgetClass, "urgent">, item: OutboxItem): SQ
 /**
  * Parked items not yet listed in a summary, re-checked and re-rendered from the tasks'
  * CURRENT state. Items whose task is closed, gone, or no longer due/overdue (deadline
- * moved) are dropped; one line per task.
+ * moved) are dropped; one line per task (or report), carrying the refs of every row it covers.
  */
-async function collectParked(ctx: ServiceContext): Promise<{ keep: string[]; drop: string[]; lines: string[] }> {
+async function collectParked(ctx: ServiceContext): Promise<{ drop: string[]; items: ParkedItem[] }> {
   const rows = await ctx.db
     .select()
     .from(notificationsOutbox)
@@ -136,10 +137,13 @@ async function collectParked(ctx: ServiceContext): Promise<{ keep: string[]; dro
     )
     .orderBy(asc(notificationsOutbox.parkedAt));
   const today = todayInTimeZone(ctx.now, ctx.timeZone);
-  const keep: string[] = [];
   const drop: string[] = [];
-  const lines: string[] = [];
-  const seen = new Set<string>();
+  const byKey = new Map<string, ParkedItem>();
+  const add = (k: string, rowId: string, make: () => ParkedItem) => {
+    const item = byKey.get(k) ?? make();
+    item.refs = [...(item.refs ?? []), parkedRef(rowId)];
+    byKey.set(k, item);
+  };
   for (const r of rows) {
     if (r.kind === REPORT_KIND) {
       // A parked "report ready" push: one line, if the report still exists.
@@ -149,11 +153,7 @@ async function collectParked(ctx: ServiceContext): Promise<{ keep: string[]; dro
         drop.push(r.id);
         continue;
       }
-      keep.push(r.id);
-      if (!seen.has(`run:${runId}`)) {
-        seen.add(`run:${runId}`);
-        lines.push(line);
-      }
+      add(`run:${runId}`, r.id, () => ({ text: line }));
       continue;
     }
     const task = r.taskId ? await getTask(ctx, r.taskId).catch(() => null) : null;
@@ -163,16 +163,13 @@ async function collectParked(ctx: ServiceContext): Promise<{ keep: string[]; dro
       drop.push(r.id);
       continue;
     }
-    keep.push(r.id);
-    if (seen.has(task.id)) continue;
-    seen.add(task.id);
-    lines.push(parkedLine(task, today));
+    add(`task:${task.id}`, r.id, () => ({ text: parkedLine(task, today), taskId: task.id }));
   }
-  return { keep, drop, lines };
+  return { drop, items: [...byKey.values()] };
 }
 
 type Built =
-  | { message: NeutralMessage; bundle?: string[]; dropParked?: string[]; holdingItemIds?: string[]; aiRequestIds?: string[] }
+  | { message: NeutralMessage; dropParked?: string[]; holdingItemIds?: string[]; aiRequestIds?: string[] }
   | { skip: string };
 
 async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
@@ -203,10 +200,10 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
         : null;
     const message =
       kind === "morning_summary"
-        ? buildMorningSummary(summary, parked.lines, ctx.user.shortName, composed!.waiting, composed!.holding, composed!.aiLines)
-        : buildEveningCheck(summary, parked.lines);
+        ? buildMorningSummary(summary, parked.items, ctx.user.shortName, composed!.waiting, composed!.holding, composed!.aiLines)
+        : buildEveningCheck(summary, parked.items);
     return message
-      ? { message, bundle: parked.keep, dropParked: parked.drop, holdingItemIds: holding?.itemIds, aiRequestIds: composed?.aiRequestIds }
+      ? { message, dropParked: parked.drop, holdingItemIds: holding?.itemIds, aiRequestIds: composed?.aiRequestIds }
       : { skip: "nothing_to_send" };
   }
   if (kind === REPORT_KIND) {
@@ -422,10 +419,13 @@ async function processItem(
       .where(and(inArray(notificationsOutbox.id, built.dropParked), eq(notificationsOutbox.status, "parked")));
   }
 
-  const callbacks = built.message.actions?.length
-    ? await mintActionTokens(db, { userId: user.id, outboxId: item.id, actions: built.message.actions, now })
+  // Fit Telegram's length limit by whole lines; only what made it into the text counts as
+  // shown (holding asks, AI requests) or bundled (parked items). The rest waits for the next summary.
+  const { message, keptRefs } = fitTelegram(built.message);
+  const callbacks = message.actions?.length
+    ? await mintActionTokens(db, { userId: user.id, outboxId: item.id, actions: message.actions, now })
     : undefined;
-  const result = await channel.send(recipient, built.message, callbacks);
+  const result = await channel.send(recipient, message, callbacks);
   const attempts = item.attempts + 1;
 
   if (result.ok) {
@@ -434,18 +434,28 @@ async function processItem(
       sentAt: now,
       channel: channel.name,
       providerMessageId: result.providerMessageId ?? null,
-      message: built.message,
+      message,
       attempts,
       lastError: null,
       nextAttemptAt: null,
     });
-    if (built.holdingItemIds?.length) await markAskItemsShown(db, built.holdingItemIds, item.id, now);
-    if (built.aiRequestIds?.length) await markRequestsShown(db, built.aiRequestIds, todayInTimeZone(now, tz), item.id);
-    if (built.bundle?.length) {
+    const shownAsks = (built.holdingItemIds ?? []).filter((id) => keptRefs.has(holdingRef(id)));
+    const shownRequests = (built.aiRequestIds ?? []).filter((id) => keptRefs.has(aiRequestRef(id)));
+    const bundle = [...keptRefs].filter((r) => r.startsWith("p:")).map((r) => r.slice(2));
+    if (shownAsks.length) await markAskItemsShown(db, shownAsks, item.id, now);
+    if (shownRequests.length) await markRequestsShown(db, shownRequests, todayInTimeZone(now, tz), item.id);
+    if (bundle.length) {
       await db
         .update(notificationsOutbox)
         .set({ bundledIntoId: item.id })
-        .where(and(inArray(notificationsOutbox.id, built.bundle), isNull(notificationsOutbox.bundledIntoId)));
+        .where(
+          and(
+            inArray(notificationsOutbox.id, bundle),
+            eq(notificationsOutbox.userId, user.id),
+            eq(notificationsOutbox.status, "parked"),
+            isNull(notificationsOutbox.bundledIntoId),
+          ),
+        );
     }
     report.sent++;
   } else if (result.permanent || attempts >= MAX_ATTEMPTS) {

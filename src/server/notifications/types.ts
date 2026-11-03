@@ -53,7 +53,17 @@ export type LineStyle = "heading" | "item" | "text" | "muted";
 export interface MessageLine {
   text: string;
   style?: LineStyle;
+  /**
+   * What this line stands for (parked outbox items, holding ask items, AI data requests),
+   * so the dispatcher marks them shown/bundled only when the line made it into the text.
+   * Built with parkedRef / holdingRef / aiRequestRef.
+   */
+  refs?: string[];
 }
+
+export const parkedRef = (outboxId: string) => `p:${outboxId}`;
+export const holdingRef = (askItemId: string) => `h:${askItemId}`;
+export const aiRequestRef = (requestId: string) => `ai:${requestId}`;
 
 /** Actions on holding items: "I asked Elmurat" marks the item's months as requested. */
 export const HOLDING_ACTIONS = ["holding_asked"] as const;

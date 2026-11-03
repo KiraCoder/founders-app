@@ -13,7 +13,7 @@ import {
 import type { Db } from "@/server/db/connect";
 import { holdingAskItems, type HoldingAskItem } from "@/server/db/schema";
 import { listFounders } from "@/server/notifications/founders";
-import type { MessageAction, MessageLine } from "@/server/notifications/types";
+import { holdingRef, type MessageAction, type MessageLine } from "@/server/notifications/types";
 import { assertHoldingAccess, assertValidId } from "./access";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
@@ -212,11 +212,11 @@ export async function holdingSummarySection(ctx: ServiceContext): Promise<Holdin
     if (!cells.length) continue;
     const groups = groupsFor(cells, grid);
     if (kind === "ask") {
-      lines.push({ text: askLine(groups, todayIso), style: "item" });
+      lines.push({ text: askLine(groups, todayIso), style: "item", refs: [holdingRef(newest.id)] });
       actions.push({ label: ASK_BUTTON_LABEL, action: "holding_asked", askId: newest.id });
     } else {
       const askedOn = cells.map((c) => c.requestedOn!).sort()[0] ?? null;
-      lines.push({ text: reminderLine(groups, todayIso, askedOn), style: "item" });
+      lines.push({ text: reminderLine(groups, todayIso, askedOn), style: "item", refs: [holdingRef(newest.id)] });
       actions.push({ label: ASK_AGAIN_BUTTON_LABEL, action: "holding_asked", askId: newest.id });
     }
     itemIds.push(newest.id);

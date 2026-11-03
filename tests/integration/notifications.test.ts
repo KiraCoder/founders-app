@@ -111,6 +111,34 @@ describe("daily budget (anti-spam)", () => {
     expect(after.filter((i) => i.bundledIntoId === checkRow.id)).toHaveLength(2);
   });
 
+  it("bundles only the parked items whose line made it into the summary (whole-app review #1)", async () => {
+    const db = t.handle.db;
+    await updateMyPreferences(t.ctx("nuraaly"), {
+      morningSummaryTime: "08:30",
+      eveningCheckEnabled: true,
+      eveningCheckTime: "19:00",
+      quietStart: "21:00",
+      quietEnd: "08:00",
+      maxOtherPerDay: 0,
+      urgentAtNight: false,
+    });
+    for (let i = 1; i <= 11; i++) await overdueTask("nuraaly", `Parked late ${i}`);
+    await planTick(db, FIXED_NOW);
+    await dispatch(db, FIXED_NOW, { registry: recordingRegistry().registry });
+    expect((await outbox(t.userIds.nuraaly)).filter((r) => r.status === "parked")).toHaveLength(11);
+
+    const { sent, registry } = recordingRegistry();
+    await dispatch(db, EVENING, { registry });
+    const check = sent.find((s) => s.userId === t.userIds.nuraaly && s.message.title === "Evening check")!;
+    expect(text(check.message)).toContain("Parked reminders (11)");
+    expect(text(check.message)).toContain("+3 more");
+    const after = await outbox(t.userIds.nuraaly);
+    const checkRow = after.find((i) => i.kind === "evening_check")!;
+    // 8 lines shown → 8 rows bundled; the 3 behind "+3 more" stay parked for the next summary.
+    expect(after.filter((i) => i.bundledIntoId === checkRow.id)).toHaveLength(8);
+    expect(after.filter((i) => i.status === "parked" && !i.bundledIntoId)).toHaveLength(3);
+  });
+
   it("respects a custom budget of 0 extra pushes", async () => {
     await updateMyPreferences(t.ctx("talant"), {
       morningSummaryTime: "08:30",
