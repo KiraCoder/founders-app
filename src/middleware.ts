@@ -3,7 +3,7 @@ import { SESSION_COOKIE, verifySessionToken } from "@/server/auth/session-token"
 import { checkMutatingApiRequest } from "@/server/http/request-guard";
 
 /** No session cookie needed. The two API routes check their own secrets (constant-time). */
-const PUBLIC_PATHS = ["/login", "/api/telegram/webhook", "/api/cron/tick"];
+const PUBLIC_PATHS = ["/login", "/api/telegram/webhook", "/api/cron/tick", "/api/health"];
 
 /**
  * First gate: every route except /login needs a validly signed session cookie.
