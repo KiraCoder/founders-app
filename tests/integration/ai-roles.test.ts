@@ -380,6 +380,30 @@ describe("analysis and the report-ready push", () => {
     await rerunReport(ctx, oct!.id);
     expect(await getRun(ctx, oct!.id)).toMatchObject({ inputsChanged: false, settingsChanged: false });
   });
+
+  it("a task created while the run is re-analysing keeps its link (no duplicate task on the next click)", async () => {
+    const [oct] = await t.handle.db.select().from(aiRoleRuns).where(eq(aiRoleRuns.period, "2026-10-01"));
+    // Start from a risk finding without a task.
+    const unlinked = (oct!.findings as { id: string; taskId?: string | null }[]).map((f) => ({ ...f, taskId: null }));
+    await t.handle.db.update(aiRoleRuns).set({ findings: unlinked }).where(eq(aiRoleRuns.id, oct!.id));
+    const risk = (await getRun(t.ctx("nuraaly"), oct!.id)).findings.find((f) => f.severity === "risk")!;
+    const ctx = t.ctx("nuraaly", bishkek("2026-12-16", "10:00"));
+    await saveMetricGrid(ctx, kiwiGoId, [{ metricId: await metricId(kiwiGoId, "revenue"), period: "2026-10", value: "1160000" }]);
+    let raced: string | null = null;
+    // The provider runs between the analysis and the write: a founder clicks "Create task" then.
+    const racing: LlmProvider = {
+      id: "race",
+      configured: true,
+      generate: async () => {
+        raced = (await createTaskFromFinding(t.ctx("talant"), oct!.id, risk.id)).taskId;
+        return { text: "ok", usage: { inputTokens: 0, outputTokens: 0 } };
+      },
+    };
+    const after = await rerunReport(ctx, oct!.id, { provider: racing });
+    expect(raced).not.toBeNull();
+    expect(after.findings.find((f) => f.id === risk.id)!.taskId).toBe(raced);
+    expect(await createTaskFromFinding(t.ctx("nuraaly"), oct!.id, risk.id)).toEqual({ taskId: raced, created: false });
+  });
 });
 
 describe("report-ready push respects budget, quiet hours and not linked", () => {

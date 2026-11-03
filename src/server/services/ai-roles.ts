@@ -502,25 +502,36 @@ export async function evaluateRun(db: Db, hc: HireContext, run: AiRoleRun, now: 
         series: ev.series,
         thresholds: hc.settings.thresholds,
       });
-      // Keep tasks already created from a finding that is still there.
-      const previous = new Map(findingsOf(run).map((f) => [f.id, f.taskId]));
-      for (const f of findings) if (previous.get(f.id)) f.taskId = previous.get(f.id);
       const narrative = await generateNarrative(
         { roleName: hc.template.name, companyName: hc.companyName, periodLabel: monthLabel(run.period), findings },
         opts.provider ?? getLlmProvider(),
       );
-      current = await update({
-        status: current.status === "reported" ? "reported" : "analysed",
-        missing: [],
-        inputs: ev.inputs,
-        inputsHash: hashInputs(ev.inputs),
-        settingsHash: hashSettings(required, hc.settings.thresholds),
-        findings,
-        narrative: narrative.text,
-        narrativeStatus: narrative.status,
-        provider: narrative.provider,
-        error: null,
-        analysedAt: now,
+      // Written under the row lock that "Create task" also takes: the task links are read from
+      // the locked row (not from the copy read before the analysis), so a task created while
+      // this run was analysing is kept on its finding, and never created twice.
+      current = await db.transaction(async (tx) => {
+        const [locked] = await tx.select().from(aiRoleRuns).where(eq(aiRoleRuns.id, run.id)).for("update");
+        const links = new Map(findingsOf(locked!).flatMap((f) => (f.taskId ? [[f.id, f.taskId] as const] : [])));
+        for (const f of findings) if (!f.taskId && links.has(f.id)) f.taskId = links.get(f.id);
+        const [row] = await tx
+          .update(aiRoleRuns)
+          .set({
+            status: locked!.status === "reported" ? "reported" : "analysed",
+            missing: [],
+            inputs: ev.inputs,
+            inputsHash: hashInputs(ev.inputs),
+            settingsHash: hashSettings(required, hc.settings.thresholds),
+            findings,
+            narrative: narrative.text,
+            narrativeStatus: narrative.status,
+            provider: narrative.provider,
+            error: null,
+            analysedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(aiRoleRuns.id, run.id))
+          .returning();
+        return row!;
       });
     }
     if (current.status === "analysed") {
