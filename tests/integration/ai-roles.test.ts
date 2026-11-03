@@ -217,6 +217,18 @@ describe("run state machine, data requests and chasing", () => {
     );
     expect(c.waiting.map((w) => w.label)).toEqual(["Sales"]);
     expect(c.aiLines).toEqual([]); // parked until its next chase day, still not in Numbers waiting
+    // Only the months the role asks for are hidden: a daily number late for November days stays
+    // in Numbers waiting while the role asks for its October values.
+    const orders = await metricId(kiwiGoId, "orders_day");
+    const byPeriod = composeRequests(
+      [{ requestId: "r1", hireId: "h1", roleName: "Financial Analyst", companyName: "Kiwi Go", companySlug: "kiwi-go", months: ["2026-10-01"], dueToday: true, waitingOnHolding: [], missing: [{ metricId: orders, key: "orders_day", label: "Orders per day", granularity: "day", months: ["2026-10-01"] }] }],
+      [
+        { metricId: orders, companyName: "Kiwi Go", label: "Orders per day", waitingFor: "2026-11-02" },
+        { metricId: orders, companyName: "Kiwi Go", label: "Orders per day (Oct)", waitingFor: "2026-10-15" },
+      ],
+      null,
+    );
+    expect(byPeriod.waiting.map((w) => w.label)).toEqual(["Orders per day"]);
   });
 
   it("dedupe with Holding: the debt number derived from акты is asked by the Holding section only", () => {

@@ -519,8 +519,9 @@ for, thresholds) it says *Settings changed* instead — two hashes per run (`inp
 
 **The orchestrator** (`src/server/ai/orchestrator.ts`) runs the roles on every tick and
 composes the morning summary's requests so nothing is asked twice: a number an AI role is
-asking for is removed from *Numbers waiting* (also on days the role's line is parked until its
-next chase day); numbers the Holding computes from акты (intercompany debt, any `derived`
+asking for is removed from *Numbers waiting* for the months the role asks for (also on days the
+role's line is parked until its next chase day) — a daily number late for this month's days
+stays in *Numbers waiting* while the role asks for last month; numbers the Holding computes from акты (intercompany debt, any `derived`
 number) are **never** on a role's line — not even after "I asked Elmurat", when the Holding has
 nothing to ask that day (a hand-entered value would block the later derived update). The
 Holding section asks for the акты and notes that the role waits for them too. Only the two founders

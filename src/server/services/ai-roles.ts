@@ -710,13 +710,17 @@ export interface AiRequestItem {
   companySlug: string;
   /** Months still waiting (oldest first). */
   months: IsoDate[];
-  /** Missing numbers across those months the founders can enter (one entry per metric). */
-  missing: { metricId: string; key: string; label: string; granularity: Granularity }[];
+  /**
+   * Missing numbers across those months the founders can enter (one entry per metric), with
+   * the months each is missing for (the orchestrator hides only those periods from "Numbers
+   * waiting").
+   */
+  missing: { metricId: string; key: string; label: string; granularity: Granularity; months?: IsoDate[] }[];
   /**
    * Missing numbers the Holding computes from акты (never asked by the role; the Holding
    * section asks for the акты). Still listed here so "Numbers waiting" doesn't ask for them.
    */
-  waitingOnHolding: { metricId: string; key: string; label: string }[];
+  waitingOnHolding: { metricId: string; key: string; label: string; months?: IsoDate[] }[];
   /** True when today is one of the request's chase days (daily for 7 days, then weekly). */
   dueToday: boolean;
 }
@@ -772,10 +776,14 @@ export async function collectAiRequests(ctx: ServiceContext): Promise<AiRequestI
     const waitingOnHolding: AiRequestItem["waitingOnHolding"] = [];
     for (const run of waiting) {
       for (const m of run.missing) {
-        if (missing.some((x) => x.metricId === m.metricId) || waitingOnHolding.some((x) => x.metricId === m.metricId)) continue;
+        const seen = missing.find((x) => x.metricId === m.metricId) ?? waitingOnHolding.find((x) => x.metricId === m.metricId);
+        if (seen) {
+          seen.months!.push(run.period);
+          continue;
+        }
         const def = defs.get(m.metricId);
-        if (holdingFed({ key: m.key, sourceKind: def?.sourceKind })) waitingOnHolding.push({ metricId: m.metricId, key: m.key, label: m.label });
-        else missing.push({ metricId: m.metricId, key: m.key, label: m.label, granularity: def?.granularity ?? "month" });
+        if (holdingFed({ key: m.key, sourceKind: def?.sourceKind })) waitingOnHolding.push({ metricId: m.metricId, key: m.key, label: m.label, months: [run.period] });
+        else missing.push({ metricId: m.metricId, key: m.key, label: m.label, granularity: def?.granularity ?? "month", months: [run.period] });
       }
     }
     out.push({

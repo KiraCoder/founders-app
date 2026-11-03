@@ -1,5 +1,6 @@
 import "server-only";
-import { monthsLabel } from "@/lib/ai-roles";
+import { monthStart, monthsLabel } from "@/lib/ai-roles";
+import type { IsoDate } from "@/lib/dates";
 import type { Db } from "@/server/db/connect";
 import type { MessageLine } from "@/server/notifications/types";
 import type { WaitingNumber } from "@/server/notifications/messages";
@@ -23,8 +24,9 @@ import type { HoldingSection } from "@/server/services/holding-asks";
  * Holding ("ask Elmurat" for акты). THE RULE:
  *
  * 1. A number is asked for by ONE source only. When an AI role has an active request that
- *    covers a number, that number is removed from "Numbers waiting" and appears only on the
- *    role's line ("Financial Analyst needs October 2026 numbers for Kiwi Go: …"). This holds
+ *    covers a number FOR A MONTH, that number is removed from "Numbers waiting" while it is
+ *    waiting for a period of that month (a daily number late for November days stays in
+ *    "Numbers waiting" while the role asks for October), and appears only on the role's line ("Financial Analyst needs October 2026 numbers for Kiwi Go: …"). This holds
  *    on the days the role's line is NOT shown too (after 7 days it chases weekly): the number
  *    is parked until the role's next chase day instead of being asked by "Numbers waiting".
  * 2. One line per hire per founder per day at most, at most 3 role lines per summary.
@@ -67,10 +69,23 @@ function roleLine(item: AiRequestItem, missing: AiRequestItem["missing"]): strin
  */
 export function composeRequests(
   items: readonly AiRequestItem[],
-  waiting: readonly (WaitingNumber & { metricId?: string })[],
+  waiting: readonly (WaitingNumber & { metricId?: string; waitingFor?: IsoDate })[],
   holding: HoldingSection | null,
 ): ComposedRequests {
-  const covered = new Set(items.flatMap((i) => [...i.missing, ...i.waitingOnHolding].map((m) => m.metricId)));
+  // metricId → months the roles ask for it.
+  const covered = new Map<string, Set<IsoDate>>();
+  for (const i of items) {
+    for (const m of [...i.missing, ...i.waitingOnHolding]) {
+      const set = covered.get(m.metricId) ?? new Set<IsoDate>();
+      for (const p of m.months ?? i.months) set.add(p);
+      covered.set(m.metricId, set);
+    }
+  }
+  const isCovered = (w: { metricId?: string; waitingFor?: IsoDate }) => {
+    const months = w.metricId ? covered.get(w.metricId) : undefined;
+    if (!months) return false;
+    return !w.waitingFor || months.has(monthStart(w.waitingFor));
+  };
   const holdingAsks = !!holding?.lines.length;
   const lines: string[] = [];
   const shownIds: string[] = [];
@@ -99,7 +114,7 @@ export function composeRequests(
     };
   }
   return {
-    waiting: waiting.filter((w) => !(w.metricId && covered.has(w.metricId))),
+    waiting: waiting.filter((w) => !isCovered(w)),
     holding: composedHolding,
     aiLines,
     aiRequestIds: shownIds.slice(0, MAX_REQUEST_LINES),
@@ -109,7 +124,7 @@ export function composeRequests(
 /** Collects the AI role requests for this founder and composes the morning-summary requests. */
 export async function composeMorningRequests(
   ctx: ServiceContext,
-  input: { waiting: readonly (WaitingNumber & { metricId?: string })[]; holding: HoldingSection | null },
+  input: { waiting: readonly (WaitingNumber & { metricId?: string; waitingFor?: IsoDate })[]; holding: HoldingSection | null },
 ): Promise<ComposedRequests> {
   const items = ctx.user.role === "founder" ? await collectAiRequests(ctx) : [];
   return composeRequests(items, input.waiting, input.holding);
