@@ -72,7 +72,7 @@ export function isTransactionPoolerUrl(databaseUrl: string): boolean {
  * session-pooler connection, so a URL copied from the wrong tab still works.
  * `connect_timeout` keeps an unreachable database from hanging a build step or a request.
  */
-export function postgresClientOptions(databaseUrl: string): {
+export function postgresClientOptions(_databaseUrl: string): {
   prepare: false;
   max: number;
   connect_timeout: number;
@@ -82,8 +82,12 @@ export function postgresClientOptions(databaseUrl: string): {
 } {
   return {
     prepare: false,
-    // Serverless (Vercel): every instance opens its own pool; the pooler multiplexes them.
-    max: isTransactionPoolerUrl(databaseUrl) ? 3 : 5,
+    // ONE connection per server instance, one query at a time. Through Supabase's pooler,
+    // several queries in flight at once (e.g. the Today page's Promise.all of 5) left the
+    // server sessions stuck in "active / ClientRead" and every later request hung until the
+    // 300 s function timeout (seen in production, Nov 2026). Serial queries never hung.
+    // Two founders do not need parallel connections; postgres-js queues the rest.
+    max: 1,
     connect_timeout: 15,
     // Close idle sockets quickly: a serverless instance that was frozen between requests can
     // otherwise wake up holding a dead connection and hang the next query.
