@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { getDb } from "@/server/db/client";
+import { describeDatabaseUrl } from "@/server/db/connect";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -11,6 +12,7 @@ export const maxDuration = 30;
 export async function GET() {
   const started = Date.now();
   const region = process.env.VERCEL_REGION ?? null;
+  const database = describeDatabaseUrl(process.env.DATABASE_URL);
   const timeout = new Promise<never>((_, reject) =>
     setTimeout(() => reject(Object.assign(new Error("Database did not answer within 10 s"), { code: "TIMEOUT" })), 10_000),
   );
@@ -21,14 +23,14 @@ export async function GET() {
     const t2 = Date.now();
     await Promise.race([db.execute(sql`select 1`), timeout]);
     return Response.json(
-      { ok: true, region, firstQueryMs: t2 - started, connectMs: connectedMs, secondQueryMs: Date.now() - t2 },
+      { ok: true, region, database, firstQueryMs: t2 - started, connectMs: connectedMs, secondQueryMs: Date.now() - t2 },
       { headers: { "cache-control": "no-store" } },
     );
   } catch (err) {
     const e = err as { code?: string; message?: string };
     const message = String(e?.message ?? "unknown error").replace(/postgres(ql)?:\/\/\S+/gi, "[url]").slice(0, 200);
     return Response.json(
-      { ok: false, region, afterMs: Date.now() - started, code: e?.code ?? null, message },
+      { ok: false, region, database, afterMs: Date.now() - started, code: e?.code ?? null, message },
       { status: 503, headers: { "cache-control": "no-store" } },
     );
   }

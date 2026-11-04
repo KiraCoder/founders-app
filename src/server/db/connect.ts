@@ -33,7 +33,7 @@ export async function connectDb(databaseUrl = process.env.DATABASE_URL): Promise
   if (databaseUrl && databaseUrl !== "memory://") {
     const { default: postgres } = await import("postgres");
     const { drizzle } = await import("drizzle-orm/postgres-js");
-    const client = postgres(withoutPgbouncerParam(databaseUrl), postgresClientOptions(databaseUrl));
+    const client = postgres(toSessionPooler(withoutPgbouncerParam(databaseUrl)), postgresClientOptions(databaseUrl));
     const db = drizzle(client, { schema }) as unknown as Db;
     return { db, driver: "postgres", close: () => client.end() };
   }
@@ -110,6 +110,36 @@ export function withoutPgbouncerParam(databaseUrl: string): string {
     return u.toString();
   } catch {
     return databaseUrl;
+  }
+}
+
+/**
+ * Supabase's Transaction pooler (Supavisor, port 6543) left some parameterised queries from
+ * postgres-js stuck forever ("active / ClientRead" on the server, seen in production, Nov 2026),
+ * even one query at a time. The Session pooler on the SAME host and credentials (port 5432)
+ * passes the protocol through unchanged, so a Supabase pooler URL on 6543 is moved to 5432.
+ * Other URLs are returned unchanged.
+ */
+export function toSessionPooler(databaseUrl: string): string {
+  try {
+    const u = new URL(databaseUrl);
+    if (!u.hostname.endsWith(".pooler.supabase.com") || u.port !== "6543") return databaseUrl;
+    u.port = "5432";
+    return u.toString();
+  } catch {
+    return databaseUrl;
+  }
+}
+
+/** Which kind of database address is in use, for the health check (never the URL itself). */
+export function describeDatabaseUrl(databaseUrl: string | undefined): { host: string; port: string } | null {
+  if (!databaseUrl || databaseUrl === "memory://") return null;
+  try {
+    const u = new URL(toSessionPooler(withoutPgbouncerParam(databaseUrl)));
+    const host = u.hostname.endsWith(".pooler.supabase.com") ? "supabase-pooler" : u.hostname.endsWith(".supabase.co") ? "supabase-direct" : "other";
+    return { host, port: u.port || "5432" };
+  } catch {
+    return { host: "unparseable", port: "" };
   }
 }
 

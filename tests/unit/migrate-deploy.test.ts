@@ -84,3 +84,16 @@ describe("postgres-js options behind Supabase's poolers", () => {
     expect(withoutPgbouncerParam(plain)).toBe(plain);
   });
 });
+
+describe("Supabase Transaction pooler is moved to the Session pooler", () => {
+  it("rewrites only *.pooler.supabase.com:6543", async () => {
+    const { toSessionPooler, describeDatabaseUrl } = await import("@/server/db/connect");
+    expect(toSessionPooler("postgresql://postgres.abc:p%40ss@aws-0-eu-central-1.pooler.supabase.com:6543/postgres")).toBe(
+      "postgresql://postgres.abc:p%40ss@aws-0-eu-central-1.pooler.supabase.com:5432/postgres",
+    );
+    const keep = ["postgresql://u:p@aws-0-eu-central-1.pooler.supabase.com:5432/postgres", "postgres://u:p@db.x.supabase.co:5432/postgres", "postgres://u:p@localhost:6543/x", "not a url"];
+    for (const url of keep) expect(toSessionPooler(url)).toBe(url);
+    expect(describeDatabaseUrl("postgresql://u:secret@aws-0-eu-central-1.pooler.supabase.com:6543/postgres")).toEqual({ host: "supabase-pooler", port: "5432" });
+    expect(JSON.stringify(describeDatabaseUrl("postgresql://u:secret@h.example.com/x"))).not.toContain("secret");
+  });
+});
