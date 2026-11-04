@@ -59,7 +59,7 @@ export const COMPANY_SEED: CompanySeed[] = [
     slug: "kiwi-go",
     name: "Kiwi Go",
     legalName: "ОсОО KiwiKG",
-    kind: "operating",
+    kind: "courier",
     description:
       "Courier delivery startup in Osh: intercity (Bishkek → Osh), in-city delivery, COD for shops.",
     color: "#2E8B57",
@@ -69,7 +69,7 @@ export const COMPANY_SEED: CompanySeed[] = [
     slug: "jobutify",
     name: "Jobutify",
     legalName: "ОсОО Жобютифай",
-    kind: "service",
+    kind: "it_services",
     description: "The group's IT company. Builds the ERP, WMS and Kiwi Go apps. Run day-to-day by Edil.",
     color: "#1F4E8C",
     sort: 20,
@@ -77,7 +77,7 @@ export const COMPANY_SEED: CompanySeed[] = [
   {
     slug: "alura-brand",
     name: "Alura Brand",
-    kind: "operating",
+    kind: "brand_sales",
     description: "The clothing brand. Gives materials and orders to the factory.",
     color: "#9C4F96",
     sort: 30,
@@ -85,7 +85,7 @@ export const COMPANY_SEED: CompanySeed[] = [
   {
     slug: "alura-style",
     name: "Alura Style",
-    kind: "operating",
+    kind: "factory",
     description: "The garment factory. Two factories tracked separately: ХБК and Ош Район.",
     color: "#B5651D",
     sort: 40,
@@ -97,7 +97,7 @@ export const COMPANY_SEED: CompanySeed[] = [
   {
     slug: "upsell-group",
     name: "Upsell Group",
-    kind: "operating",
+    kind: "sales_partners",
     description: "Sales / e-commerce arm (Wildberries and other marketplaces).",
     color: "#875100",
     sort: 50,
@@ -105,7 +105,7 @@ export const COMPANY_SEED: CompanySeed[] = [
   {
     slug: "marketing",
     name: "Marketing",
-    kind: "service",
+    kind: "generic",
     status: "planned",
     description: "Planned marketing company serving all group companies.",
     color: "#58645D",
@@ -114,7 +114,7 @@ export const COMPANY_SEED: CompanySeed[] = [
   {
     slug: "asqa-zou-holding",
     name: "Asqa Zou Holding",
-    kind: "holding",
+    kind: "generic",
     description: "The holding itself: intercompany contracts, акты and debts.",
     color: "#16201A",
     sort: 70,

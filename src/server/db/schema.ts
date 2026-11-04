@@ -41,7 +41,9 @@ const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull(
 // Enums
 // ---------------------------------------------------------------------------
 export const userRoleEnum = pgEnum("user_role", ["founder", "staff"]);
-export const companyKindEnum = pgEnum("company_kind", ["operating", "service", "holding"]);
+/** Which dashboard template a company page uses (0027; was an enum operating/service/holding). */
+export const COMPANY_KINDS = ["it_services", "factory", "brand_sales", "sales_partners", "courier", "generic"] as const;
+export type CompanyKind = (typeof COMPANY_KINDS)[number];
 export const companyStatusEnum = pgEnum("company_status", ["active", "planned"]);
 export const projectStatusEnum = pgEnum("project_status", [
   "planned",
@@ -139,7 +141,7 @@ export const companies = pgTable("companies", {
   slug: text("slug").notNull().unique(),
   name: text("name").notNull(),
   legalName: text("legal_name"),
-  kind: companyKindEnum("kind").notNull().default("operating"),
+  kind: text("kind").$type<CompanyKind>().notNull().default("generic"),
   status: companyStatusEnum("status").notNull().default("active"),
   description: text("description"),
   /** Hex color used for the company dot/tag in the UI. */
@@ -1427,3 +1429,89 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 export type TaskVisibility = (typeof TASK_VISIBILITIES)[number];
 export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
+
+/** Jobutify (it_services): client projects with stage, status and SLA (0027). */
+export const CLIENT_PROJECT_STAGES = ["lead", "discovery", "build", "implementation", "live_sla", "paused", "closed"] as const;
+export const CLIENT_PROJECT_STATUSES = ["on_track", "at_risk", "late"] as const;
+export const clientProjects = pgTable(
+  "client_projects",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    clientName: text("client_name").notNull(),
+    title: text("title").notNull(),
+    stage: text("stage").$type<(typeof CLIENT_PROJECT_STAGES)[number]>().notNull().default("lead"),
+    status: text("status").$type<(typeof CLIENT_PROJECT_STATUSES)[number]>().notNull().default("on_track"),
+    startDate: date("start_date"),
+    dueDate: date("due_date"),
+    slaMonthlyFee: numeric("sla_monthly_fee", { precision: 14, scale: 2 }),
+    slaCurrency: text("sla_currency").notNull().default("KGS"),
+    slaResponseHours: integer("sla_response_hours"),
+    nextInvoiceDate: date("next_invoice_date"),
+    notes: text("notes"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("client_projects_company_idx").on(t.companyId),
+    check("client_projects_stage_ck", sql`${t.stage} in ('lead','discovery','build','implementation','live_sla','paused','closed')`),
+    check("client_projects_status_ck", sql`${t.status} in ('on_track','at_risk','late')`),
+    check("client_projects_currency_ck", sql`${t.slaCurrency} ~ '^[A-Z]{3}$'`),
+  ],
+);
+
+/**
+ * Posts inside an org department (0027): held by a person, or open ("hiring" + role title).
+ * Shown as chips on the board: solid = held, dashed = hiring.
+ */
+export const orgPosts = pgTable(
+  "org_posts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    chartId: uuid("chart_id")
+      .notNull()
+      .references(() => orgCharts.id, { onDelete: "restrict" }),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    departmentId: uuid("department_id")
+      .notNull()
+      .references(() => orgDepartments.id, { onDelete: "restrict" }),
+    title: text("title").notNull().default(""),
+    personId: uuid("person_id").references(() => people.id, { onDelete: "restrict" }),
+    hiring: boolean("hiring").notNull().default(false),
+    hiringRoleTitle: text("hiring_role_title"),
+    sort: integer("sort").notNull().default(0),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("org_posts_department_idx").on(t.departmentId),
+    check("org_posts_holder_ck", sql`not (${t.hiring} and ${t.personId} is not null)`),
+    foreignKey({ name: "org_posts_chart_company_fk", columns: [t.chartId, t.companyId], foreignColumns: [orgCharts.id, orgCharts.companyId] }),
+    foreignKey({ name: "org_posts_department_chart_fk", columns: [t.departmentId, t.chartId], foreignColumns: [orgDepartments.id, orgDepartments.chartId] }),
+  ],
+);
+
+/** Editable "journey" strip above the org board, per company; each step may point at a department (0027). */
+export const orgJourneySteps = pgTable(
+  "org_journey_steps",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "restrict" }),
+    number: integer("number").notNull(),
+    label: text("label").notNull(),
+    departmentId: uuid("department_id").references(() => orgDepartments.id, { onDelete: "set null" }),
+    sort: integer("sort").notNull().default(0),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("org_journey_steps_company_idx").on(t.companyId)],
+);

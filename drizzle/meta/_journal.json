@@ -190,6 +190,13 @@
       "when": 1793748365180,
       "tag": "0026_ingest_log_key_set_null",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1793778757168,
+      "tag": "0027_company_kinds_clients_posts",
+      "breakpoints": true
     }
   ]
 }

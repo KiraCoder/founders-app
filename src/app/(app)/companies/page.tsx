@@ -7,7 +7,7 @@ import { companyFreshness } from "@/server/services/metrics";
 
 export const metadata = { title: "Companies" };
 
-const KIND_LABEL = { operating: "Operating", service: "Service", holding: "Holding" } as const;
+const KIND_LABEL = { it_services: "IT services", factory: "Factory", brand_sales: "Brand & sales", sales_partners: "Sales partners", courier: "Courier", generic: "Company" } as const;
 
 export default async function CompaniesPage() {
   const ctx = await getPageContext();
