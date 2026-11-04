@@ -39,7 +39,7 @@ export async function search(ctx: ServiceContext, rawQ: string): Promise<SearchR
       .select({ id: projects.id, name: projects.name })
       .from(projects)
       .innerJoin(companies, eq(companies.id, projects.companyId))
-      .where(and(accessibleCompaniesWhere(ctx), ilike(projects.name, pattern)))
+      .where(and(accessibleCompaniesWhere(ctx), isNull(companies.archivedAt), ilike(projects.name, pattern)))
       .orderBy(asc(projects.name))
       .limit(20),
     listTasks(ctx, { q, status: "any", limit: 50 }),

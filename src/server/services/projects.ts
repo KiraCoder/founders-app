@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { projectCreateSchema, type ProjectCreateInput } from "@/lib/schemas";
 import { companies, projects, tasks, users, type Project } from "@/server/db/schema";
 import { accessibleCompaniesWhere, assertCompanyAccess, assertValidId, visibleTasksWhere } from "./access";
@@ -55,6 +55,7 @@ export async function listProjects(ctx: ServiceContext, opts: { companyId?: stri
     .where(
       and(
         accessibleCompaniesWhere(ctx),
+        isNull(companies.archivedAt),
         opts.companyId ? eq(projects.companyId, opts.companyId) : undefined,
       ),
     )

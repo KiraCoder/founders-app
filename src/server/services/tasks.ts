@@ -152,7 +152,11 @@ const openWhere = () => notInArray(tasks.status, [...CLOSED_STATUSES]);
 export async function listTasks(ctx: ServiceContext, rawFilters: TaskFilters = {}): Promise<TaskView[]> {
   const f = taskFiltersSchema.parse(rawFilters);
   const todayIso = today(ctx);
-  const where: (SQL | undefined)[] = [visibleTasksWhere(ctx)];
+  const where: (SQL | undefined)[] = [
+    visibleTasksWhere(ctx),
+    // Tasks of archived companies are hidden (personal todos have no company).
+    sql`(${tasks.companyId} is null or ${tasks.companyId} in (select ${companies.id} from ${companies} where ${companies.archivedAt} is null))`,
+  ];
 
   switch (f.view) {
     case "my":

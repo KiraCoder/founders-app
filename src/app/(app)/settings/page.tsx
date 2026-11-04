@@ -41,6 +41,18 @@ export default async function SettingsPage() {
     <>
       <PageHeader eyebrow={`${ctx.user.shortName} · your Telegram and notifications are private`} title="Settings" />
 
+      <section className="card mb-5 flex flex-wrap items-center justify-between gap-3 p-4 md:p-5" aria-labelledby="companies-heading">
+        <div>
+          <h2 id="companies-heading" className="eyebrow mb-1">
+            Companies
+          </h2>
+          <p className="text-sm text-muted">Add, rename, reorder or archive the group&apos;s companies.</p>
+        </div>
+        <Link href="/settings/companies" className="btn">
+          Manage companies
+        </Link>
+      </section>
+
       <section className="card mb-5 p-4 md:p-5" aria-labelledby="appearance-heading">
         <h2 id="appearance-heading" className="eyebrow mb-3">
           Appearance
