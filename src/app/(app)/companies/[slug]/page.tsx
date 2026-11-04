@@ -11,13 +11,15 @@ import { TaskList } from "@/components/tasks/TaskList";
 import { toTaskItem } from "@/components/tasks/types";
 import { ComingSoon, CompanyDot, PageHeader, Section, TabNav, Tag } from "@/components/ui";
 import { DataSources } from "@/components/metrics/DataSources";
+import { CompanyDashboard } from "@/components/company-dashboards/CompanyDashboard";
+import { dashboardTemplateFor, templateConnectorId, templateMetricKeys } from "@/components/company-dashboards/templates";
 import { KpiCard } from "@/components/metrics/KpiCard";
 import { NumbersGrid } from "@/components/metrics/NumbersGrid";
 import { formatMetricInput, formatPeriodShort, GRANULARITY_LABELS, lastEnterablePeriod, lastPeriods, type Granularity } from "@/lib/metrics";
 import { STUB_SPECS } from "@/server/connectors/stubs";
-import { listConnectorStatuses } from "@/server/services/connectors";
+import { listConnectorStatuses, type ConnectorStatus } from "@/server/services/connectors";
 import { monthTotalKind } from "@/server/ai/month-values";
-import { currentValues, listCompanyMetricCards, listMetricDefinitions, type MetricView } from "@/server/services/metrics";
+import { currentValues, listCompanyMetricCards, listMetricDefinitions, type MetricCard, type MetricView } from "@/server/services/metrics";
 import { getPageContext } from "@/server/context";
 import { RunStatusTag } from "@/components/ai-roles/AiRolesBoard";
 import { FINANCIAL_ANALYST, ORG_STRUCTURE_EXPERT } from "@/lib/ai-roles";
@@ -92,7 +94,7 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         tabs={TABS.map((t) => ({ key: t.key, label: t.label, href: `/companies/${slug}${t.key === "overview" ? "" : `?tab=${t.key}`}` }))}
       />
 
-      {tab === "overview" && <Overview ctx={ctx} company={company} />}
+      {tab === "overview" && <Overview ctx={ctx} company={company} showArchived={archivedParam === "1"} />}
       {tab === "numbers" && <NumbersTab ctx={ctx} company={company} granularity={g} />}
       {tab === "projects" && <ProjectsTab ctx={ctx} companyId={company.id} />}
       {tab === "tasks" && <TasksTab ctx={ctx} companyId={company.id} />}
@@ -109,39 +111,84 @@ const CONNECTOR_NAMES: Record<string, string> = Object.fromEntries(STUB_SPECS.ma
 type Ctx = Awaited<ReturnType<typeof getPageContext>>;
 type CompanyFull = Awaited<ReturnType<typeof getCompanyBySlug>>;
 
-async function Overview({ ctx, company }: { ctx: Ctx; company: CompanyFull }) {
-  const [cards, sources] = await Promise.all([
+/**
+ * Overview: the company's kind picks a dashboard template (client projects, production, WB
+ * sales, partner journey) shown above the standard sections; courier / generic companies keep
+ * the standard overview only.
+ */
+async function Overview({ ctx, company, showArchived }: { ctx: Ctx; company: CompanyFull; showArchived: boolean }) {
+  const [allCards, sources] = await Promise.all([
     listCompanyMetricCards(ctx, company.id),
     listConnectorStatuses(ctx, { companyId: company.id }),
   ]);
+  const template = dashboardTemplateFor(company.kind);
+  if (template === "default") return <StandardOverview ctx={ctx} company={company} cards={allCards} sources={sources} />;
+  // Numbers and the data source the template already shows are not repeated below it.
+  const shown = new Set(templateMetricKeys(template));
+  return (
+    <CompanyDashboard
+      ctx={ctx}
+      company={company}
+      cards={allCards}
+      sources={sources}
+      today={today(ctx)}
+      connectorNames={CONNECTOR_NAMES}
+      showArchived={showArchived}
+    >
+      <StandardOverview
+        ctx={ctx}
+        company={company}
+        cards={allCards.filter((c) => !shown.has(c.key))}
+        sources={sources.filter((x) => x.id !== templateConnectorId(template))}
+        hideEmptyNumbers={shown.size > 0}
+      />
+    </CompanyDashboard>
+  );
+}
+
+function StandardOverview({
+  ctx,
+  company,
+  cards,
+  sources,
+  hideEmptyNumbers,
+}: {
+  ctx: Ctx;
+  company: CompanyFull;
+  cards: MetricCard[];
+  sources: ConnectorStatus[];
+  hideEmptyNumbers?: boolean;
+}) {
   const t = today(ctx);
   return (
     <>
-      <Section
-        title="Key numbers"
-        action={
-          cards.length > 0 && (
-            <span className="flex gap-3 text-[12px]">
-              <Link href={`/companies/${company.slug}?tab=numbers`} className="text-accent hover:underline">
-                Numbers grid
-              </Link>
-              <Link href={`/companies/${company.slug}/numbers/import`} className="text-accent hover:underline">
-                Upload file
-              </Link>
-            </span>
-          )
-        }
-      >
-        {cards.length === 0 ? (
-          <div className="card px-4 py-6 text-center text-[13px] text-muted">No numbers are tracked for this company yet.</div>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {cards.map((m) => (
-              <KpiCard key={m.id} m={m} today={t} connectorNames={CONNECTOR_NAMES} />
-            ))}
-          </div>
-        )}
-      </Section>
+      {!(hideEmptyNumbers && cards.length === 0) && (
+        <Section
+          title="Key numbers"
+          action={
+            cards.length > 0 && (
+              <span className="flex gap-3 text-[12px]">
+                <Link href={`/companies/${company.slug}?tab=numbers`} className="text-accent hover:underline">
+                  Numbers grid
+                </Link>
+                <Link href={`/companies/${company.slug}/numbers/import`} className="text-accent hover:underline">
+                  Upload file
+                </Link>
+              </span>
+            )
+          }
+        >
+          {cards.length === 0 ? (
+            <div className="card px-4 py-6 text-center text-[13px] text-muted">No numbers are tracked for this company yet.</div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {cards.map((m) => (
+                <KpiCard key={m.id} m={m} today={t} connectorNames={CONNECTOR_NAMES} />
+              ))}
+            </div>
+          )}
+        </Section>
+      )}
       <Section title="Work">
         <div className="grid grid-cols-3 gap-3">
           <Counter label="Open tasks" value={company.openTasks} />
