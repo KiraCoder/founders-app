@@ -36,7 +36,7 @@ Welcome, Claude! When you pick up work:
 | T-02 | Add initials avatars in People directory and TopBar user menu | `src/components/people`, `shell` | Normal | [DONE] |
 | T-03 | Add profile card to mobile More page | `src/app/(app)/more` | Normal | [DONE] |
 | T-04 | Add unit test suite for new UI primitives | `tests/unit/ui-components.test.ts` | Normal | [DONE] |
-| T-05 | Fix the checks on this branch: 5 strict-null type errors in `src/components/ui.tsx` lines 109–110, and 2 failing tests in `tests/unit/visualizations.test.ts` (ProgressMetric percentage; DonutBreakdown slices) | `ui.tsx`, `visualizations` | **High** | [TODO] |
+| T-05 | ~~Fix the checks on this branch: 5 strict-null type errors in `src/components/ui.tsx` lines 109–110, and 2 failing tests in `tests/unit/visualizations.test.ts` (ProgressMetric percentage; DonutBreakdown slices) ~~ Done by Claude during the merge (8c1aeca) | `ui.tsx`, `visualizations` | High | [DONE] |
 | T-06 | Empty states for a **fresh live database** (no sample data): Today, Tasks, Companies, a company page, Projects, People, Holding, AI roles. Friendly first step on each (e.g. "Add your first task", "Import people from Excel" → `/people/import`, "Hire the Financial Analyst" → `/ai-roles`). Use `EmptyState`. | pages under `src/app/(app)` | High | [TODO] |
 | T-07 | Dark-mode audit: open every page in dark mode, replace any hard-coded colors with the theme tokens, check contrast (text 4.5:1) | all UI | Normal | [TODO] |
 | T-08 | **Chrome extension scaffold** in a new top-level `extension/` folder (Manifest V3, TypeScript, no network calls until configured). See spec below. | `extension/` | Normal | [TODO] |
@@ -172,3 +172,14 @@ Welcome, Claude! When you pick up work:
 > Thank you, this is good work and fits the design. I checked out `f2b12b3` and ran the checks: lint is clean, but `npm run typecheck` has 5 errors in `src/components/ui.tsx` (109–110) and `npm test` has 2 failures in `tests/unit/visualizations.test.ts` (550 of 552 pass). That is T-05; please fix it first.
 > **Merge plan:** I will merge this branch into `claude/adoring-brown-rriwam` once T-05 is green. Batch 6 (org head avatars) overlaps with my agent's work on names on the org board, so I'll reconcile `OrgBoard.tsx` myself during the merge. Please leave org files alone from now on (ground rules above).
 > The live app is at https://founders-app-one.vercel.app (login currently hangs on Vercel; I'm diagnosing it, so please don't change login/auth files).
+
+### Merge report from Claude Orchestrator
+> **Timestamp:** 2026-11-04 06:20 (GMT+6)
+> **Author:** Claude Code (orchestrator)
+> **Message:**
+> Batches 1–6 are merged into `claude/adoring-brown-rriwam` (tip `8c1aeca`), with all checks green (613 tests, 25 e2e). Before your next batch, run `git merge origin/claude/adoring-brown-rriwam` into this branch so we stay in sync. What changed during the merge:
+> - **T-05 is done** (strict-null fix; the 2 test expectations were wrong, not the components).
+> - **The route `loading.tsx` skeletons are removed.** They made pages clickable later than the shell, so early clicks and form submits were lost (4–7 flaky e2e tests per run). Please don't re-add route-level `loading.tsx`; use `Skeleton` inside components instead.
+> - **OrgBoard keeps our layout**; the Batch 6 head chips were dropped (names and initials are already on the board).
+> - Fixes on your code: `useTheme` localStorage now guarded, the two theme toggles stay in sync, CopyButton shows "Copy failed" when the clipboard refuses, ShortcutsModal keeps focus inside and returns it, charts handle negative/zero/NaN values, and the KPI target bar shows only for higher-is-better metrics.
+> **Next for you:** T-06 (empty states), T-07 (dark-mode audit), T-08 (Chrome extension; the server API is live, see README "Browser extension").
