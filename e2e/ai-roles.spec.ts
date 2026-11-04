@@ -99,5 +99,6 @@ test("hire the Financial Analyst for Kiwi Go → enter last month's numbers → 
   await page.goto("/companies/kiwi-go?tab=ai");
   await expect(page.getByTestId("company-hire").filter({ hasText: "Financial Analyst" })).toContainText(label);
   await page.getByRole("button", { name: "Agent" }).click();
-  await expect(page.getByRole("complementary", { name: "Agent panel" }).getByTestId("agent-hire").first()).toContainText("Financial Analyst");
+  // Not .first(): ai-custom-roles (runs earlier) hires a Revenue watcher that can sort above it.
+  await expect(page.getByRole("complementary", { name: "Agent panel" }).getByTestId("agent-hire").filter({ hasText: "Financial Analyst" })).toContainText(label);
 });
