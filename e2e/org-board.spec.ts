@@ -27,7 +27,7 @@ test("posts: add a hiring post, give it a person, Undo puts the hiring back", as
 
   await chip.click();
   await page.getByTestId("org-post-editor").getByRole("radio", { name: "Person" }).click();
-  const picker = page.getByTestId("org-post-editor").getByLabel("Person on this post");
+  const picker = page.getByTestId("org-post-editor").getByLabel("Person on this post", { exact: true });
   const elmurat = await picker.locator("option", { hasText: "Elmurat" }).first().getAttribute("value");
   await picker.selectOption(elmurat!);
   await page.getByTestId("org-post-editor").getByRole("button", { name: "Save" }).click();
