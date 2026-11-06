@@ -291,13 +291,13 @@ export const functionCreateSchema = z
   .strict();
 
 /** Where "+ New person" assigns the person it creates. */
-export const ORG_ASSIGN_TARGETS = ["division", "department", "function"] as const;
+export const ORG_ASSIGN_TARGETS = ["division", "department", "function", "post"] as const;
 export type OrgAssignTarget = (typeof ORG_ASSIGN_TARGETS)[number];
 
 /**
  * "+ New person" on the org board: a person (same field rules as the People page) created,
- * linked to the chart's company with `role` and assigned to a division / department head or
- * a function in one step.
+ * linked to the chart's company with `role` and assigned to a division / department head, a
+ * function or a post (the post stops "hiring") in one step.
  */
 export const orgNewPersonSchema = personCreateSchema
   .pick({ fullName: true, shortName: true, phone: true, telegramHandle: true })
@@ -333,6 +333,213 @@ export function placeAt<T>(list: readonly T[], item: T, index: number): T[] {
   const rest = list.filter((x) => x !== item);
   const i = Math.max(0, Math.min(index, rest.length));
   return [...rest.slice(0, i), item, ...rest.slice(i)];
+}
+
+// ---------------------------------------------------------------------------
+// Posts (chips on a department card): held by a person, or open — "hiring" + role title
+// ---------------------------------------------------------------------------
+
+/**
+ * A post is held by a person OR hiring (the database refuses both, 0027), or empty. Hiring
+ * needs the role being hired for ("Менеджер по продажам").
+ */
+const postFields = {
+  title: text(160).optional(),
+  personId: nullableUuid.optional(),
+  hiring: z.boolean().optional(),
+  hiringRoleTitle: z.preprocess((v) => (v === "" ? null : v), text(160).nullable()).optional(),
+};
+const holderRule = (v: { personId?: string | null; hiring?: boolean }) => !(v.hiring && v.personId);
+const HOLDER_MESSAGE = { message: "A post is held by a person or open for hiring — not both", path: ["hiring"] };
+
+export const postCreateSchema = z
+  .object({ departmentId: z.uuid(), ...postFields })
+  .strict()
+  .refine(holderRule, HOLDER_MESSAGE)
+  .refine((v) => !v.hiring || !!v.hiringRoleTitle, { message: "Which role are you hiring for?", path: ["hiringRoleTitle"] });
+export type PostCreateInput = z.input<typeof postCreateSchema>;
+
+export const postPatchSchema = z
+  .object(postFields)
+  .strict()
+  .refine((v) => Object.keys(v).length > 0, { message: "Nothing to change" })
+  .refine(holderRule, HOLDER_MESSAGE);
+export type PostPatch = z.input<typeof postPatchSchema>;
+
+export interface PostHolder {
+  title: string;
+  personId: string | null;
+  hiring: boolean;
+  hiringRoleTitle: string | null;
+}
+
+/**
+ * The post after a patch: picking a person ends "hiring" (and drops its role title), marking
+ * it hiring takes the person off. The service validates the result (hiring needs a role title).
+ */
+export function mergePost(current: PostHolder, patch: { title?: string; personId?: string | null; hiring?: boolean; hiringRoleTitle?: string | null }): PostHolder {
+  const next: PostHolder = { title: current.title, personId: current.personId, hiring: current.hiring, hiringRoleTitle: current.hiringRoleTitle };
+  if (patch.title !== undefined) next.title = patch.title;
+  if (patch.hiringRoleTitle !== undefined) next.hiringRoleTitle = patch.hiringRoleTitle;
+  if (patch.personId !== undefined) {
+    next.personId = patch.personId;
+    if (patch.personId) {
+      next.hiring = false;
+      if (patch.hiringRoleTitle === undefined) next.hiringRoleTitle = null;
+    }
+  }
+  if (patch.hiring !== undefined) {
+    next.hiring = patch.hiring;
+    if (patch.hiring) next.personId = null;
+    else if (patch.hiringRoleTitle === undefined) next.hiringRoleTitle = null;
+  }
+  return next;
+}
+
+/** What a post chip says: the holder's name, the role being hired for, or the post title. */
+export function postChipLabel(p: { title: string; personName: string | null; hiring: boolean; hiringRoleTitle: string | null }): string {
+  if (p.personName) return p.personName;
+  if (p.hiring) return p.hiringRoleTitle || p.title || "Найм";
+  return p.title || "Пост";
+}
+
+// ---------------------------------------------------------------------------
+// Journey strip (numbered steps of the company's work, above the board)
+// ---------------------------------------------------------------------------
+
+export const journeyStepCreateSchema = z
+  .object({
+    label: text(160).min(1, "A step needs a name"),
+    departmentId: nullableUuid.optional(),
+  })
+  .strict();
+export type JourneyStepCreateInput = z.input<typeof journeyStepCreateSchema>;
+
+export const journeyStepPatchSchema = z
+  .object({
+    label: text(160).min(1, "A step needs a name").optional(),
+    departmentId: nullableUuid.optional(),
+  })
+  .strict()
+  .refine((v) => Object.keys(v).length > 0, { message: "Nothing to change" });
+export type JourneyStepPatch = z.input<typeof journeyStepPatchSchema>;
+
+export const journeyMoveSchema = z.object({ stepId: z.uuid(), index: z.coerce.number().int().min(0).max(10_000) }).strict();
+
+/** "01", "02", … "10". */
+export const journeyNumber = (n: number) => String(n).padStart(2, "0");
+
+/** Journey templates ("Use Upsell template"); departments stay unlinked until the founders pick them. */
+export const JOURNEY_TEMPLATES = {
+  upsell: {
+    label: "Upsell",
+    companySlug: "upsell-group",
+    steps: ["Фабрика найдена", "Переговоры", "Образцы", "Договор", "Производство", "Контроль качества", "Отгрузка", "Продажи на маркетплейсах", "Деньги и 5% Upsell"],
+  },
+} as const;
+export type JourneyTemplateKey = keyof typeof JOURNEY_TEMPLATES;
+export const JOURNEY_TEMPLATE_KEYS = Object.keys(JOURNEY_TEMPLATES) as JourneyTemplateKey[];
+
+/** The template offered to a company with no journey yet (by slug), if any. */
+export function journeyTemplateFor(companySlug: string): JourneyTemplateKey | null {
+  return JOURNEY_TEMPLATE_KEYS.find((k) => JOURNEY_TEMPLATES[k].companySlug === companySlug) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Board look: one tint per division (theme-safe: mixed with the surface colour)
+// ---------------------------------------------------------------------------
+
+/** Mid-tone hues readable on light and dark surfaces (the column number is large bold text). */
+export const DIVISION_TINTS: Readonly<Record<number, string>> = {
+  7: "#6d5bd0",
+  1: "#2f8f5b",
+  2: "#2b7bc0",
+  3: "#c27a1f",
+  4: "#c0464f",
+  5: "#1f9a96",
+  6: "#a8509a",
+};
+
+export function divisionTint(number: number): string {
+  return DIVISION_TINTS[number] ?? "#7a8580";
+}
+
+// ---------------------------------------------------------------------------
+// «Показать посты»: where a person sits on a chart (heads, functions, posts)
+// ---------------------------------------------------------------------------
+
+interface FootprintChart {
+  divisions: {
+    id: string;
+    headPersonId: string | null;
+    headName?: string | null;
+    departments: {
+      id: string;
+      headPersonId: string | null;
+      headName?: string | null;
+      functions: { id: string; responsiblePersonId: string | null; responsibleName?: string | null }[];
+      posts: { id: string; personId: string | null; personName?: string | null }[];
+    }[];
+  }[];
+}
+
+export interface PersonFootprint {
+  divisions: Set<string>;
+  departments: Set<string>;
+  functions: Set<string>;
+  posts: Set<string>;
+  /** Departments where the person appears at all (head, function or post). */
+  touched: Set<string>;
+}
+
+/** The ids a person holds on a chart, to highlight them (and dim everything else). */
+export function personFootprint(chart: FootprintChart, personId: string): PersonFootprint {
+  const out: PersonFootprint = { divisions: new Set(), departments: new Set(), functions: new Set(), posts: new Set(), touched: new Set() };
+  for (const div of chart.divisions) {
+    if (div.headPersonId === personId) out.divisions.add(div.id);
+    for (const d of div.departments) {
+      let hit = false;
+      if (d.headPersonId === personId) {
+        out.departments.add(d.id);
+        hit = true;
+      }
+      for (const f of d.functions) {
+        if (f.responsiblePersonId === personId) {
+          out.functions.add(f.id);
+          hit = true;
+        }
+      }
+      for (const p of d.posts) {
+        if (p.personId === personId) {
+          out.posts.add(p.id);
+          hit = true;
+        }
+      }
+      if (hit) out.touched.add(d.id);
+    }
+  }
+  return out;
+}
+
+/** People on a chart (heads, responsible people, post holders) with how many places each holds; most first. */
+export function peopleOnChart(chart: FootprintChart): { id: string; name: string; count: number }[] {
+  const map = new Map<string, { id: string; name: string; count: number }>();
+  const add = (id: string | null, name: string | null | undefined) => {
+    if (!id) return;
+    const cur = map.get(id) ?? { id, name: "", count: 0 };
+    cur.count += 1;
+    if (!cur.name && name) cur.name = name;
+    map.set(id, cur);
+  };
+  for (const div of chart.divisions) {
+    add(div.headPersonId, div.headName);
+    for (const d of div.departments) {
+      add(d.headPersonId, d.headName);
+      for (const f of d.functions) add(f.responsiblePersonId, f.responsibleName);
+      for (const p of d.posts) add(p.personId, p.personName);
+    }
+  }
+  return [...map.values()].map((p) => ({ ...p, name: p.name || "?" })).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 }
 
 // ---------------------------------------------------------------------------

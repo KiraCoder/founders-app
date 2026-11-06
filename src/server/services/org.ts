@@ -10,9 +10,14 @@ import {
   functionCreateSchema,
   functionMoveSchema,
   functionPatchSchema,
+  mergePost,
   orgExpertFindings,
   orgNewPersonSchema,
   placeAt,
+  postCreateSchema,
+  postPatchSchema,
+  type PostCreateInput,
+  type PostPatch,
   VYSOTSKY_TEMPLATE,
   VYSOTSKY_TEMPLATE_KEY,
   type DepartmentPatch,
@@ -31,6 +36,8 @@ import {
   orgDepartments,
   orgDivisions,
   orgFunctions,
+  orgJourneySteps,
+  orgPosts,
   people,
   personCompanies,
   tasks,
@@ -82,6 +89,17 @@ export interface OrgFunctionView {
   archived: boolean;
 }
 
+export interface OrgPostView {
+  id: string;
+  departmentId: string;
+  title: string;
+  personId: string | null;
+  personName: string | null;
+  personFullName: string | null;
+  hiring: boolean;
+  hiringRoleTitle: string | null;
+}
+
 export interface OrgDepartmentView {
   id: string;
   divisionId: string;
@@ -96,6 +114,8 @@ export interface OrgDepartmentView {
   headFullName: string | null;
   archived: boolean;
   functions: OrgFunctionView[];
+  /** Posts (chips): held by a person (solid) or hiring (dashed), in their order. */
+  posts: OrgPostView[];
   /** Archived functions (only with includeArchived). */
   archivedFunctions: OrgFunctionView[];
   openTasks: number;
@@ -215,12 +235,32 @@ export async function getOrgChartById(ctx: ServiceContext, chartId: unknown, opt
 }
 
 async function loadChartView(ctx: ServiceContext, chart: OrgChart, opts: { includeArchived?: boolean }): Promise<OrgChartView> {
-  const [divs, depts, fns] = await Promise.all([
+  const [divs, depts, fns, posts] = await Promise.all([
     ctx.db.select().from(orgDivisions).where(and(eq(orgDivisions.chartId, chart.id), isNull(orgDivisions.archivedAt))),
     ctx.db.select().from(orgDepartments).where(eq(orgDepartments.chartId, chart.id)).orderBy(asc(orgDepartments.sort), asc(orgDepartments.number)),
     ctx.db.select().from(orgFunctions).where(eq(orgFunctions.chartId, chart.id)).orderBy(asc(orgFunctions.sort), asc(orgFunctions.createdAt)),
+    ctx.db
+      .select()
+      .from(orgPosts)
+      .where(and(eq(orgPosts.chartId, chart.id), isNull(orgPosts.archivedAt)))
+      .orderBy(asc(orgPosts.sort), asc(orgPosts.createdAt)),
   ]);
-  const names = await namesFor(ctx.db, [...divs.map((d) => d.headPersonId), ...depts.map((d) => d.headPersonId), ...fns.map((f) => f.responsiblePersonId)]);
+  const names = await namesFor(ctx.db, [
+    ...divs.map((d) => d.headPersonId),
+    ...depts.map((d) => d.headPersonId),
+    ...fns.map((f) => f.responsiblePersonId),
+    ...posts.map((p) => p.personId),
+  ]);
+  const postView = (p: typeof orgPosts.$inferSelect): OrgPostView => ({
+    id: p.id,
+    departmentId: p.departmentId,
+    title: p.title,
+    personId: p.personId,
+    personName: p.personId ? (names.get(p.personId)?.name ?? null) : null,
+    personFullName: p.personId ? (names.get(p.personId)?.fullName ?? null) : null,
+    hiring: p.hiring,
+    hiringRoleTitle: p.hiringRoleTitle,
+  });
   const counts = await departmentTaskCounts(ctx, depts.map((d) => d.id));
   const fnView = (f: OrgFunction): OrgFunctionView => ({
     id: f.id,
@@ -247,6 +287,7 @@ async function loadChartView(ctx: ServiceContext, chart: OrgChart, opts: { inclu
       headFullName: d.headPersonId ? (names.get(d.headPersonId)?.fullName ?? null) : null,
       archived: !!d.archivedAt,
       functions: own.filter((f) => !f.archivedAt).map(fnView),
+      posts: posts.filter((p) => p.departmentId === d.id).map(postView),
       archivedFunctions: opts.includeArchived ? own.filter((f) => f.archivedAt).map(fnView) : [],
       openTasks: counts.get(d.id)?.open ?? 0,
       overdueTasks: counts.get(d.id)?.overdue ?? 0,
@@ -397,7 +438,7 @@ export async function applyVysotskyTemplate(ctx: ServiceContext, scope: OrgScope
 // Loading rows for a change (always re-checked against the company)
 // ---------------------------------------------------------------------------
 
-async function loadDepartment(db: Db, id: unknown): Promise<OrgDepartment> {
+export async function loadDepartment(db: Db, id: unknown): Promise<OrgDepartment> {
   assertValidId(id, "Department");
   const [row] = await db.select().from(orgDepartments).where(eq(orgDepartments.id, id));
   if (!row) throw new ServiceError("not_found", "Department not found");
@@ -426,7 +467,7 @@ async function lockChart(tx: Db, chartId: string): Promise<void> {
 }
 
 /** A person may be linked to a row only when they actively work for that company. */
-async function assertCompanyPerson(db: Db, companyId: string, personId: string, field: string): Promise<void> {
+export async function assertCompanyPerson(db: Db, companyId: string, personId: string, field: string): Promise<void> {
   assertValidId(personId, "Person");
   const [row] = await db
     .select({ id: people.id })
@@ -445,9 +486,9 @@ async function assertCompanyMetric(ctx: ServiceContext, companyId: string, metri
   }
 }
 
-interface LogInput {
-  entity: "division" | "department" | "function";
-  entityId: string;
+export interface LogInput {
+  entity: "division" | "department" | "function" | "post" | "journey_step" | "journey";
+  entityId: string | null;
   action: (typeof UNDOABLE)[number];
   before: Record<string, unknown> | null;
   after: Record<string, unknown> | null;
@@ -490,18 +531,18 @@ async function checkVersion(tx: Db, chartId: string, opts: OrgWriteOpts): Promis
 }
 
 /** Locks the chart and checks the client's version: the start of every board write. */
-async function beginWrite(tx: Db, chartId: string, opts: OrgWriteOpts): Promise<void> {
+export async function beginWrite(tx: Db, chartId: string, opts: OrgWriteOpts): Promise<void> {
   await lockChart(tx, chartId);
   await checkVersion(tx, chartId, opts);
 }
 
-async function writeLog(tx: Db, ctx: ServiceContext, chartId: string, companyId: string, log: LogInput, opts: OrgWriteOpts = {}): Promise<void> {
+export async function writeLog(tx: Db, ctx: ServiceContext, chartId: string, companyId: string, log: LogInput, opts: OrgWriteOpts = {}): Promise<void> {
   await tx.update(orgCharts).set({ updatedAt: ctx.now }).where(eq(orgCharts.id, chartId));
   const [row] = await tx.insert(orgChangeLog).values({ chartId, companyId, actorUserId: ctx.user.id, ...log, createdAt: ctx.now }).returning({ seq: orgChangeLog.seq });
   if (opts.result) opts.result.version = String(row!.seq);
 }
 
-const quote = (s: string) => `“${s.length > 60 ? `${s.slice(0, 57)}…` : s}”`;
+export const quote = (s: string) => `“${s.length > 60 ? `${s.slice(0, 57)}…` : s}”`;
 
 /** Rewrites sort = 0, 1, 2, … for the live functions of a department, in the given order. */
 async function writeFunctionOrder(tx: Db, ids: string[], departmentId: string, now: Date): Promise<void> {
@@ -924,10 +965,208 @@ async function archiveDepartmentTx(tx: Db, ctx: ServiceContext, d: OrgDepartment
 }
 
 // ---------------------------------------------------------------------------
+// Posts (chips on a department card)
+// ---------------------------------------------------------------------------
+
+type OrgPostRow = typeof orgPosts.$inferSelect;
+
+async function loadPost(db: Db, id: unknown): Promise<OrgPostRow> {
+  assertValidId(id, "Post");
+  const [row] = await db.select().from(orgPosts).where(eq(orgPosts.id, id));
+  if (!row) throw new ServiceError("not_found", "Post not found");
+  return row;
+}
+
+async function livePostIds(tx: Db, departmentId: string): Promise<string[]> {
+  const rows = await tx
+    .select({ id: orgPosts.id })
+    .from(orgPosts)
+    .where(and(eq(orgPosts.departmentId, departmentId), isNull(orgPosts.archivedAt)))
+    .orderBy(asc(orgPosts.sort), asc(orgPosts.createdAt));
+  return rows.map((r) => r.id);
+}
+
+async function writePostOrder(tx: Db, ids: string[], now: Date): Promise<void> {
+  for (const [i, id] of ids.entries()) await tx.update(orgPosts).set({ sort: i, updatedAt: now }).where(eq(orgPosts.id, id));
+}
+
+/** "Менеджер по продажам (Айбек)" / "найм: Менеджер по продажам" — for the change log. */
+function postLabel(p: { title: string; hiring: boolean; hiringRoleTitle: string | null }, personName?: string | null): string {
+  const what = p.title || p.hiringRoleTitle || "post";
+  if (personName) return `${quote(what)} (${personName})`;
+  if (p.hiring) return `${quote(what)} (hiring)`;
+  return quote(what);
+}
+
+async function personDisplayName(db: Db, personId: string | null): Promise<string | null> {
+  if (!personId) return null;
+  return (await namesFor(db, [personId])).get(personId)?.name ?? null;
+}
+
+function assertHolder(next: { personId: string | null; hiring: boolean; hiringRoleTitle: string | null }): void {
+  if (next.hiring && next.personId) throw new ServiceError("validation", "A post is held by a person or open for hiring — not both", { hiring: ["Pick a person or hiring, not both"] });
+  if (next.hiring && !next.hiringRoleTitle) throw new ServiceError("validation", "Which role are you hiring for?", { hiringRoleTitle: ["Write the role you are hiring for"] });
+}
+
+/**
+ * Adds a post to a department: empty, held by a person of the department's company, or
+ * hiring (with the role title). Founders only; logged; Undo archives it again.
+ */
+export async function createPost(ctx: ServiceContext, input: PostCreateInput, opts: OrgWriteOpts = {}): Promise<string> {
+  const parsed = postCreateSchema.safeParse(input);
+  if (!parsed.success) throw toServiceError(parsed.error)!;
+  const data = parsed.data;
+  const dept = await loadDepartment(ctx.db, data.departmentId);
+  await assertOrgEdit(ctx, dept.companyId);
+  if (dept.archivedAt) throw new ServiceError("validation", "Restore the department before adding posts");
+  const next = { title: data.title ?? "", personId: data.personId ?? null, hiring: data.hiring ?? false, hiringRoleTitle: data.hiring ? (data.hiringRoleTitle ?? null) : null };
+  assertHolder(next);
+  if (next.personId) await assertCompanyPerson(ctx.db, dept.companyId, next.personId, "personId");
+  return ctx.db.transaction(async (tx) => {
+    await beginWrite(tx, dept.chartId, opts);
+    if ((await loadDepartment(tx, dept.id)).archivedAt) throw new ServiceError("validation", "Restore the department before adding posts");
+    const ids = await livePostIds(tx, dept.id);
+    const [row] = await tx
+      .insert(orgPosts)
+      .values({ chartId: dept.chartId, companyId: dept.companyId, departmentId: dept.id, ...next, sort: ids.length, createdAt: ctx.now, updatedAt: ctx.now })
+      .returning({ id: orgPosts.id });
+    await writeLog(
+      tx,
+      ctx,
+      dept.chartId,
+      dept.companyId,
+      { entity: "post", entityId: row!.id, action: "create", before: null, after: { departmentId: dept.id, ...next }, summary: `Added post ${postLabel(next, await personDisplayName(tx, next.personId))} to ${deptLabel(dept)}` },
+      opts,
+    );
+    return row!.id;
+  });
+}
+
+/**
+ * Edits a post: title, holder (a person of that company), hiring + role title. Picking a
+ * person ends hiring; marking hiring takes the person off (never both — the database checks
+ * it too). Founders only; logged with before / after; Undo puts the old holder back.
+ */
+export async function updatePost(ctx: ServiceContext, id: unknown, input: PostPatch, opts: OrgWriteOpts = {}): Promise<void> {
+  const parsed = postPatchSchema.safeParse(input);
+  if (!parsed.success) throw toServiceError(parsed.error)!;
+  const patch = parsed.data;
+  const post = await loadPost(ctx.db, id);
+  await assertOrgEdit(ctx, post.companyId);
+  if (post.archivedAt) throw new ServiceError("validation", "This post was removed — Undo brings it back");
+  if (patch.personId) await assertCompanyPerson(ctx.db, post.companyId, patch.personId, "personId");
+  await ctx.db.transaction(async (tx) => {
+    await beginWrite(tx, post.chartId, opts);
+    const current = await loadPost(tx, post.id);
+    if (current.archivedAt) throw new ServiceError("validation", "This post was removed — Undo brings it back");
+    const next = mergePost(current, patch);
+    assertHolder(next);
+    const { before, after } = diff(
+      { title: current.title, personId: current.personId, hiring: current.hiring, hiringRoleTitle: current.hiringRoleTitle } as Record<string, unknown>,
+      next as unknown as Record<string, unknown>,
+    );
+    if (!Object.keys(after).length) return;
+    await tx
+      .update(orgPosts)
+      .set({ ...(after as object), updatedAt: ctx.now })
+      .where(eq(orgPosts.id, post.id));
+    const dept = await loadDepartment(tx, current.departmentId);
+    const name = await personDisplayName(tx, next.personId);
+    const summary =
+      "personId" in after && next.personId
+        ? `${name ?? "Someone"} holds post ${postLabel(next)} in ${deptLabel(dept)}`
+        : "hiring" in after && next.hiring
+          ? `Hiring for post ${postLabel(next)} in ${deptLabel(dept)}`
+          : `Edited post ${postLabel(next, name)} in ${deptLabel(dept)}`;
+    await writeLog(tx, ctx, post.chartId, post.companyId, { entity: "post", entityId: post.id, action: "update", before, after, summary }, opts);
+  });
+}
+
+/** Removes (archives) a post or brings it back where it was. Founders only; logged; undoable. */
+export async function setPostArchived(ctx: ServiceContext, id: unknown, archived: boolean, opts: OrgWriteOpts = {}): Promise<void> {
+  const post = await loadPost(ctx.db, id);
+  await assertOrgEdit(ctx, post.companyId);
+  await ctx.db.transaction(async (tx) => {
+    await beginWrite(tx, post.chartId, opts);
+    const current = await loadPost(tx, post.id);
+    if (!archived && (await loadDepartment(tx, current.departmentId)).archivedAt) throw new ServiceError("validation", "Restore its department first");
+    await archivePostTx(tx, ctx, current, archived, archived ? null : await archivedIndex(tx, post.id), true, opts);
+  });
+}
+
+async function archivePostTx(tx: Db, ctx: ServiceContext, p: OrgPostRow, archived: boolean, restoreIndex: number | null, log = true, opts: OrgWriteOpts = {}): Promise<void> {
+  if (!!p.archivedAt === archived) return;
+  const ids = await livePostIds(tx, p.departmentId);
+  const label = postLabel(p, await personDisplayName(tx, p.personId));
+  if (archived) {
+    const index = ids.indexOf(p.id);
+    await tx.update(orgPosts).set({ archivedAt: ctx.now, updatedAt: ctx.now }).where(eq(orgPosts.id, p.id));
+    await writePostOrder(tx, ids.filter((x) => x !== p.id), ctx.now);
+    if (log) await writeLog(tx, ctx, p.chartId, p.companyId, { entity: "post", entityId: p.id, action: "archive", before: { index }, after: { archived: true }, summary: `Removed post ${label}` }, opts);
+  } else {
+    await tx.update(orgPosts).set({ archivedAt: null, updatedAt: ctx.now }).where(eq(orgPosts.id, p.id));
+    const to = placeAt(ids, p.id, restoreIndex ?? ids.length);
+    await writePostOrder(tx, to, ctx.now);
+    if (log) await writeLog(tx, ctx, p.chartId, p.companyId, { entity: "post", entityId: p.id, action: "restore", before: { archived: true }, after: { index: to.indexOf(p.id) }, summary: `Restored post ${label}` }, opts);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Journey steps: order helpers shared with org-journey.ts (and Undo, below)
+// ---------------------------------------------------------------------------
+
+export type OrgJourneyStepRow = typeof orgJourneySteps.$inferSelect;
+
+export async function loadJourneyStep(db: Db, id: unknown): Promise<OrgJourneyStepRow> {
+  assertValidId(id, "Journey step");
+  const [row] = await db.select().from(orgJourneySteps).where(eq(orgJourneySteps.id, id));
+  if (!row) throw new ServiceError("not_found", "Journey step not found");
+  return row;
+}
+
+export async function liveJourneyIds(tx: Db, companyId: string): Promise<string[]> {
+  const rows = await tx
+    .select({ id: orgJourneySteps.id })
+    .from(orgJourneySteps)
+    .where(and(eq(orgJourneySteps.companyId, companyId), isNull(orgJourneySteps.archivedAt)))
+    .orderBy(asc(orgJourneySteps.sort), asc(orgJourneySteps.number), asc(orgJourneySteps.createdAt));
+  return rows.map((r) => r.id);
+}
+
+/** Rewrites sort 0, 1, 2 … and the shown number 1, 2, 3 … of a company's live steps. */
+export async function writeJourneyOrder(tx: Db, ids: string[], now: Date): Promise<void> {
+  for (const [i, id] of ids.entries()) await tx.update(orgJourneySteps).set({ sort: i, number: i + 1, updatedAt: now }).where(eq(orgJourneySteps.id, id));
+}
+
+/** Archive (true) / bring back at `restoreIndex` (false) one journey step, keeping the order 1…n. */
+export async function archiveJourneyStepTx(tx: Db, ctx: ServiceContext, step: OrgJourneyStepRow, archived: boolean, restoreIndex: number | null): Promise<number> {
+  const ids = await liveJourneyIds(tx, step.companyId);
+  if (!!step.archivedAt === archived) return ids.indexOf(step.id);
+  if (archived) {
+    const index = ids.indexOf(step.id);
+    await tx.update(orgJourneySteps).set({ archivedAt: ctx.now, updatedAt: ctx.now }).where(eq(orgJourneySteps.id, step.id));
+    await writeJourneyOrder(tx, ids.filter((x) => x !== step.id), ctx.now);
+    return index;
+  }
+  await tx.update(orgJourneySteps).set({ archivedAt: null, updatedAt: ctx.now }).where(eq(orgJourneySteps.id, step.id));
+  const to = placeAt(ids, step.id, restoreIndex ?? ids.length);
+  await writeJourneyOrder(tx, to, ctx.now);
+  return to.indexOf(step.id);
+}
+
+/**
+ * Serialises journey edits of one company (its steps are shared by the company's charts, and
+ * each write already locks the board's chart): a transaction-scoped advisory lock.
+ */
+export async function lockJourney(tx: Db, companyId: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`org_journey:${companyId}`}))`);
+}
+
+// ---------------------------------------------------------------------------
 // "+ New person" from the board (C3b follow-up: people on the org board)
 // ---------------------------------------------------------------------------
 
-const ASSIGN_LABEL = { division: "head of division", department: "head of", function: "responsible for" } as const;
+const ASSIGN_LABEL = { division: "head of division", department: "head of", function: "responsible for", post: "holder of post" } as const;
 
 /**
  * Creates a person, links them to the chart's company (and the chart's unit, if any) with
@@ -944,7 +1183,9 @@ export async function createPersonAndAssign(ctx: ServiceContext, input: OrgNewPe
       ? { kind: "division" as const, row: await loadDivision(ctx.db, data.targetId) }
       : data.target === "department"
         ? { kind: "department" as const, row: await loadDepartment(ctx.db, data.targetId) }
-        : { kind: "function" as const, row: await loadFunction(ctx.db, data.targetId) };
+        : data.target === "post"
+          ? { kind: "post" as const, row: await loadPost(ctx.db, data.targetId) }
+          : { kind: "function" as const, row: await loadFunction(ctx.db, data.targetId) };
   const { chartId, companyId } = target.row;
   await assertOrgEdit(ctx, companyId);
   return ctx.db.transaction(async (tx) => {
@@ -961,6 +1202,11 @@ export async function createPersonAndAssign(ctx: ServiceContext, input: OrgNewPe
       if (cur.archivedAt) throw new ServiceError("validation", "Restore the department before editing it");
       label = `${ASSIGN_LABEL.department} ${deptLabel(cur)}`;
       before = { headPersonId: cur.headPersonId };
+    } else if (target.kind === "post") {
+      const cur = await loadPost(tx, target.row.id);
+      if (cur.archivedAt) throw new ServiceError("validation", "This post was removed — Undo brings it back");
+      label = `${ASSIGN_LABEL.post} ${postLabel(cur)} in ${await departmentLabel(tx, cur.departmentId)}`;
+      before = { personId: cur.personId, hiring: cur.hiring, hiringRoleTitle: cur.hiringRoleTitle };
     } else {
       const cur = await loadFunction(tx, target.row.id);
       if (cur.archivedAt) throw new ServiceError("validation", "Restore the function before editing it");
@@ -978,9 +1224,11 @@ export async function createPersonAndAssign(ctx: ServiceContext, input: OrgNewPe
         links: [{ companyId, unitId: chart?.unitId ?? null, role: data.role }],
       },
     );
-    const field = target.kind === "function" ? "responsiblePersonId" : "headPersonId";
+    const field = target.kind === "function" ? "responsiblePersonId" : target.kind === "post" ? "personId" : "headPersonId";
     if (target.kind === "division") await tx.update(orgDivisions).set({ headPersonId: person.id, updatedAt: ctx.now }).where(eq(orgDivisions.id, target.row.id));
     else if (target.kind === "department") await tx.update(orgDepartments).set({ headPersonId: person.id, updatedAt: ctx.now }).where(eq(orgDepartments.id, target.row.id));
+    else if (target.kind === "post")
+      await tx.update(orgPosts).set({ personId: person.id, hiring: false, hiringRoleTitle: null, updatedAt: ctx.now }).where(eq(orgPosts.id, target.row.id));
     else await tx.update(orgFunctions).set({ responsiblePersonId: person.id, updatedAt: ctx.now }).where(eq(orgFunctions.id, target.row.id));
     await writeLog(
       tx,
@@ -1057,6 +1305,38 @@ export async function undoLastChange(ctx: ServiceContext, chartId: unknown, opts
         .update(orgDivisions)
         .set({ ...pick(before, ["name", "headTitle", "reportsTo", "ckp", "headPersonId", "nameIsDefault"]), updatedAt: ctx.now })
         .where(eq(orgDivisions.id, id));
+    } else if (change.entity === "post") {
+      const p = await loadPost(tx, id);
+      if (change.action === "update") {
+        await tx
+          .update(orgPosts)
+          .set({ ...pick(before, ["title", "personId", "hiring", "hiringRoleTitle"]), updatedAt: ctx.now })
+          .where(eq(orgPosts.id, id));
+      } else if (change.action === "create" || change.action === "restore") {
+        await archivePostTx(tx, ctx, p, true, null, false);
+      } else if (change.action === "archive") {
+        await archivePostTx(tx, ctx, p, false, Number(before.index), false);
+      }
+    } else if (change.entity === "journey_step") {
+      await lockJourney(tx, chart.companyId);
+      const s = await loadJourneyStep(tx, id);
+      if (change.action === "update") {
+        await tx
+          .update(orgJourneySteps)
+          .set({ ...pick(before, ["label", "departmentId"]), updatedAt: ctx.now })
+          .where(eq(orgJourneySteps.id, id));
+      } else if (change.action === "move") {
+        if (!s.archivedAt) await writeJourneyOrder(tx, placeAt(await liveJourneyIds(tx, s.companyId), s.id, Number(before.index)), ctx.now);
+      } else if (change.action === "create" || change.action === "restore") {
+        await archiveJourneyStepTx(tx, ctx, s, true, null);
+      } else if (change.action === "archive") {
+        await archiveJourneyStepTx(tx, ctx, s, false, Number(before.index));
+      }
+    } else if (change.entity === "journey" && change.action === "create") {
+      // A journey template: every step it added goes back to the archive.
+      await lockJourney(tx, chart.companyId);
+      const stepIds = ((change.after as { stepIds?: unknown } | null)?.stepIds ?? []) as string[];
+      for (const stepId of stepIds) await archiveJourneyStepTx(tx, ctx, await loadJourneyStep(tx, stepId), true, null);
     }
     await tx.update(orgChangeLog).set({ undoneAt: ctx.now, undoneBy: ctx.user.id }).where(eq(orgChangeLog.id, change.id));
     await tx.update(orgCharts).set({ updatedAt: ctx.now }).where(eq(orgCharts.id, chart.id));
