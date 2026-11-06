@@ -18,24 +18,35 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from "@dnd-kit/utilities";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, useTransition, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition, type ReactNode } from "react";
 import {
+  applyJourneyTemplateAction,
   createDepartmentAction,
   createFunctionAction,
+  createJourneyStepAction,
   createPersonAndAssignAction,
+  createPostAction,
   moveDepartmentAction,
   moveFunctionAction,
+  moveJourneyStepAction,
+  removeJourneyStepAction,
+  removePostAction,
   setArchivedAction,
   undoAction,
   updateDepartmentAction,
   updateDivisionAction,
   updateFunctionAction,
+  updateJourneyStepAction,
+  updatePostAction,
   type OrgActionState,
 } from "@/app/(app)/org/actions";
 import { formatDisplayDateTime } from "@/lib/dates";
-import { defaultOrgRole, deptLabel, personInitials, placeAt, type OrgAssignTarget } from "@/lib/org";
+import { defaultOrgRole, deptLabel, divisionTint, peopleOnChart, personFootprint, personInitials, placeAt, type OrgAssignTarget, type PersonFootprint } from "@/lib/org";
 import type { OrgChartView, OrgDepartmentView, OrgDivisionView, OrgFunctionView } from "@/server/services/org";
+import type { OrgJourneyView } from "@/server/services/org-journey";
+import { OrgJourneyStrip, type JourneyHandlers } from "./OrgJourneyStrip";
 import { DepartmentPanel, DivisionPanel, type CreatePersonFor } from "./OrgPanels";
+import { AddPostButton, PostChip, type PostHandlers } from "./OrgPosts";
 import { PersonPicker, type NewPersonData, type PersonOption } from "./PersonPicker";
 
 export type { PersonOption };
@@ -243,7 +254,7 @@ function AssignPopover({
 }: {
   /** "head of 1 Найм и ввод в должность" — for screen readers. */
   what: string;
-  target: OrgAssignTarget;
+  target: Exclude<OrgAssignTarget, "post">;
   targetId: string;
   defaultRole: string;
   h: BoardHandlers;
@@ -316,8 +327,11 @@ export function OrgBoard({
   showArchived,
   archivedHref,
   timeZone,
+  journey,
 }: {
   chart: OrgChartView;
+  /** The company's journey strip (shared by its charts). */
+  journey: OrgJourneyView;
   company: { id: string; slug: string; name: string };
   editable: boolean;
   people: PersonOption[];
@@ -342,6 +356,8 @@ export function OrgBoard({
   const [mobileDiv, setMobileDiv] = useState(serverChart.divisions[0]?.id ?? "");
   const [dragging, setDragging] = useState<{ label: string } | null>(null);
   const [notice, setNotice] = useState<{ text: string; error?: boolean } | null>(null);
+  // What is highlighted: a journey step's department, or «Показать посты» for one person.
+  const [focus, setFocus] = useState<{ kind: "step"; stepId: string; deptId: string | null } | { kind: "person"; personId: string } | null>(null);
   const editing = editable && editMode;
 
   // Optimistic concurrency (review #6): every change carries the chart version this board
@@ -463,6 +479,11 @@ export function OrgBoard({
   const createPerson: CreatePersonFor = (target, targetId, data: NewPersonData) =>
     act((v) => createPersonAndAssignAction({ target, targetId, ...data }, v));
 
+  // «Показать посты»: the people on this chart; picking one highlights where they sit.
+  const onChart = useMemo(() => peopleOnChart(chart), [chart]);
+  const focusPerson = focus?.kind === "person" ? focus.personId : null;
+  const footprint = useMemo(() => (focusPerson ? personFootprint(chart, focusPerson) : null), [chart, focusPerson]);
+
   const handlers: BoardHandlers = {
     editing,
     editable,
@@ -481,6 +502,40 @@ export function OrgBoard({
     createPerson,
     moveFunction,
     moveDepartment,
+    posts: {
+      people,
+      createPost: (input) => act((v) => createPostAction(input, v)),
+      updatePost: (id, patch) => act((v) => updatePostAction(id, patch, v)),
+      removePost: (id) => act((v) => removePostAction(id, v)),
+      createPersonForPost: (postId, data) => createPerson("post", postId, data),
+    },
+    footprint,
+    focusDeptId: focus?.kind === "step" ? focus.deptId : null,
+  };
+
+  const journeyHandlers: JourneyHandlers = {
+    addStep: (label) => act((v) => createJourneyStepAction(chart.id, { label }, v)),
+    updateStep: (stepId, patch) => act((v) => updateJourneyStepAction(chart.id, stepId, patch, v)),
+    moveStep: (stepId, index) => act((v) => moveJourneyStepAction(chart.id, stepId, index, v)),
+    removeStep: (stepId) => act((v) => removeJourneyStepAction(chart.id, stepId, v)),
+    applyTemplate: (key) => act((v) => applyJourneyTemplateAction(chart.id, key, v)),
+  };
+
+  const selectStep = (step: { id: string; departmentId: string | null } | null) => {
+    if (!step) {
+      setFocus(null);
+      return;
+    }
+    setFocus({ kind: "step", stepId: step.id, deptId: step.departmentId });
+    const target = step.departmentId ? deptById(step.departmentId) : undefined;
+    if (!step.departmentId) setNotice({ text: editable ? "This step has no department yet — Edit journey to link one." : "This step has no department yet." });
+    else if (!target) setNotice({ text: "Its department is on another chart of this company (or archived)." });
+    else {
+      setNotice(null);
+      setMobileDiv(target.divisionId);
+      // After the highlight renders: bring the card into view (the board scrolls sideways).
+      requestAnimationFrame(() => document.querySelector(`[data-testid="org-department"][data-id="${target.id}"]`)?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" }));
+    }
   };
 
   const panelDept = panel?.kind === "department" ? deptById(panel.id) : undefined;
@@ -488,6 +543,14 @@ export function OrgBoard({
 
   return (
     <div data-testid="org-board" data-edit={editing ? "1" : "0"}>
+      <OrgJourneyStrip
+        journey={journey}
+        editable={editable}
+        departments={departments}
+        activeStepId={focus?.kind === "step" ? focus.stepId : null}
+        onSelect={selectStep}
+        h={journeyHandlers}
+      />
       <div className="mb-3 flex flex-wrap items-center gap-2">
         {editable && (
           <button type="button" className={`btn btn-sm ${editMode ? "btn-primary" : ""}`} aria-pressed={editMode} onClick={() => setEditMode((v) => !v)}>
@@ -532,6 +595,27 @@ export function OrgBoard({
         )}
         {editing && <span className="ml-auto hidden text-[12px] text-muted md:inline">Drag ⠿ to move · ⋯ for keyboard moves · click a text to edit</span>}
       </div>
+
+      {onChart.length > 0 && (
+        <div className="-mx-4 mb-3 flex items-center gap-1.5 overflow-x-auto px-4 md:mx-0 md:flex-wrap md:px-0" role="group" aria-label="Показать посты" data-testid="org-person-filter">
+          <span className="shrink-0 text-[12px] font-semibold text-muted">Показать посты:</span>
+          <button type="button" className={`btn btn-sm shrink-0 ${!focusPerson ? "btn-primary" : ""}`} aria-pressed={!focusPerson} onClick={() => setFocus(null)}>
+            Все
+          </button>
+          {onChart.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              aria-pressed={focusPerson === p.id}
+              className={`btn btn-sm shrink-0 ${focusPerson === p.id ? "btn-primary" : ""}`}
+              onClick={() => setFocus(focusPerson === p.id ? null : { kind: "person", personId: p.id })}
+              title={`${p.name}: ${p.count} place${p.count === 1 ? "" : "s"} on this chart`}
+            >
+              {p.name} <span className="num text-[11px] opacity-70">{p.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Phone: one division at a time. */}
       <nav className="-mx-4 mb-3 flex gap-1.5 overflow-x-auto px-4 md:hidden" aria-label="Divisions">
@@ -613,20 +697,32 @@ interface BoardHandlers {
   createPerson: CreatePersonFor;
   moveFunction: (fnId: string, deptId: string, index: number) => void;
   moveDepartment: (deptId: string, divId: string, index: number) => void;
+  posts: PostHandlers;
+  /** «Показать посты»: where the picked person sits (null = nobody picked). */
+  footprint: PersonFootprint | null;
+  /** The department of the picked journey step. */
+  focusDeptId: string | null;
 }
 
 function DivisionColumn({ division: d, h, mobileHidden }: { division: OrgDivisionView; h: BoardHandlers; mobileHidden: boolean }) {
   const { setNodeRef } = useDroppable({ id: `dz:${d.id}`, data: { type: "dzone", divId: d.id } satisfies DragData });
+  const tint = divisionTint(d.number);
+  const headLit = !!h.footprint?.divisions.has(d.id);
   return (
     <section
       aria-label={`Division ${d.number} ${d.name}`}
       data-testid="org-division"
       data-number={d.number}
+      data-tint={tint}
       className={`${mobileHidden ? "hidden" : "flex"} card w-full shrink-0 flex-col md:flex md:w-[212px]`}
+      // One tint per division (mixed with the surface, so it works in light and dark themes).
+      style={{ background: `color-mix(in srgb, ${tint} 8%, var(--surface))`, borderTop: `4px solid ${tint}` }}
     >
       <header className="flex flex-col gap-1 p-2.5">
         <div className="flex items-start justify-between gap-2">
-          <span className="num text-[34px] font-bold leading-[34px] text-accent">{d.number}</span>
+          <span className="num text-[34px] font-bold leading-[34px]" style={{ color: tint }}>
+            {d.number}
+          </span>
           <button type="button" className="org-icon-btn mt-1" aria-label={`Details of division ${d.number}`} onClick={() => h.open({ kind: "division", id: d.id })}>
             ⓘ
           </button>
@@ -644,7 +740,7 @@ function DivisionColumn({ division: d, h, mobileHidden }: { division: OrgDivisio
             ) : (
               <>
                 {d.headTitle ? " — " : ""}
-                <span className="font-semibold" title={d.headFullName ?? undefined} data-testid="org-head-name">
+                <span className={`font-semibold ${headLit ? "rounded bg-accent px-1 text-accent-ink" : ""}`} title={d.headFullName ?? undefined} data-testid="org-head-name">
                   {d.headName}
                 </span>
               </>
@@ -702,15 +798,22 @@ function DepartmentCard({ dept, index, count, division, h }: { dept: OrgDepartme
   });
   const zone = useDroppable({ id: `fz:${dept.id}`, data: { type: "fzone", deptId: dept.id } satisfies DragData });
   const label = deptLabel(dept);
+  const headLit = !!h.footprint?.departments.has(dept.id);
+  // A journey step's department, or a department where the picked person sits: outlined; with
+  // a person picked, the other departments fade.
+  const lit = h.focusDeptId === dept.id || !!h.footprint?.touched.has(dept.id);
+  const faded = !!h.footprint && !h.footprint.touched.has(dept.id);
   return (
     <article
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform), transition }}
-      className={`org-dept flex flex-col gap-1 rounded-[10px] border border-line p-2 ${isDragging ? "opacity-40" : ""}`}
+      className={`org-dept flex flex-col gap-1 rounded-[10px] border p-2 transition-opacity ${lit ? "border-accent outline-2 outline-accent" : "border-line"} ${isDragging || faded ? "opacity-40" : ""}`}
       aria-label={`Department ${label}`}
+      aria-current={h.focusDeptId === dept.id ? "true" : undefined}
       data-testid="org-department"
       data-number={dept.number}
       data-id={dept.id}
+      data-lit={lit ? "1" : undefined}
     >
       <div className="flex items-start gap-1.5">
         {h.editing && (
@@ -771,24 +874,12 @@ function DepartmentCard({ dept, index, count, division, h }: { dept: OrgDepartme
           </>
         )}
       </div>
-      {(dept.ckp || h.editing) && (
-        <p className="text-[12px] leading-[17px]">
-          <span className="font-semibold">ЦКП:</span>{" "}
-          <InlineText value={dept.ckp} editing={h.editing} label={`ЦКП of department ${dept.number}`} onSave={(v) => h.saveDepartment(dept.id, { ckp: v })} />
-        </p>
-      )}
-      {(dept.statistic || h.editing) && (
-        <p className="text-[11.5px] leading-[16px] text-muted">
-          Статистика:{" "}
-          <InlineText value={dept.statistic} editing={h.editing} label={`Statistic of department ${dept.number}`} onSave={(v) => h.saveDepartment(dept.id, { statistic: v })} />
-        </p>
-      )}
       {(dept.headName || dept.openTasks > 0 || (h.editable && !h.editing)) && (
         <p className="flex flex-wrap items-center gap-1 text-[11.5px]" data-testid="org-department-head">
           {dept.headName ? (
             <span className="text-[11.5px]">
               <span className="text-muted">Руководитель:</span>{" "}
-              <span className="font-semibold" title={dept.headFullName ?? undefined} data-testid="org-head-name">
+              <span className={`font-semibold ${headLit ? "rounded bg-accent px-1 text-accent-ink" : ""}`} title={dept.headFullName ?? undefined} data-testid="org-head-name">
                 {dept.headName}
               </span>
             </span>
@@ -808,6 +899,26 @@ function DepartmentCard({ dept, index, count, division, h }: { dept: OrgDepartme
             </span>
           )}
         </p>
+      )}
+      {(dept.ckp || h.editing) && (
+        <p className="text-[12px] leading-[17px]">
+          <span className="font-semibold">ЦКП:</span>{" "}
+          <InlineText value={dept.ckp} editing={h.editing} label={`ЦКП of department ${dept.number}`} onSave={(v) => h.saveDepartment(dept.id, { ckp: v })} />
+        </p>
+      )}
+      {(dept.statistic || h.editing) && (
+        <p className="text-[11.5px] leading-[16px] text-muted">
+          Статистика:{" "}
+          <InlineText value={dept.statistic} editing={h.editing} label={`Statistic of department ${dept.number}`} onSave={(v) => h.saveDepartment(dept.id, { statistic: v })} />
+        </p>
+      )}
+      {(dept.posts.length > 0 || h.editable) && (
+        <div className="flex flex-wrap items-center gap-1" aria-label={`Posts of ${label}`} data-testid="org-posts">
+          {dept.posts.map((p) => (
+            <PostChip key={p.id} post={p} editable={h.editable} highlighted={!!h.footprint?.posts.has(p.id)} h={h.posts} deptName={label} />
+          ))}
+          {h.editable && <AddPostButton departmentId={dept.id} deptName={label} h={h.posts} />}
+        </div>
       )}
       <ul ref={zone.setNodeRef} className={`flex min-h-1 flex-col gap-1 ${zone.isOver ? "rounded-[8px] outline-2 outline-dashed outline-accent" : ""}`} aria-label={`Functions of ${label}`}>
         <SortableContext items={dept.functions.map((f) => `f:${f.id}`)} strategy={verticalListSortingStrategy}>
@@ -842,9 +953,10 @@ function FunctionRow({ fn, index, dept, h }: { fn: OrgFunctionView; index: numbe
     <li
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform), transition }}
-      className={`flex items-start gap-1.5 rounded-[6px] bg-surface px-1.5 py-1 text-[12px] leading-[17px] ${isDragging ? "opacity-40" : ""}`}
+      className={`flex items-start gap-1.5 rounded-[6px] px-1.5 py-1 text-[12px] leading-[17px] ${h.footprint?.functions.has(fn.id) ? "bg-accent-soft font-semibold outline-1 outline-accent" : "bg-surface"} ${isDragging ? "opacity-40" : ""}`}
       data-testid="org-function"
       data-text={fn.text}
+      data-lit={h.footprint?.functions.has(fn.id) ? "1" : undefined}
     >
       {h.editing ? (
         <button type="button" ref={setActivatorNodeRef} className="org-handle hidden md:inline-flex" aria-label={`Drag function ${fn.text}`} {...attributes} {...listeners}>

@@ -1,7 +1,17 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import type { DepartmentPatch, DivisionPatch, FunctionPatch, OrgNewPersonInput } from "@/lib/org";
+import type {
+  DepartmentPatch,
+  DivisionPatch,
+  FunctionPatch,
+  JourneyStepCreateInput,
+  JourneyStepPatch,
+  JourneyTemplateKey,
+  OrgNewPersonInput,
+  PostCreateInput,
+  PostPatch,
+} from "@/lib/org";
 import { getPageContext } from "@/server/context";
 import { toServiceError } from "@/server/services/errors";
 import {
@@ -9,15 +19,19 @@ import {
   createDepartment,
   createFunction,
   createPersonAndAssign,
+  createPost,
   moveDepartment,
   moveFunction,
   setArchived,
+  setPostArchived,
   undoLastChange,
   updateDepartment,
   updateDivision,
   updateFunction,
+  updatePost,
   type OrgWriteOpts,
 } from "@/server/services/org";
+import { applyJourneyTemplate, createJourneyStep, moveJourneyStep, setJourneyStepArchived, updateJourneyStep } from "@/server/services/org-journey";
 
 export interface OrgActionState {
   ok: boolean;
@@ -117,5 +131,58 @@ export async function undoAction(chartId: string, version?: string): Promise<Org
   return run(version, async (o) => {
     const what = await undoLastChange(ctx, chartId, o);
     return { message: what ? `Undone: ${what}` : "Nothing to undo." };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Posts (chips on a department card) and the journey strip — founders only, logged, undoable
+// ---------------------------------------------------------------------------
+
+export async function createPostAction(input: PostCreateInput, version?: string): Promise<OrgActionState> {
+  const ctx = await getPageContext();
+  return run(version, async (o) => ({ id: await createPost(ctx, input, o) }));
+}
+
+export async function updatePostAction(id: string, patch: PostPatch, version?: string): Promise<OrgActionState> {
+  const ctx = await getPageContext();
+  return run(version, (o) => updatePost(ctx, id, patch, o));
+}
+
+export async function removePostAction(id: string, version?: string): Promise<OrgActionState> {
+  const ctx = await getPageContext();
+  return run(version, async (o) => {
+    await setPostArchived(ctx, id, true, o);
+    return { message: "Post removed — Undo brings it back." };
+  });
+}
+
+export async function createJourneyStepAction(chartId: string, input: JourneyStepCreateInput, version?: string): Promise<OrgActionState> {
+  const ctx = await getPageContext();
+  return run(version, async (o) => ({ id: await createJourneyStep(ctx, chartId, input, o) }));
+}
+
+export async function updateJourneyStepAction(chartId: string, stepId: string, patch: JourneyStepPatch, version?: string): Promise<OrgActionState> {
+  const ctx = await getPageContext();
+  return run(version, (o) => updateJourneyStep(ctx, chartId, stepId, patch, o));
+}
+
+export async function moveJourneyStepAction(chartId: string, stepId: string, index: number, version?: string): Promise<OrgActionState> {
+  const ctx = await getPageContext();
+  return run(version, (o) => moveJourneyStep(ctx, chartId, { stepId, index }, o));
+}
+
+export async function removeJourneyStepAction(chartId: string, stepId: string, version?: string): Promise<OrgActionState> {
+  const ctx = await getPageContext();
+  return run(version, async (o) => {
+    await setJourneyStepArchived(ctx, chartId, stepId, true, o);
+    return { message: "Step removed — Undo brings it back." };
+  });
+}
+
+export async function applyJourneyTemplateAction(chartId: string, key: JourneyTemplateKey, version?: string): Promise<OrgActionState> {
+  const ctx = await getPageContext();
+  return run(version, async (o) => {
+    const ids = await applyJourneyTemplate(ctx, chartId, key, o);
+    return { message: `${ids.length} steps added — link each to its department.` };
   });
 }
