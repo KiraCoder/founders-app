@@ -50,7 +50,7 @@ export async function consumeLinkCode(db: Db, rawCode: string, chat: ChatIdentit
         ),
       )
       .returning({ userId: telegramLinkCodes.userId });
-    if (!claimed) return { ok: false, reason: "invalid" } as const;
+    if (!claimed?.userId) return { ok: false, reason: "invalid" } as const;
     const [user] = await tx
       .select({ id: users.id, shortName: users.shortName, role: users.role })
       .from(users)

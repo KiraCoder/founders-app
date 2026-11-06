@@ -197,6 +197,13 @@
       "when": 1793778757168,
       "tag": "0027_company_kinds_clients_posts",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1794002039186,
+      "tag": "0028_staff_on_telegram",
+      "breakpoints": true
     }
   ]
 }

@@ -210,7 +210,7 @@ describe("pushing the founders to ask Elmurat", () => {
     const founders = [t.userIds.nuraaly, t.userIds.talant];
     expect(new Set(sent.map((s) => s.userId))).toEqual(new Set(founders));
     const rows = await t.handle.db.select().from(notificationsOutbox);
-    expect(rows.every((r) => founders.includes(r.userId))).toBe(true);
+    expect(rows.every((r) => founders.includes(r.userId ?? ""))).toBe(true);
     expect((await items()).every((i) => founders.includes(i.userId))).toBe(true);
     const [elmurat] = await t.handle.db.select().from(people).where(eq(people.fullName, "Elmurat"));
     expect(elmurat!.userId).toBeNull();

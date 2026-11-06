@@ -69,6 +69,9 @@ export interface DispatchOptions {
 const PRIORITY_RANK = sql<number>`case ${notificationsOutbox.priority} when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end`;
 const NOT_TASK_PUSH_KINDS = [...SUMMARY_KINDS, "urgent"];
 
+/** An outbox row addressed to a founder (user_id set). Person rows go through staff-dispatcher.ts. */
+export type FounderItem = OutboxItem & { userId: string };
+
 export function backoffMs(attempts: number): number {
   const i = Math.min(Math.max(attempts, 1), BACKOFF_MINUTES.length) - 1;
   return BACKOFF_MINUTES[i]! * 60_000;
@@ -104,7 +107,7 @@ function dayBounds(now: Date, tz: string): { start: Date; end: Date } {
  * Pushes already used today by this item's founder that match `filter`: sent today, or
  * being sent right now by another run (so overlapping runs cannot both spend the last slot).
  */
-async function usedToday(db: Db, item: OutboxItem, now: Date, tz: string, filter: SQL): Promise<number> {
+async function usedToday(db: Db, item: FounderItem, now: Date, tz: string, filter: SQL): Promise<number> {
   const { start, end } = dayBounds(now, tz);
   const [row] = await db
     .select({ n: count() })
@@ -123,7 +126,7 @@ async function usedToday(db: Db, item: OutboxItem, now: Date, tz: string, filter
   return row?.n ?? 0;
 }
 
-function budgetFilter(cls: Exclude<BudgetClass, "urgent">, item: OutboxItem): SQL {
+function budgetFilter(cls: Exclude<BudgetClass, "urgent">, item: FounderItem): SQL {
   if (cls === "summary") return eq(notificationsOutbox.kind, item.kind);
   return and(
     notInArray(notificationsOutbox.kind, NOT_TASK_PUSH_KINDS),
@@ -145,7 +148,7 @@ export const FOLD_BEFORE_SUMMARY_MINUTES = 60;
  * summary: once it is due and still waiting (a tick a little late), for up to the same window
  * after its time.
  */
-async function shouldFoldIntoSummary(db: Db, item: OutboxItem, now: Date, tz: string, prefs: Preferences): Promise<boolean> {
+async function shouldFoldIntoSummary(db: Db, item: FounderItem, now: Date, tz: string, prefs: Preferences): Promise<boolean> {
   if (budgetClass(item) !== "normal") return false;
   const today = todayInTimeZone(now, tz);
   const summaryAt = zonedTimeToUtc(today, prefs.morningSummaryTime, tz).getTime();
@@ -410,8 +413,10 @@ async function processItem(
     report.failed++;
     return;
   }
+  if (!item.userId) return cancel("not_a_founder");
   const user = await getFounder(db, item.userId);
   if (!user) return cancel("not_a_founder");
+  const founderItem = item as FounderItem;
   if (item.expiresAt && item.expiresAt.getTime() <= now.getTime()) return cancel("expired");
 
   // Re-read the link for every item: an unlink (or relink) takes effect immediately.
@@ -443,7 +448,7 @@ async function processItem(
 
   // Just before the morning summary (or held overnight until it): no separate push, the
   // summary lists it (as a parked line, no budget used).
-  if (await shouldFoldIntoSummary(db, item, now, tz, prefs)) {
+  if (await shouldFoldIntoSummary(db, founderItem, now, tz, prefs)) {
     await finish({ status: "parked", parkedAt: now, nextAttemptAt: null, lastError: "folded_into_summary" });
     report.parked++;
     return;
@@ -451,7 +456,7 @@ async function processItem(
 
   // One push per task per local day, whatever the kind (backs up the planner's shared key).
   if (item.taskId && !isSummaryKind(item.kind)) {
-    if ((await usedToday(db, item, now, tz, eq(notificationsOutbox.taskId, item.taskId))) > 0) {
+    if ((await usedToday(db, founderItem, now, tz, eq(notificationsOutbox.taskId, item.taskId))) > 0) {
       return cancel("already_pushed_today");
     }
   }
@@ -459,10 +464,10 @@ async function processItem(
   // Budget.
   const cls = budgetClass(item);
   if (cls === "summary") {
-    if ((await usedToday(db, item, now, tz, budgetFilter(cls, item))) >= 1) return cancel("already_sent_today");
+    if ((await usedToday(db, founderItem, now, tz, budgetFilter(cls, founderItem))) >= 1) return cancel("already_sent_today");
   } else if (cls !== "urgent") {
     const cap = cls === "urgent_task" ? URGENT_TASK_PUSHES_PER_DAY : prefs.maxOtherPerDay;
-    if ((await usedToday(db, item, now, tz, budgetFilter(cls, item))) >= cap) {
+    if ((await usedToday(db, founderItem, now, tz, budgetFilter(cls, founderItem))) >= cap) {
       await finish({
         status: "parked",
         parkedAt: now,
@@ -476,7 +481,7 @@ async function processItem(
 
   const ctx = { ...makeContext(db, user, now), timeZone: tz };
   if (item.kind === "overdue_chase" && prefs.overdueChaseStyle === "grouped") {
-    return sendGroupedChase(ctx, item, channel, recipient, finish, report, clock());
+    return sendGroupedChase(ctx, founderItem, channel, recipient, finish, report, clock());
   }
   const built = await buildFor(ctx, item);
   if (built.dropParked?.length) {
@@ -564,7 +569,7 @@ async function processItem(
  */
 async function sendGroupedChase(
   ctx: ServiceContext,
-  leader: OutboxItem,
+  leader: FounderItem,
   channel: NotificationChannel,
   recipient: Recipient,
   finish: (set: Partial<typeof notificationsOutbox.$inferInsert>) => Promise<unknown>,
@@ -621,7 +626,7 @@ async function sendGroupedChase(
         or(isNull(o.expiresAt), gt(o.expiresAt, now)),
       ),
     )
-    .returning();
+    .returning() as FounderItem[];
   const setRow = (id: string, set: Partial<typeof o.$inferInsert>) =>
     db
       .update(o)

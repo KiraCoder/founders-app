@@ -68,6 +68,8 @@ export const taskEventKindEnum = pgEnum("task_event_kind", [
   "deadline_changed",
   "assignee_changed",
   "deleted",
+  /** A person answered through the Telegram bot (Принято, Нужна помощь, a reply, a deadline request). 0028. */
+  "staff_reply",
 ]);
 export const employmentTypeEnum = pgEnum("employment_type", ["staff", "contractor", "part_time"]);
 export const salaryPayTypeEnum = pgEnum("salary_pay_type", ["monthly", "piecework", "hourly"]);
@@ -191,10 +193,23 @@ export const people = pgTable(
      * so history (tasks, salaries, a future org chart) keeps pointing at them.
      */
     leftAt: timestamp("left_at", { withTimezone: true }),
+    /**
+     * Staff on Telegram (0028): the bot may message this person only when they linked a chat
+     * themselves (/start CODE) AND a founder switched this on. Off by default.
+     */
+    botEnabled: boolean("bot_enabled").notNull().default(false),
+    /** When "bot may message" was last switched on (new-task messages only for tasks assigned after it). */
+    botEnabledAt: timestamp("bot_enabled_at", { withTimezone: true }),
+    /** No bot messages until this instant (founder's "pause until"). */
+    botPausedUntil: timestamp("bot_paused_until", { withTimezone: true }),
+    /** Language of bot messages to this person. Only "ru" today. */
+    lang: text("lang").notNull().default("ru"),
+    /** Per-person overrides of the staff chase defaults (see src/lib/staff-schemas.ts). Null = defaults. */
+    staffChase: jsonb("staff_chase").$type<Record<string, unknown>>(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index("people_full_name_idx").on(t.fullName)],
+  (t) => [index("people_full_name_idx").on(t.fullName), check("people_lang_ck", sql`${t.lang} in ('ru')`)],
 );
 
 /**
@@ -348,6 +363,8 @@ export const tasks = pgTable(
     /** Calendar date in APP_TIMEZONE (Asia/Bishkek). */
     dueDate: date("due_date", { mode: "string" }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    /** Per-task overrides of the staff chase (0028; see src/lib/staff-schemas.ts). Null = the person's settings. */
+    staffChase: jsonb("staff_chase").$type<Record<string, unknown>>(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -374,6 +391,8 @@ export const taskEvents = pgTable(
     taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
     companyId: uuid("company_id").references(() => companies.id, { onDelete: "set null" }),
     actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    /** Set when a person (staff, through the Telegram bot) made the change (0028). */
+    actorPersonId: uuid("actor_person_id").references(() => people.id, { onDelete: "set null" }),
     /**
      * Copy of the task's visibility/owner, so the audit log follows the same rule as the
      * task (see visibleEventsWhere in access.ts). Kept in sync while the task exists and
@@ -400,9 +419,10 @@ export const notificationsOutbox = pgTable(
   "notifications_outbox",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
+    /** The founder this is for, or null for a person (staff) item. Exactly one of user_id / person_id (0028). */
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    /** The person (staff on Telegram) this is for (0028). */
+    personId: uuid("person_id").references(() => people.id, { onDelete: "cascade" }),
     /** Channel actually used ("telegram", "dev", later "push"). "auto" until dispatched. */
     channel: text("channel").notNull().default("auto"),
     /** e.g. "morning_summary", "evening_check", "task_due_today", "overdue_chase", "task_reminder". */
@@ -437,7 +457,11 @@ export const notificationsOutbox = pgTable(
   (t) => [
     index("notifications_outbox_due_idx").on(t.status, t.scheduledFor),
     index("notifications_outbox_user_idx").on(t.userId, t.createdAt),
+    index("notifications_outbox_person_idx").on(t.personId, t.createdAt),
     uniqueIndex("notifications_outbox_user_dedupe_uq").on(t.userId, t.dedupeKey),
+    /** Dedupe for founders and persons alike (0028). */
+    uniqueIndex("notifications_outbox_recipient_dedupe_uq").on(sql`coalesce(${t.userId}, ${t.personId})`, t.dedupeKey),
+    check("notifications_outbox_one_recipient", sql`(${t.userId} is null) <> (${t.personId} is null)`),
   ],
 );
 
@@ -474,34 +498,53 @@ export const notificationPreferences = pgTable("notification_preferences", {
   ),
 ]);
 
-/** A founder's linked Telegram private chat. One per user, one user per chat. */
-export const telegramLinks = pgTable("telegram_links", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  userId: uuid("user_id")
-    .notNull()
-    .unique()
-    .references(() => users.id, { onDelete: "cascade" }),
-  chatId: text("chat_id").notNull().unique(),
-  telegramUserId: text("telegram_user_id").notNull(),
-  username: text("username"),
-  firstName: text("first_name"),
-  createdAt: createdAt(),
-});
+/**
+ * A linked Telegram private chat: a founder's (user_id) or a person's (person_id, 0028).
+ * One per user, one per person, one recipient per chat.
+ */
+export const telegramLinks = pgTable(
+  "telegram_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .unique()
+      .references(() => users.id, { onDelete: "cascade" }),
+    personId: uuid("person_id").references(() => people.id, { onDelete: "cascade" }),
+    chatId: text("chat_id").notNull().unique(),
+    telegramUserId: text("telegram_user_id").notNull(),
+    username: text("username"),
+    firstName: text("first_name"),
+    /** A person sent /stop: the bot sends them nothing until they link again. */
+    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("telegram_links_person_uq").on(t.personId),
+    check("telegram_links_one_owner", sql`(${t.userId} is null) <> (${t.personId} is null)`),
+  ],
+);
 
 /** One-time codes for `/start CODE`. Only a SHA-256 hash is stored. */
 export const telegramLinkCodes = pgTable(
   "telegram_link_codes",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
+    /** A founder's own code, or null for a person's invite code (0028). */
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    /** "Invite to Telegram": the person this code links (0028). */
+    personId: uuid("person_id").references(() => people.id, { onDelete: "cascade" }),
+    /** The founder who made a person's invite. */
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     codeHash: text("code_hash").notNull().unique(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     usedAt: timestamp("used_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
-  (t) => [index("telegram_link_codes_user_idx").on(t.userId)],
+  (t) => [
+    index("telegram_link_codes_user_idx").on(t.userId),
+    index("telegram_link_codes_person_idx").on(t.personId),
+    check("telegram_link_codes_one_owner", sql`(${t.userId} is null) <> (${t.personId} is null)`),
+  ],
 );
 
 /**
@@ -513,15 +556,20 @@ export const notificationActionTokens = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     tokenHash: text("token_hash").notNull().unique(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
+    /** The founder the button belongs to, or null for a person's button (0028). */
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    /** The person (staff) the button belongs to (0028). */
+    personId: uuid("person_id").references(() => people.id, { onDelete: "cascade" }),
     /** The task a task button acts on (null for a holding button). */
     taskId: uuid("task_id").references(() => tasks.id, { onDelete: "cascade" }),
     /** The holding ask item an "I asked Elmurat" button acts on (null for a task button). */
     holdingAskId: uuid("holding_ask_id").references((): AnyPgColumn => holdingAskItems.id, { onDelete: "cascade" }),
-    /** "done" | "snooze_1d" | "move_1d" | "move_3d" | "holding_asked" */
+    /** A founder's Approve / Decline on a person's deadline request (0028). */
+    deadlineRequestId: uuid("deadline_request_id").references((): AnyPgColumn => taskDeadlineRequests.id, { onDelete: "cascade" }),
+    /** "done" | "snooze_1d" | "move_1d" | "move_3d" | "holding_asked" | staff actions (see types.ts) */
     action: text("action").notNull(),
+    /** Small server-side data for the action (e.g. the text a "К какой задаче?" button attaches). */
+    payload: jsonb("payload").$type<Record<string, unknown>>(),
     outboxId: uuid("outbox_id").references(() => notificationsOutbox.id, { onDelete: "set null" }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     usedAt: timestamp("used_at", { withTimezone: true }),
@@ -529,9 +577,84 @@ export const notificationActionTokens = pgTable(
   },
   (t) => [
     index("notification_action_tokens_user_idx").on(t.userId),
-    check("notification_action_tokens_subject", sql`${t.taskId} is not null or ${t.holdingAskId} is not null`),
+    index("notification_action_tokens_person_idx").on(t.personId),
+    check(
+      "notification_action_tokens_subject",
+      sql`${t.taskId} is not null or ${t.holdingAskId} is not null or ${t.deadlineRequestId} is not null`,
+    ),
+    check("notification_action_tokens_one_owner", sql`(${t.userId} is null) <> (${t.personId} is null)`),
   ],
 );
+
+/**
+ * Comments on a task (0028): from a founder in the app or from the assigned person through the
+ * Telegram bot ("Нужна помощь", a free-text reply). Exactly one author.
+ */
+export const taskComments = pgTable(
+  "task_comments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "cascade" }),
+    authorPersonId: uuid("author_person_id").references(() => people.id, { onDelete: "cascade" }),
+    text: text("text").notNull(),
+    /** "app" | "telegram" */
+    source: text("source").notNull().default("app"),
+    /** "comment" | "help" (the person pressed Нужна помощь). */
+    kind: text("kind").notNull().default("comment"),
+    editedAt: timestamp("edited_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("task_comments_task_idx").on(t.taskId, t.createdAt),
+    check("task_comments_one_author", sql`(${t.authorUserId} is null) <> (${t.authorPersonId} is null)`),
+    check("task_comments_source_ck", sql`${t.source} in ('app', 'telegram')`),
+    check("task_comments_kind_ck", sql`${t.kind} in ('comment', 'help')`),
+    check("task_comments_text_ck", sql`length(${t.text}) between 1 and 4000`),
+  ],
+);
+
+/**
+ * "Перенести срок": a person asks for a new deadline; a founder approves (the deadline moves,
+ * logged in task_events) or declines. A person can never change a deadline themselves.
+ */
+export const taskDeadlineRequests = pgTable(
+  "task_deadline_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    personId: uuid("person_id")
+      .notNull()
+      .references(() => people.id, { onDelete: "cascade" }),
+    currentDueDate: date("current_due_date", { mode: "string" }),
+    proposedDueDate: date("proposed_due_date", { mode: "string" }).notNull(),
+    /** "pending" | "approved" | "declined" | "cancelled" */
+    status: text("status").notNull().default("pending"),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("task_deadline_requests_task_idx").on(t.taskId),
+    uniqueIndex("task_deadline_requests_one_pending_uq").on(t.taskId).where(sql`${t.status} = 'pending'`),
+    check("task_deadline_requests_status_ck", sql`${t.status} in ('pending', 'approved', 'declined', 'cancelled')`),
+  ],
+);
+
+/**
+ * App-wide settings, one JSON value per key (0028). `staff_notification_defaults`: the global
+ * staff chase defaults edited in Settings → Team on Telegram (shape in src/lib/staff-schemas.ts).
+ */
+export const appSettings = pgTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: jsonb("value").$type<Record<string, unknown>>().notNull(),
+  updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: updatedAt(),
+});
 
 /** "Snooze 1 day": no reminders/chases for this task to this user until `snoozedUntil`. */
 export const reminderSnoozes = pgTable(
@@ -1419,6 +1542,8 @@ export type TaskEvent = typeof taskEvents.$inferSelect;
 export type OutboxItem = typeof notificationsOutbox.$inferSelect;
 export type NotificationPreferences = typeof notificationPreferences.$inferSelect;
 export type TelegramLink = typeof telegramLinks.$inferSelect;
+export type TaskComment = typeof taskComments.$inferSelect;
+export type TaskDeadlineRequest = typeof taskDeadlineRequests.$inferSelect;
 export type NotificationPriority = (typeof notificationPriorityEnum.enumValues)[number];
 
 export const TASK_STATUSES = taskStatusEnum.enumValues;
