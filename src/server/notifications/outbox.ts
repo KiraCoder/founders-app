@@ -1,8 +1,8 @@
 import "server-only";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@/server/db/connect";
-import { notificationsOutbox, users, type NotificationPriority } from "@/server/db/schema";
-import type { NotificationKind } from "./types";
+import { notificationsOutbox, people, users, type NotificationPriority } from "@/server/db/schema";
+import type { NotificationKind, PersonKind } from "./types";
 
 export interface EnqueueInput {
   userId: string;
@@ -28,9 +28,47 @@ async function assertFounder(db: Db, userId: string): Promise<void> {
   }
 }
 
+export interface PersonEnqueueInput {
+  personId: string;
+  kind: PersonKind;
+  scheduledFor: Date;
+  /** Unique per person (e.g. one chase per task per slot). */
+  dedupeKey: string;
+  expiresAt?: Date | null;
+  priority?: NotificationPriority;
+  taskId?: string | null;
+  payload?: Record<string, unknown>;
+}
+
+/**
+ * Queues a message for a PERSON (staff on Telegram). Only staff kinds; the dispatcher still
+ * re-checks at send time that the person linked the bot themselves, is switched on and not paused.
+ */
+export async function enqueueForPerson(db: Db, input: PersonEnqueueInput): Promise<EnqueueResult> {
+  const [person] = await db.select({ id: people.id }).from(people).where(eq(people.id, input.personId));
+  if (!person) throw new Error("Unknown person");
+  const rows = await db
+    .insert(notificationsOutbox)
+    .values({
+      personId: input.personId,
+      kind: input.kind,
+      scheduledFor: input.scheduledFor,
+      dedupeKey: input.dedupeKey,
+      expiresAt: input.expiresAt ?? null,
+      priority: input.priority ?? "normal",
+      taskId: input.taskId ?? null,
+      payload: input.payload ?? {},
+    })
+    // The recipient dedupe index (coalesce(user_id, person_id), dedupe_key) is the conflict.
+    .onConflictDoNothing()
+    .returning({ id: notificationsOutbox.id });
+  return { id: rows[0]?.id ?? null, created: rows.length > 0 };
+}
+
 /**
  * Adds a notification to the outbox. Everything that will ever be sent goes through here.
- * Refuses non-founder recipients (defence in depth: only the two founders get messages).
+ * Refuses non-founder recipients (defence in depth: founder kinds only ever go to founders;
+ * persons go through enqueueForPerson).
  */
 export async function enqueue(db: Db, input: EnqueueInput): Promise<EnqueueResult> {
   await assertFounder(db, input.userId);

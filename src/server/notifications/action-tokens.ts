@@ -5,11 +5,15 @@ import { notificationActionTokens } from "@/server/db/schema";
 import { randomToken, sha256 } from "./secrets";
 import {
   actionKey,
+  DEADLINE_ACTIONS,
   HOLDING_ACTIONS,
+  STAFF_ACTIONS,
   TASK_ACTIONS,
   type ActionCallbacks,
+  type DeadlineAction,
   type HoldingAction,
   type MessageAction,
+  type StaffAction,
   type TaskAction,
 } from "./types";
 
@@ -22,8 +26,9 @@ const PREFIX = "a:";
  */
 export async function mintActionTokens(
   db: Db,
-  opts: { userId: string; outboxId: string | null; actions: MessageAction[]; now: Date },
+  opts: { userId?: string; personId?: string; outboxId: string | null; actions: MessageAction[]; now: Date },
 ): Promise<ActionCallbacks> {
+  if (!opts.userId === !opts.personId) throw new Error("A button belongs to exactly one founder or person");
   const callbacks: ActionCallbacks = {};
   if (!opts.actions.length) return callbacks;
   const expiresAt = new Date(opts.now.getTime() + ACTION_TOKEN_TTL_DAYS * 86_400_000);
@@ -32,10 +37,13 @@ export async function mintActionTokens(
     callbacks[actionKey(a)] = `${PREFIX}${token}`;
     return {
       tokenHash: sha256(token),
-      userId: opts.userId,
+      userId: opts.userId ?? null,
+      personId: opts.personId ?? null,
       taskId: a.taskId ?? null,
       holdingAskId: a.askId ?? null,
+      deadlineRequestId: a.requestId ?? null,
       action: a.action,
+      payload: a.payload ?? null,
       outboxId: opts.outboxId,
       expiresAt,
     };
@@ -46,7 +54,49 @@ export async function mintActionTokens(
 
 export type ConsumedAction =
   | { kind: "task"; taskId: string; action: TaskAction }
-  | { kind: "holding"; askId: string; action: HoldingAction };
+  | { kind: "holding"; askId: string; action: HoldingAction }
+  | { kind: "deadline"; requestId: string; action: DeadlineAction };
+
+export interface ConsumedStaffAction {
+  kind: "staff";
+  taskId: string;
+  action: StaffAction;
+  payload: Record<string, unknown>;
+}
+
+function parseCallback(callbackData: string): string | null {
+  if (!callbackData.startsWith(PREFIX)) return null;
+  const token = callbackData.slice(PREFIX.length);
+  return /^[A-Za-z0-9_-]{16,64}$/.test(token) ? token : null;
+}
+
+/**
+ * Single-use redemption for one PERSON (staff). Only staff actions on a task count; a founder's
+ * token, another person's token, an expired or used one does nothing.
+ */
+export async function consumePersonActionToken(
+  db: Db,
+  callbackData: string,
+  personId: string,
+  now: Date,
+): Promise<ConsumedStaffAction | null> {
+  const token = parseCallback(callbackData);
+  if (!token) return null;
+  const [row] = await db
+    .update(notificationActionTokens)
+    .set({ usedAt: now })
+    .where(
+      and(
+        eq(notificationActionTokens.tokenHash, sha256(token)),
+        eq(notificationActionTokens.personId, personId),
+        isNull(notificationActionTokens.usedAt),
+        gt(notificationActionTokens.expiresAt, now),
+      ),
+    )
+    .returning({ taskId: notificationActionTokens.taskId, action: notificationActionTokens.action, payload: notificationActionTokens.payload });
+  if (!row?.taskId || !(STAFF_ACTIONS as readonly string[]).includes(row.action)) return null;
+  return { kind: "staff", taskId: row.taskId, action: row.action as StaffAction, payload: row.payload ?? {} };
+}
 
 /**
  * Single-use redemption for one user. Returns null for unknown, expired, used or
@@ -75,9 +125,13 @@ export async function consumeActionToken(
     .returning({
       taskId: notificationActionTokens.taskId,
       holdingAskId: notificationActionTokens.holdingAskId,
+      deadlineRequestId: notificationActionTokens.deadlineRequestId,
       action: notificationActionTokens.action,
     });
   if (!row) return null;
+  if (row.deadlineRequestId && (DEADLINE_ACTIONS as readonly string[]).includes(row.action)) {
+    return { kind: "deadline", requestId: row.deadlineRequestId, action: row.action as DeadlineAction };
+  }
   if (row.taskId && (TASK_ACTIONS as readonly string[]).includes(row.action)) {
     return { kind: "task", taskId: row.taskId, action: row.action as TaskAction };
   }
@@ -94,9 +148,11 @@ export async function consumeActionToken(
 export async function liveCallbacks(
   db: Db,
   callbackDatas: readonly string[],
-  userId: string,
+  owner: string | { personId: string },
   now: Date,
-): Promise<Map<string, { taskId: string | null; holdingAskId: string | null }>> {
+): Promise<Map<string, { taskId: string | null; holdingAskId: string | null; deadlineRequestId: string | null }>> {
+  const ownerWhere =
+    typeof owner === "string" ? eq(notificationActionTokens.userId, owner) : eq(notificationActionTokens.personId, owner.personId);
   const byHash = new Map<string, string>();
   for (const d of callbackDatas) {
     if (!d.startsWith(PREFIX)) continue;
@@ -109,15 +165,18 @@ export async function liveCallbacks(
       tokenHash: notificationActionTokens.tokenHash,
       taskId: notificationActionTokens.taskId,
       holdingAskId: notificationActionTokens.holdingAskId,
+      deadlineRequestId: notificationActionTokens.deadlineRequestId,
     })
     .from(notificationActionTokens)
     .where(
       and(
         inArray(notificationActionTokens.tokenHash, [...byHash.keys()]),
-        eq(notificationActionTokens.userId, userId),
+        ownerWhere,
         isNull(notificationActionTokens.usedAt),
         gt(notificationActionTokens.expiresAt, now),
       ),
     );
-  return new Map(rows.map((r) => [byHash.get(r.tokenHash)!, { taskId: r.taskId, holdingAskId: r.holdingAskId }]));
+  return new Map(
+    rows.map((r) => [byHash.get(r.tokenHash)!, { taskId: r.taskId, holdingAskId: r.holdingAskId, deadlineRequestId: r.deadlineRequestId }]),
+  );
 }

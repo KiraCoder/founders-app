@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, count, eq, gt, gte, inArray, isNull, lt, lte, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, eq, gt, gte, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
 import { todayInTimeZone, addDays, isWithinWindow, windowEndAfter, zonedTimeToUtc } from "@/lib/dates";
 import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, reminderSnoozes, type OutboxItem } from "@/server/db/schema";
@@ -17,6 +17,9 @@ import { getLinkForUser } from "./linking";
 import { buildEveningCheck, buildGroupedChase, buildMorningSummary, buildTaskMessage, parkedLine, type ParkedItem } from "./messages";
 import { loadPreferences, type Preferences } from "./preferences";
 import { fitTelegram } from "./render-telegram";
+import { processPersonItem } from "./staff-dispatcher";
+import { loadStaffDefaults } from "@/server/services/staff";
+import { taskDeadlineRequests } from "@/server/db/schema";
 import {
   aiRequestRef,
   holdingRef,
@@ -64,6 +67,8 @@ export interface DispatchOptions {
   userIds?: readonly string[];
   /** Wall clock for claims. Defaults to the real clock; tests inject one. */
   clock?: () => Date;
+  /** Also send staff (person) rows. Default true; with `userIds` the dev tick still sends them. */
+  staff?: boolean;
 }
 
 const PRIORITY_RANK = sql<number>`case ${notificationsOutbox.priority} when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end`;
@@ -193,6 +198,17 @@ async function collectParked(ctx: ServiceContext): Promise<{ drop: string[]; ite
     byKey.set(k, item);
   };
   for (const r of rows) {
+    if (r.kind === "staff_update") {
+      // A line about the team (done, a reply, an escalation): shown as it was written, no task
+      // id (so it is never merged into a task line of the same message).
+      const line = (r.payload as { summaryLine?: string }).summaryLine;
+      if (!line) {
+        drop.push(r.id);
+        continue;
+      }
+      add(`staff:${r.id}`, r.id, () => ({ text: line }));
+      continue;
+    }
     if (r.kind === REPORT_KIND) {
       // A parked "report ready" push: one line, if the report still exists.
       const runId = (r.payload as { runId?: string }).runId;
@@ -254,6 +270,18 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
       ? { message, dropParked: parked.drop, holdingItemIds: holding?.itemIds, aiRequestIds: composed?.aiRequestIds }
       : { skip: "nothing_to_send", dropParked: parked.drop };
   }
+  if (kind === "staff_update") {
+    const p = item.payload as { message?: NeutralMessage; requestId?: string | null };
+    if (!p.message) return { skip: "nothing_to_send" };
+    if (p.requestId) {
+      const [req] = await ctx.db
+        .select({ status: taskDeadlineRequests.status })
+        .from(taskDeadlineRequests)
+        .where(eq(taskDeadlineRequests.id, p.requestId));
+      if (!req || req.status !== "pending") return { skip: "request_decided" };
+    }
+    return { message: p.message };
+  }
   if (kind === REPORT_KIND) {
     const runId = (item.payload as { runId?: string }).runId;
     const message = runId ? await buildReportReadyMessage(ctx, runId) : null;
@@ -297,14 +325,26 @@ async function loadTaskForPush(ctx: ServiceContext, item: OutboxItem): Promise<{
  * same row (on Postgres; PGlite runs one statement at a time, which is just as safe).
  * A "sending" row whose claim is older than STALE_CLAIM_MS is taken again, as one attempt.
  */
-async function claimNext(db: Db, now: Date, wall: Date, userIds?: readonly string[]): Promise<OutboxItem | null> {
+async function claimNext(
+  db: Db,
+  now: Date,
+  wall: Date,
+  userIds?: readonly string[],
+  staff = true,
+): Promise<OutboxItem | null> {
   const o = notificationsOutbox;
   const staleBefore = new Date(wall.getTime() - STALE_CLAIM_MS);
   const claimable = or(
     and(eq(o.status, "pending"), lte(o.scheduledFor, now), or(isNull(o.nextAttemptAt), lte(o.nextAttemptAt, now))),
     and(eq(o.status, "sending"), lt(o.claimedAt, staleBefore)),
   )!;
-  const userFilter = userIds ? inArray(o.userId, [...userIds]) : undefined;
+  const userFilter = userIds
+    ? staff
+      ? or(inArray(o.userId, [...userIds]), isNotNull(o.personId))
+      : inArray(o.userId, [...userIds])
+    : staff
+      ? undefined
+      : isNotNull(o.userId);
   const pick = db
     .select({ id: o.id })
     .from(o)
@@ -360,11 +400,12 @@ export async function dispatch(db: Db, now: Date, opts: DispatchOptions = {}): P
   const limit = opts.limit ?? 200;
   const report: DispatchReport = { sent: 0, held: 0, parked: 0, cancelled: 0, retrying: 0, failed: 0, notLinked: 0 };
   const prefsCache = new Map<string, Preferences>();
+  let staffDefaults: Awaited<ReturnType<typeof loadStaffDefaults>> | undefined;
 
   await releaseReachable(db, registry, opts.userIds);
 
   for (let n = 0; n < limit; n++) {
-    const item = await claimNext(db, now, clock(), opts.userIds);
+    const item = await claimNext(db, now, clock(), opts.userIds, opts.staff !== false);
     if (!item) break;
     const finish = (set: Partial<typeof notificationsOutbox.$inferInsert>) =>
       db
@@ -372,6 +413,15 @@ export async function dispatch(db: Db, now: Date, opts: DispatchOptions = {}): P
         .set({ claimedAt: null, ...set })
         .where(and(eq(notificationsOutbox.id, item.id), eq(notificationsOutbox.status, "sending")));
     try {
+      if (item.personId) {
+        staffDefaults ??= await loadStaffDefaults(db);
+        await processPersonItem(db, item as OutboxItem & { personId: string }, now, tz, registry, finish, report, {
+          maxAttempts: MAX_ATTEMPTS,
+          backoffMs,
+          defaults: staffDefaults,
+        });
+        continue;
+      }
       await processItem(db, item, now, tz, registry, prefsCache, finish, report, clock);
     } catch (err) {
       // One broken item must not stop the run for everyone else.
@@ -455,7 +505,7 @@ async function processItem(
   }
 
   // One push per task per local day, whatever the kind (backs up the planner's shared key).
-  if (item.taskId && !isSummaryKind(item.kind)) {
+  if (item.taskId && !isSummaryKind(item.kind) && item.kind !== "staff_update") {
     if ((await usedToday(db, founderItem, now, tz, eq(notificationsOutbox.taskId, item.taskId))) > 0) {
       return cancel("already_pushed_today");
     }

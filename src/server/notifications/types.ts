@@ -17,6 +17,16 @@ export const NOTIFICATION_KINDS = [
   "urgent",
   /** An AI role's report is ready (one per run per founder; uses the normal daily budget). */
   "ai_report_ready",
+  /**
+   * Staff on Telegram (0028). To a founder: a person's answer, an escalation or a deadline request
+   * (a line in the next summary, or a push when urgent / it needs a tap).
+   */
+  "staff_update",
+  /** To a person (staff): a task was assigned to them, a chase, their morning list, an info line. */
+  "staff_new_task",
+  "staff_chase",
+  "staff_morning_list",
+  "staff_info",
 ] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
@@ -35,7 +45,16 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   task_reminder: "Reminder",
   urgent: "Urgent",
   ai_report_ready: "AI report ready",
+  staff_update: "Team update",
+  staff_new_task: "Staff · new task",
+  staff_chase: "Staff · reminder",
+  staff_morning_list: "Staff · morning list",
+  staff_info: "Staff · info",
 };
+
+/** Kinds that go to a person (people row) instead of a founder. */
+export const PERSON_KINDS = ["staff_new_task", "staff_chase", "staff_morning_list", "staff_info"] as const;
+export type PersonKind = (typeof PERSON_KINDS)[number];
 
 /** Actions a founder can take straight from a task notification. */
 export const TASK_ACTIONS = ["done", "snooze_1d", "move_1d", "move_3d"] as const;
@@ -71,10 +90,49 @@ export const taskRef = (taskId: string) => `t:${taskId}`;
 export const HOLDING_ACTIONS = ["holding_asked"] as const;
 export type HoldingAction = (typeof HOLDING_ACTIONS)[number];
 
-/** A button: on a task (taskId) or on a holding ask item (askId). */
+/**
+ * Buttons a person (staff) gets under task messages. Russian labels in messages-ru.ts.
+ * staff_move opens the choice of +1 / +3 / +7 days; staff_comment_pick attaches a free-text
+ * message (kept server-side in the token's payload) to the task the person picked.
+ */
+export const STAFF_ACTIONS = [
+  "staff_accept",
+  "staff_done",
+  "staff_help",
+  "staff_move",
+  "staff_move_1d",
+  "staff_move_3d",
+  "staff_move_7d",
+  "staff_comment_pick",
+] as const;
+export type StaffAction = (typeof STAFF_ACTIONS)[number];
+
+/** A founder's one tap on a person's "Перенести срок" request. */
+export const DEADLINE_ACTIONS = ["deadline_approve", "deadline_decline"] as const;
+export type DeadlineAction = (typeof DEADLINE_ACTIONS)[number];
+
+/** A button: on a task (taskId), on a holding ask item (askId) or on a deadline request (requestId). */
 export type MessageAction =
-  | { label: string; action: TaskAction; taskId: string; askId?: undefined; row?: number }
-  | { label: string; action: HoldingAction; askId: string; taskId?: undefined; row?: number };
+  | {
+      label: string;
+      action: TaskAction | StaffAction;
+      taskId: string;
+      askId?: undefined;
+      requestId?: undefined;
+      row?: number;
+      /** Server-side data stored with the button's token (never sent to Telegram). */
+      payload?: Record<string, unknown>;
+    }
+  | { label: string; action: HoldingAction; askId: string; taskId?: undefined; requestId?: undefined; row?: number; payload?: undefined }
+  | {
+      label: string;
+      action: DeadlineAction;
+      requestId: string;
+      taskId?: undefined;
+      askId?: undefined;
+      row?: number;
+      payload?: undefined;
+    };
 // `row`: buttons with the same row number share one keyboard row (the grouped overdue push puts
 // each task's buttons on its own row). Without it, buttons go two per row.
 
@@ -86,7 +144,9 @@ export interface NeutralMessage {
 }
 
 export interface Recipient {
+  /** The recipient's id: users.id for a founder, people.id for a person (then `personId` is set too). */
   userId: string;
+  personId?: string | null;
   /** Telegram private chat id when linked. */
   telegramChatId?: string | null;
 }
@@ -108,8 +168,8 @@ export interface NotificationChannel {
 }
 
 /** Key used in ActionCallbacks for one button. */
-export function actionKey(a: { action: string; taskId?: string; askId?: string }): string {
-  return `${a.action}:${a.taskId ?? a.askId}`;
+export function actionKey(a: { action: string; taskId?: string; askId?: string; requestId?: string }): string {
+  return `${a.action}:${a.taskId ?? a.askId ?? a.requestId}`;
 }
 
 /**

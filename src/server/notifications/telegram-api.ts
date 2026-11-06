@@ -74,6 +74,16 @@ export interface TelegramMessage {
   from?: TelegramUser;
   chat: TelegramChat;
   text?: string;
+  /** Non-text content (staff: not stored; the bot answers "text only" and tells the founders). */
+  photo?: unknown[];
+  voice?: unknown;
+  audio?: unknown;
+  video?: unknown;
+  video_note?: unknown;
+  document?: unknown;
+  sticker?: unknown;
+  /** The message this one replies to (a staff reply to a task message becomes a task comment). */
+  reply_to_message?: { message_id: number };
   /** The inline keyboard the message carries (Telegram sends it back with a button press). */
   reply_markup?: { inline_keyboard?: { text: string; callback_data?: string }[][] };
 }

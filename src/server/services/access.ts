@@ -219,3 +219,41 @@ export function canUseExtension(ctx: ServiceContext): boolean {
 export function assertExtensionAccess(ctx: ServiceContext): void {
   if (!canUseExtension(ctx)) throw new ServiceError("forbidden", "Only the founders can use the browser extension");
 }
+
+// ---------------------------------------------------------------------------
+// Staff on Telegram (people messaged by the bot; 0028)
+// ---------------------------------------------------------------------------
+
+/**
+ * Team-on-Telegram rule: inviting a person, the "bot may message" switch, pauses, chase settings
+ * and the message log are founders-only. Persons have no app login; the bot acts for them as a
+ * PersonContext (below), never as a user.
+ */
+export function canManageStaffBot(ctx: ServiceContext): boolean {
+  return ctx.user.role === "founder";
+}
+
+export function assertStaffBotAccess(ctx: ServiceContext): void {
+  if (!canManageStaffBot(ctx)) throw new ServiceError("forbidden", "Only the founders can manage the team on Telegram");
+}
+
+/** Who the bot acts for when a linked person (staff) presses a button or writes. Not a user. */
+export interface PersonContext {
+  db: ServiceContext["db"];
+  person: { id: string; fullName: string; shortName: string | null };
+  now: Date;
+  timeZone: string;
+}
+
+/**
+ * The ONLY tasks a person may see or touch through the bot: shared tasks assigned to them, of a
+ * company that is not archived. Never personal todos (they cannot be assigned to people), never
+ * other people's tasks; nothing else (salaries, holding, numbers) is reachable from a person.
+ */
+export function staffTasksWhere(pctx: PersonContext): SQL {
+  return and(
+    eq(tasks.assigneePersonId, pctx.person.id),
+    eq(tasks.visibility, "shared"),
+    inArray(tasks.companyId, pctx.db.select({ id: companies.id }).from(companies).where(isNull(companies.archivedAt))),
+  )!;
+}

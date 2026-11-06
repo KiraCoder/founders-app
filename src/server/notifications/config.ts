@@ -14,6 +14,19 @@ export function telegramBotUsername(): string | null {
   return process.env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, "") || null;
 }
 
+/** The founders' bot (@founders_app_bot): invite deep links work even before TELEGRAM_BOT_USERNAME is set. */
+export const DEFAULT_BOT_USERNAME = "founders_app_bot";
+
+/** Bot username for "Invite to Telegram" links: TELEGRAM_BOT_USERNAME, else @founders_app_bot. */
+export function inviteBotUsername(): string {
+  return telegramBotUsername() ?? DEFAULT_BOT_USERNAME;
+}
+
+/** https://t.me/<bot>?start=<code> (the code is A-Z/2-9 and one hyphen, valid as a start parameter). */
+export function inviteDeepLink(code: string): string {
+  return `https://t.me/${inviteBotUsername()}?start=${encodeURIComponent(code)}`;
+}
+
 export function cronSecret(): string | null {
   return process.env.CRON_SECRET?.trim() || null;
 }

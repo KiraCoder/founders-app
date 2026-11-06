@@ -1,15 +1,44 @@
 import "server-only";
+import { and, eq, isNotNull } from "drizzle-orm";
+import { todayInTimeZone } from "@/lib/dates";
 import type { Db } from "@/server/db/connect";
+import { notificationsOutbox, telegramLinks } from "@/server/db/schema";
+import type { PersonContext } from "@/server/services/access";
 import { makeContext } from "@/server/services/context";
 import { toServiceError } from "@/server/services/errors";
 import { applyHoldingAskAction } from "@/server/services/holding-asks";
 import { applyTaskAction } from "@/server/services/notifications";
+import {
+  getPersonTask,
+  listPersonOpenTasks,
+  personAccept,
+  personBotSwitched,
+  personComment,
+  personContext,
+  personHelp,
+  personMarkDone,
+  personMessageWithoutTask,
+  personRequestDeadline,
+  personSentFile,
+  toLite,
+} from "@/server/services/staff-tasks";
+import { decideDeadlineRequest } from "@/server/services/task-comments";
 import { getTodaySummary } from "@/server/services/tasks";
-import { consumeActionToken, liveCallbacks } from "./action-tokens";
-import { consumeLinkCode, findLinkByChat } from "./linking";
+import { consumeActionToken, consumePersonActionToken, liveCallbacks, mintActionTokens, type ConsumedStaffAction } from "./action-tokens";
+import { consumeLinkCode, findLinkByChat, findPersonLinkByChat, setPersonLinkStopped } from "./linking";
 import { buildHelp, buildMorningSummary, buildNotLinked, buildTasksList } from "./messages";
+import {
+  buildMoveOptions,
+  buildStaffHelp,
+  buildStaffTaskList,
+  buildStaffWelcome,
+  buildWhichTask,
+  MOVE_DAYS,
+  RU,
+  ruDate,
+} from "./messages-ru";
 import { escapeHtml, renderTelegram } from "./render-telegram";
-import { TelegramApi, type TelegramUpdate } from "./telegram-api";
+import { TelegramApi, type TelegramMessage, type TelegramUpdate } from "./telegram-api";
 import type { NeutralMessage } from "./types";
 
 /** A Bot API call the handler wants made. Executed by `executeBotActions` (or shown in dev). */
@@ -18,8 +47,8 @@ export interface BotAction {
   params: Record<string, unknown>;
 }
 
-function reply(chatId: number | string, message: NeutralMessage): BotAction {
-  return { method: "sendMessage", params: { chat_id: chatId, ...renderTelegram(message) } };
+function reply(chatId: number | string, message: NeutralMessage, callbacks?: Record<string, string | undefined>): BotAction {
+  return { method: "sendMessage", params: { chat_id: chatId, ...renderTelegram(message, callbacks) } };
 }
 
 function plain(chatId: number | string, title: string, text: string): BotAction {
@@ -29,21 +58,23 @@ function plain(chatId: number | string, title: string, text: string): BotAction 
 /**
  * Handles one Telegram update (from the webhook or the dev poller).
  * - Unlinked chats get one polite "not linked" reply and nothing else.
- * - Linked chats act strictly as their founder, through the service layer.
- * - Buttons carry only a server-side token; it must belong to the linked founder.
+ * - A founder's chat acts strictly as that founder, through the service layer.
+ * - A person's chat (staff, linked with an invite code) acts as that PERSON: only their own tasks,
+ *   through services/staff-tasks.ts; replies in Russian.
+ * - Buttons carry only a server-side token; it must belong to the linked founder or person.
  */
 export async function handleTelegramUpdate(db: Db, update: TelegramUpdate, now: Date): Promise<BotAction[]> {
   if (update.callback_query) return handleCallback(db, update.callback_query, now);
   const msg = update.message;
-  if (!msg?.text || !msg.from || msg.from.is_bot) return [];
+  if (!msg?.from || msg.from.is_bot) return [];
   const chatId = msg.chat.id;
-  const text = msg.text.trim();
+  const text = msg.text?.trim() ?? "";
   const [rawCommand, ...args] = text.split(/\s+/);
-  const command = (rawCommand ?? "").toLowerCase().replace(/@\w+$/, "");
+  const command = text.startsWith("/") ? (rawCommand ?? "").toLowerCase().replace(/@\w+$/, "") : "";
 
   if (command === "/start" && args.length > 0) {
     if (msg.chat.type !== "private") {
-      return [plain(chatId, "Private chats only", "Please send the code to the bot in a private chat.")];
+      return [plain(chatId, "Private chats only", `Please send the code to the bot in a private chat. ${RU.privateOnly}`)];
     }
     const result = await consumeLinkCode(
       db,
@@ -57,31 +88,151 @@ export async function handleTelegramUpdate(db: Db, update: TelegramUpdate, now: 
       now,
     );
     if (!result.ok) {
+      if (result.reason === "chat_taken") return [plain(chatId, "Код не принят", RU.chatTaken)];
       return [
-        plain(chatId, "Code not accepted", "This code is wrong, expired or already used. Generate a new one on the Settings page."),
+        plain(
+          chatId,
+          "Code not accepted",
+          `This code is wrong, expired or already used. Generate a new one on the Settings page. ${RU.codeInvalid}`,
+        ),
       ];
     }
+    if (result.kind === "person") return [reply(chatId, buildStaffWelcome(result.name))];
     return [
       plain(chatId, `Linked to ${result.shortName}`, "From now on your reminders and summaries come here. Send /help to see what I can do."),
     ];
   }
 
-  const link = msg.chat.type === "private" ? await findLinkByChat(db, String(chatId), String(msg.from.id)) : null;
-  if (!link) return [reply(chatId, buildNotLinked())];
-
-  const ctx = makeContext(db, link.user, now);
-  switch (command) {
-    case "/today": {
-      const summary = await getTodaySummary(ctx);
-      return [reply(chatId, { ...buildMorningSummary(summary, [], link.user.shortName), title: `Today, ${link.user.shortName}` })];
+  if (msg.chat.type !== "private") return text ? [reply(chatId, buildNotLinked())] : [];
+  const link = await findLinkByChat(db, String(chatId), String(msg.from.id));
+  if (link) {
+    if (!text) return [];
+    const ctx = makeContext(db, link.user, now);
+    switch (command) {
+      case "/today": {
+        const summary = await getTodaySummary(ctx);
+        return [reply(chatId, { ...buildMorningSummary(summary, [], link.user.shortName), title: `Today, ${link.user.shortName}` })];
+      }
+      case "/tasks":
+        return [reply(chatId, buildTasksList(await getTodaySummary(ctx)))];
+      case "/start":
+        return [plain(chatId, `Hi ${link.user.shortName}`, "You are already linked. Send /help to see the commands.")];
+      case "/stop":
+        await db.delete(telegramLinks).where(and(eq(telegramLinks.id, link.link.id), isNotNull(telegramLinks.userId)));
+        return [plain(chatId, "Unlinked", "No more messages here. Generate a new link code on the Settings page to link again.")];
+      default:
+        return [reply(chatId, buildHelp())];
     }
-    case "/tasks":
-      return [reply(chatId, buildTasksList(await getTodaySummary(ctx)))];
-    case "/start":
-      return [plain(chatId, `Hi ${link.user.shortName}`, "You are already linked. Send /help to see the commands.")];
-    default:
-      return [reply(chatId, buildHelp())];
   }
+
+  const personLink = await findPersonLinkByChat(db, String(chatId), String(msg.from.id));
+  if (personLink) {
+    const pctx = personContext(db, personLink.person, now);
+    try {
+      return await handlePersonMessage(pctx, personLink.link, msg, command, args, update.update_id);
+    } catch (err) {
+      const se = toServiceError(err);
+      if (!se) throw err;
+      return [plain(chatId, "Не получилось", se.code === "not_found" ? RU.notYourTask : se.code === "validation" ? "Сообщение слишком длинное или пустое." : se.message)];
+    }
+  }
+  return text ? [reply(chatId, buildNotLinked())] : [];
+}
+
+/** Kinds of non-text content, named for the founders' line. */
+function fileKind(msg: TelegramMessage): string | null {
+  if (msg.voice || msg.audio || msg.video_note) return "voice message";
+  if (msg.photo) return "photo";
+  if (msg.video) return "video";
+  if (msg.document) return "file";
+  if (msg.sticker) return "sticker";
+  return null;
+}
+
+async function withButtons(pctx: PersonContext, chatId: number, message: NeutralMessage): Promise<BotAction> {
+  const callbacks = message.actions?.length
+    ? await mintActionTokens(pctx.db, { personId: pctx.person.id, outboxId: null, actions: message.actions, now: pctx.now })
+    : undefined;
+  return reply(chatId, message, callbacks);
+}
+
+const today = (pctx: PersonContext) => todayInTimeZone(pctx.now, pctx.timeZone);
+
+async function handlePersonMessage(
+  pctx: PersonContext,
+  link: { id: string; stoppedAt: Date | null },
+  msg: TelegramMessage,
+  command: string,
+  args: string[],
+  updateId: number,
+): Promise<BotAction[]> {
+  const chatId = msg.chat.id;
+  const text = msg.text?.trim() ?? "";
+  if (link.stoppedAt) {
+    if (command === "/start") {
+      await setPersonLinkStopped(pctx.db, link.id, null);
+      await personBotSwitched(pctx, false);
+      return [plain(chatId, "Бот включён", RU.resumed)];
+    }
+    return [plain(chatId, "Сообщения отключены", RU.stoppedHint)];
+  }
+  if (!text) {
+    const kind = fileKind(msg);
+    if (!kind) return [];
+    await personSentFile(pctx, kind, updateId);
+    return [plain(chatId, "Только текст", RU.textOnly)];
+  }
+  switch (command) {
+    case "/start":
+      return [reply(chatId, buildStaffWelcome(pctx.person.shortName || pctx.person.fullName))];
+    case "/help":
+      return [reply(chatId, buildStaffHelp())];
+    case "/tasks":
+      return [await withButtons(pctx, chatId, buildStaffTaskList(await listPersonOpenTasks(pctx), today(pctx)))];
+    case "/stop":
+      await setPersonLinkStopped(pctx.db, link.id, pctx.now);
+      await pctx.db
+        .update(notificationsOutbox)
+        .set({ status: "cancelled", lastError: "stopped", nextAttemptAt: null })
+        .where(and(eq(notificationsOutbox.personId, pctx.person.id), eq(notificationsOutbox.status, "pending")));
+      await personBotSwitched(pctx, true);
+      return [plain(chatId, "Сообщения отключены", RU.stopped)];
+    case "/done": {
+      const n = Number(args[0]);
+      const open = await listPersonOpenTasks(pctx);
+      const task = Number.isInteger(n) && n >= 1 ? open[n - 1] : undefined;
+      if (!task) return [plain(chatId, "Не найдено", RU.doneNotFound)];
+      await personMarkDone(pctx, task.id);
+      return [plain(chatId, task.title, RU.done)];
+    }
+    default:
+      if (command) return [reply(chatId, buildStaffHelp())];
+  }
+  // Free text: a reply to a task message becomes that task's comment; otherwise "К какой задаче?".
+  if (msg.reply_to_message) {
+    const [row] = await pctx.db
+      .select({ taskId: notificationsOutbox.taskId })
+      .from(notificationsOutbox)
+      .where(
+        and(
+          eq(notificationsOutbox.personId, pctx.person.id),
+          eq(notificationsOutbox.providerMessageId, String(msg.reply_to_message.message_id)),
+          isNotNull(notificationsOutbox.taskId),
+        ),
+      )
+      .limit(1);
+    const own = row?.taskId ? await getPersonTask(pctx, row.taskId).catch(() => null) : null;
+    if (own) {
+      await personComment(pctx, own.task.id, text);
+      return [plain(chatId, own.task.title, RU.commentSaved)];
+    }
+  }
+  const open = await listPersonOpenTasks(pctx);
+  if (!open.length) {
+    await personMessageWithoutTask(pctx, text, updateId);
+    return [plain(chatId, "Передано", RU.noTasksComment)];
+  }
+  return [await withButtons(pctx, chatId, buildWhichTask(open, text.slice(0, 4000)))];
 }
 
 async function handleCallback(
@@ -94,7 +245,13 @@ async function handleCallback(
   if (!chat || chat.type !== "private" || !cq.data) return [answer("This button does not work here.")];
 
   const link = await findLinkByChat(db, String(chat.id), String(cq.from.id));
-  if (!link) return [answer("This chat is not linked to Founder Cockpit.")];
+  if (!link) {
+    const personLink = await findPersonLinkByChat(db, String(chat.id), String(cq.from.id));
+    if (personLink && !personLink.link.stoppedAt) {
+      return handlePersonCallback(personContext(db, personLink.person, now), cq, answer);
+    }
+    return [answer("This chat is not linked to Founder Cockpit.")];
+  }
 
   const token = await consumeActionToken(db, cq.data, link.user.id, now);
   if (!token) return [answer("This button has expired or was already used.")];
@@ -102,10 +259,12 @@ async function handleCallback(
   let result: string;
   try {
     const ctx = makeContext(db, link.user, now);
-    result =
-      token.kind === "task"
-        ? await applyTaskAction(ctx, token.action, token.taskId)
-        : await applyHoldingAskAction(ctx, token.askId);
+    if (token.kind === "task") result = await applyTaskAction(ctx, token.action, token.taskId);
+    else if (token.kind === "holding") result = await applyHoldingAskAction(ctx, token.askId);
+    else {
+      const d = await decideDeadlineRequest(ctx, token.requestId, token.action === "deadline_approve");
+      result = d.status === "approved" ? `Approved: deadline moved to ${d.proposedDueDate}` : "Declined: the deadline stays";
+    }
   } catch (err) {
     const se = toServiceError(err);
     if (!se) throw err;
@@ -114,33 +273,121 @@ async function handleCallback(
 
   const actions: BotAction[] = [answer(result)];
   if (cq.message) {
-    const original = cq.message.text ? escapeHtml(cq.message.text) : "";
-    // editMessageText without reply_markup removes every button, so the summary's other
-    // buttons (other tasks, the other holding line) are sent again — only those that still
-    // work: not the one just pressed, none for the same task / item, none used or expired.
-    const keyboard = await remainingKeyboard(db, cq.message, cq.data, token, link.user.id, now);
-    actions.push({
-      method: "editMessageText",
-      params: {
-        chat_id: chat.id,
-        message_id: cq.message.message_id,
-        text: `${original}\n\n<i>${escapeHtml(result)}</i>`.trim(),
-        parse_mode: "HTML",
-        ...(keyboard.length ? { reply_markup: { inline_keyboard: keyboard } } : {}),
-      },
-    });
+    const subject =
+      token.kind === "task"
+        ? (s: Live) => s.taskId === token.taskId
+        : token.kind === "holding"
+          ? (s: Live) => s.holdingAskId === token.askId
+          : (s: Live) => s.deadlineRequestId === token.requestId;
+    const keyboard = await remainingKeyboard(db, cq.message, cq.data, subject, link.user.id, now);
+    actions.push(editAction(chat.id, cq.message, result, keyboard));
   }
   return actions;
 }
 
+async function handlePersonCallback(
+  pctx: PersonContext,
+  cq: NonNullable<TelegramUpdate["callback_query"]>,
+  answer: (text: string) => BotAction,
+): Promise<BotAction[]> {
+  const token: ConsumedStaffAction | null = await consumePersonActionToken(pctx.db, cq.data!, pctx.person.id, pctx.now);
+  if (!token) return [answer(RU.buttonExpired)];
+  const chatId = cq.message!.chat.id;
+  const extra: BotAction[] = [];
+  let result: string;
+  // Which buttons of the message stay: Принято / Перенести срок keep the task's other buttons;
+  // Готово, a deadline option and a "К какой задаче?" pick remove the task's (or all) buttons.
+  let drop: "pressed" | "task" | "all" = "pressed";
+  try {
+    switch (token.action) {
+      case "staff_accept":
+        await personAccept(pctx, token.taskId);
+        result = RU.accepted;
+        break;
+      case "staff_done": {
+        const r = await personMarkDone(pctx, token.taskId);
+        result = r.alreadyClosed ? RU.alreadyDone : RU.done;
+        drop = "task";
+        break;
+      }
+      case "staff_help":
+        await personHelp(pctx, token.taskId);
+        result = RU.help;
+        break;
+      case "staff_move": {
+        const own = await getPersonTask(pctx, token.taskId);
+        if (own.task.status === "done" || own.task.status === "cancelled") {
+          result = RU.noDeadlineMove;
+          break;
+        }
+        extra.push(await withButtons(pctx, chatId, buildMoveOptions(toLite(own.task, own.companyName), today(pctx))));
+        result = "Выберите новый срок";
+        break;
+      }
+      case "staff_move_1d":
+      case "staff_move_3d":
+      case "staff_move_7d": {
+        const proposed = await personRequestDeadline(pctx, token.taskId, MOVE_DAYS[token.action]);
+        result = RU.moveRequested(ruDate(proposed));
+        drop = "all";
+        break;
+      }
+      case "staff_comment_pick": {
+        const text = typeof token.payload.text === "string" ? token.payload.text : "";
+        await personComment(pctx, token.taskId, text);
+        result = RU.commentSaved;
+        drop = "all";
+        break;
+      }
+    }
+  } catch (err) {
+    const se = toServiceError(err);
+    if (!se) throw err;
+    return [answer(se.code === "not_found" ? RU.notYourTask : se.code === "validation" ? RU.noDeadlineMove : se.message)];
+  }
+  const actions: BotAction[] = [answer(result)];
+  if (cq.message) {
+    const keyboard =
+      drop === "all"
+        ? []
+        : await remainingKeyboard(
+            pctx.db,
+            cq.message,
+            cq.data!,
+            drop === "task" ? (s) => s.taskId === token.taskId : () => false,
+            { personId: pctx.person.id },
+            pctx.now,
+          );
+    actions.push(editAction(chatId, cq.message, result, keyboard));
+  }
+  return [...actions, ...extra];
+}
+
+function editAction(chatId: number, message: TelegramMessage, result: string, keyboard: Button[][]): BotAction {
+  const original = message.text ? escapeHtml(message.text) : "";
+  // editMessageText without reply_markup removes every button, so the message's other buttons
+  // are sent again — only those that still work.
+  return {
+    method: "editMessageText",
+    params: {
+      chat_id: chatId,
+      message_id: message.message_id,
+      text: `${original}\n\n<i>${escapeHtml(result)}</i>`.trim(),
+      parse_mode: "HTML",
+      ...(keyboard.length ? { reply_markup: { inline_keyboard: keyboard } } : {}),
+    },
+  };
+}
+
 type Button = { text: string; callback_data: string };
+type Live = { taskId: string | null; holdingAskId: string | null; deadlineRequestId: string | null };
 
 async function remainingKeyboard(
   db: Db,
-  message: NonNullable<NonNullable<TelegramUpdate["callback_query"]>["message"]>,
+  message: TelegramMessage,
   pressed: string,
-  token: Awaited<ReturnType<typeof consumeActionToken>>,
-  userId: string,
+  sameSubject: (s: Live) => boolean,
+  owner: string | { personId: string },
   now: Date,
 ): Promise<Button[][]> {
   const isButton = (b: unknown): b is Button =>
@@ -148,9 +395,7 @@ async function remainingKeyboard(
   const original = (message.reply_markup?.inline_keyboard ?? []).map((row) => row.filter(isButton));
   const buttons = original.flat();
   if (!buttons.length) return [];
-  const live = await liveCallbacks(db, buttons.map((b) => b.callback_data), userId, now);
-  const sameSubject = (s: { taskId: string | null; holdingAskId: string | null }) =>
-    token?.kind === "task" ? s.taskId === token.taskId : token?.kind === "holding" ? s.holdingAskId === token.askId : false;
+  const live = await liveCallbacks(db, buttons.map((b) => b.callback_data), owner, now);
   const keep = (b: Button) => {
     const s = live.get(b.callback_data);
     return !!s && !sameSubject(s);
