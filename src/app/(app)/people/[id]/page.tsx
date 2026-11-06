@@ -11,6 +11,9 @@ import { ServiceError } from "@/server/services/errors";
 import { orgPositionsForPerson, type OrgPosition } from "@/server/services/org";
 import { getPerson, listCompanyUnitOptions } from "@/server/services/people";
 import { canViewSalaries } from "@/server/services/salaries";
+import { canManageStaffBot } from "@/server/services/access";
+import { getTeamMember } from "@/server/services/staff";
+import { InviteToTelegram } from "@/components/staff/InviteToTelegram";
 
 export const metadata = { title: "Person" };
 
@@ -28,6 +31,13 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
   const positions = await orgPositionsForPerson(ctx, person.id);
   const companies = (await listCompanyUnitOptions(ctx)).map((c) => ({ id: c.id, name: c.name, units: c.units.map((u) => ({ id: u.id, name: u.name })) }));
   const left = person.leftAt !== null;
+  const tg = canManageStaffBot(ctx) && !person.isUser ? await getTeamMember(ctx, person.id) : null;
+  const TG_TEXT = {
+    not_linked: "Not on Telegram yet. Invite them: they open the link and press Start.",
+    invited: "Invited — waiting for them to open the link.",
+    linked: "Linked to the bot.",
+    stopped: "They stopped the bot (/stop). Nothing is sent until they send /start.",
+  } as const;
 
   return (
     <>
@@ -46,6 +56,24 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
         }
         actions={<PersonStatusButton personId={person.id} left={left} />}
       />
+
+      {tg && !left && (
+        <section className="card mb-5 p-4" aria-labelledby="person-tg-heading" data-testid="person-telegram-card">
+          <h2 id="person-tg-heading" className="eyebrow mb-2">
+            Telegram
+          </h2>
+          <p className="mb-2 flex flex-wrap items-center gap-2 text-[13px]">
+            <Tag tone={tg.reachable ? "ok" : tg.state === "linked" ? "info" : "warn"}>
+              {tg.reachable ? "Bot messages them" : tg.state === "linked" ? (tg.botEnabled ? "Paused" : "Bot may not message yet") : tg.state.replace("_", " ")}
+            </Tag>
+            <span>{TG_TEXT[tg.state]}</span>
+            <Link href="/settings/team-telegram" className="text-accent hover:underline">
+              Team on Telegram settings
+            </Link>
+          </p>
+          {tg.state !== "linked" && <InviteToTelegram personId={person.id} personName={person.shortName || person.fullName} />}
+        </section>
+      )}
 
       <Section title="Companies and roles" count={person.roles.filter((r) => r.isActive).length}>
         <ul className="card mb-3 divide-y divide-line">

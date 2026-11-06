@@ -192,7 +192,7 @@ feature stays off without it.
 | `DEV_FOUNDER_PASSWORD`, `SEED_RESET_PASSWORDS`, `SEED_SAMPLES` | Seeding only | Used by `npm run db:seed` / `db:seed:deploy` (first deploy), not by the running website. `DEV_FOUNDER_PASSWORD` can be deleted from Vercel after the first deploy |
 | `TELEGRAM_BOT_TOKEN` | For Telegram | Bot token from @BotFather. Empty: messages go to the dev inbox only |
 | `TELEGRAM_WEBHOOK_SECRET` | For Telegram | Random text; Telegram sends it back with every update |
-| `TELEGRAM_BOT_USERNAME` | For Telegram | Bot username without `@` (shown on Settings) |
+| `TELEGRAM_BOT_USERNAME` | For Telegram | Bot username without `@` (shown on Settings; used in staff invite links). Empty: `founders_app_bot` |
 | `CRON_SECRET` | For reminders | Protects `/api/cron/tick`; without it the scheduler endpoint always answers 401 |
 | `DEV_TOOLS` | No | `1` shows the dev inbox in a production build (previews only, never the real site) |
 | `FILE_STORAGE` | No | Where document scans go. Empty: local disk in development, **uploads off in production** ("File uploads arrive with Supabase storage"); `local`: local disk on a server with a lasting disk (ignored on Vercel); `supabase`: placeholder, off until written |
@@ -245,8 +245,9 @@ Security notes:
 ## Notifications and the Telegram bot
 
 Each founder gets **only their own** messages: a morning summary, an evening check, a
-due-today nudge and overdue chases. People records (Edil, Elmurat, …) never receive anything:
-the outbox refuses any recipient that is not a founder.
+due-today nudge and overdue chases. People records (Edil, Elmurat, …) receive nothing unless a
+founder invited them to the bot and switched them on — see *Team on Telegram* below; founder
+kinds can only ever go to founders (the outbox refuses any other recipient).
 
 How it works (all in `src/server/notifications/`):
 
@@ -322,7 +323,7 @@ Buttons under task reminders: **Done**, **Snooze 1 day** (moves only the reminde
 the task history). A button carries only a random one-time token stored on the server; it
 works only from the chat of the founder it was made for.
 
-Bot commands: `/today`, `/tasks`, `/help`, and `/start CODE` to link. Any chat that is not
+Bot commands: `/today`, `/tasks`, `/help`, `/stop` (unlinks this chat), and `/start CODE` to link. Any chat that is not
 linked gets one polite "not linked" reply and nothing else.
 
 ### See it working without Telegram
@@ -422,6 +423,69 @@ messages, AI roles), so the job waits up to 60 s. The route itself may run up to
 Vercel (`export const maxDuration = 60` in `src/app/api/cron/tick/route.ts`). A tick that is
 cut short is safe: whatever was not sent goes out on the next tick. The endpoint also accepts
 Vercel Cron's GET, if you ever upgrade.
+
+## Team on Telegram
+
+Staff (people records: Edil, Elmurat, couriers…) have no app login; they use the **same bot**, in
+**Russian**. The bot messages a person only when **both**: they opened a founder's invite link and
+pressed *Start* themselves, **and** a founder switched on *Bot may message* for them (and they did
+not send `/stop`, are not paused and did not leave). Everything sent is in the outbox log.
+
+**Invite.** Person page or People list → **Invite to Telegram** (founders only) → a one-time code
+(15 minutes, stored hashed, single use; a new invite cancels the old one) and the deep link
+`https://t.me/<bot>?start=<code>` with a copy button. Send it to the person (WhatsApp, SMS). The bot
+is `TELEGRAM_BOT_USERNAME`, or **@founders_app_bot** when that is empty. The code works only in a
+private chat, never takes over a founder's chat, and the bot greets the person in Russian.
+
+**Settings → Team on Telegram** (`/settings/team-telegram`): linked / invited people, the *Bot may
+message* switch, *Pause until* (a date, or *Resume now*), chase settings per person, the last
+messages sent (from the outbox, with status and reason), *Unlink*; and the **defaults for
+everyone**. Every timing is a setting — global default → per person → per task (task page):
+
+| Setting | Default | |
+| --- | --- | --- |
+| Quiet hours | 21:00–08:00 | nothing is sent; messages wait until they end |
+| Chase hours | 09:00–20:00 | reminders only inside these hours |
+| Chase every | 120 min | one reminder per task per slot (slots counted from the start of chase hours) |
+| Max messages per day | 12 | per person; over it a reminder is dropped (the next slot asks again), a new-task message waits for tomorrow |
+| Tell the founder after | 3 unanswered reminders | the task's founder gets a push "Edil hasn't confirmed …"; reminders stop until the person answers (0 = never) |
+| Tell the founder if still open at | off | e.g. 18:00 on the due day or later: a heads-up push, reminders go on |
+| Morning list | off | their open tasks at 09:00 |
+
+Staff are chased **persistently on purpose** (the founders' call: "keep asking until done"),
+so they do not use the founders' 3-per-day budget. Stored in `app_settings`
+(`staff_notification_defaults`), `people.staff_chase` and `tasks.staff_chase` (migration 0028).
+
+**What the person gets** (planner `planForPerson`, dispatcher `staff-dispatcher.ts`, texts in
+`messages-ru.ts`), for open **shared** tasks assigned to them:
+- **New task** (once, on the next tick; only tasks assigned after the switch-on, within 3 days):
+  «Новая задача: … · Срок: 12.11 · Компания: …» with **Принято / Готово / Нужна помощь / Перенести срок**.
+- **Reminders** on the due day and every day after, per the cadence above, until done or escalated.
+- **Morning list** when switched on for them.
+- An info line when a founder approves or declines their deadline request.
+
+**What the person can send back** (always only about **their own** tasks: `staffTasksWhere` in
+`access.ts`; buttons carry one-time tokens bound to that person — a forged, another person's or a
+founder's token does nothing):
+- **Готово** → the task is done (logged in the history as that person) and the task's founder gets
+  one line in their next summary (a push if the task is urgent).
+- **Принято** → logged (task page → *Telegram delivery*).
+- **Нужна помощь** → a comment on the task + a push to the task's founder.
+- **Перенести срок** → +1 / +3 / +7 days → a *request*; the founder approves with one tap (push
+  button or the task page). A person can never change a deadline.
+- **Text**: a reply to a task message becomes a comment on that task (the founder gets a line);
+  other text → «К какой задаче?» with buttons of their open tasks.
+- **Photos / voice / files** → «Пока принимаю только текст»; nothing is stored, the founders get a line.
+- Commands: `/tasks` (numbered, with Готово buttons), `/done N`, `/help`, `/stop` (no more messages;
+  founders get a line; `/start` turns it back on).
+
+**Founders' side:** the task page (`/tasks/<id>`, the task title in any list) shows the comment
+thread (founders add, edit and delete their own comments), pending deadline requests with
+*Approve / Decline*, the delivery trail ("New task sent 10:00 · Accepted 10:05 · Marked done 11:40")
+and the per-task chase settings. Personal todos can never be assigned to a person, so they — and
+salaries, holding, numbers — never reach staff. The dev inbox (`/dev/notifications`) lists *Team
+messages* too; its buttons carry their callback data (dev channel only) so a developer can press
+them through the webhook.
 
 ## People and salaries
 
@@ -1077,13 +1141,14 @@ src/
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
                            people-import, metrics, metrics-import, connectors, search, notifications,
                            holding, holding-asks, holding-files, ai-roles, ai-role-defs, ai-role-editor, org, org-expert,
-                           extension)
+                           extension, staff (Team on Telegram), staff-tasks (what a person may do), task-comments)
     ai/                    AI roles: provider.ts (LlmProvider, NoneProvider), finance-rules.ts, month-values.ts,
                            narrative.ts (prompt builder, no salaries), orchestrator.ts (tick + morning-summary dedupe)
     storage/               FileStorage for documents: local .data/uploads, Supabase placeholder
     import/parse-table.ts  .xlsx/.csv parsing for the people and numbers imports (in memory, 2 MB limit)
     connectors/            Data sources: Connector interface, registry, stubs (no network), runner
-    notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot,
+    notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot, staff-dispatcher,
+                           messages-ru.ts (staff texts), staff-notify.ts (lines/pushes to founders about staff),
                            telegram-setup.ts (setWebhook / setMyCommands), reminder-clock.ts (pg_cron + Vault)
     http/request-guard.ts  Same-origin + JSON check for mutating /api/v1 calls
     http/ingest.ts         POST /api/v1/ingest: key auth, CORS for chrome-extension://, limits, log

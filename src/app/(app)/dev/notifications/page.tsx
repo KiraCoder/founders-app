@@ -3,7 +3,9 @@ import { EmptyState, PageHeader, Tag, type Tone } from "@/components/ui";
 import { getPageContext } from "@/server/context";
 import type { OutboxItem } from "@/server/db/schema";
 import { devToolsEnabled, telegramBotToken } from "@/server/notifications/config";
-import { KIND_LABELS, type NeutralMessage, type NotificationKind } from "@/server/notifications/types";
+import { actionKey, KIND_LABELS, type ActionCallbacks, type NeutralMessage, type NotificationKind } from "@/server/notifications/types";
+import { canManageStaffBot } from "@/server/services/access";
+import { listRecentStaffMessages } from "@/server/services/staff";
 import { getMyTelegramLink, listMyNotifications } from "@/server/services/notifications";
 import { runTickAction } from "./actions";
 
@@ -20,7 +22,8 @@ const STATUS_TONE: Record<OutboxItem["status"], Tone> = {
   not_linked: "warn",
 };
 
-function Message({ m }: { m: NeutralMessage }) {
+/** `callbacks`: dev-channel staff rows keep their button data so a developer (or e2e) can "press" via the webhook. */
+function Message({ m, callbacks }: { m: NeutralMessage; callbacks?: ActionCallbacks }) {
   return (
     <div className="mt-2 rounded-[8px] border border-line bg-sunk p-3 text-[13px]">
       <p className="font-semibold">{m.title}</p>
@@ -42,7 +45,7 @@ function Message({ m }: { m: NeutralMessage }) {
       {!!m.actions?.length && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {m.actions.map((a) => (
-            <span key={`${a.action}:${a.taskId ?? a.askId}`} className="btn btn-sm pointer-events-none">
+            <span key={actionKey(a)} className="btn btn-sm pointer-events-none" data-callback={callbacks?.[actionKey(a)]}>
               {a.label}
             </span>
           ))}
@@ -56,6 +59,7 @@ export default async function DevNotificationsPage() {
   if (!devToolsEnabled()) notFound();
   const ctx = await getPageContext();
   const [items, link] = await Promise.all([listMyNotifications(ctx), getMyTelegramLink(ctx)]);
+  const team = canManageStaffBot(ctx) ? await listRecentStaffMessages(ctx, 30) : [];
   const fmt = new Intl.DateTimeFormat("en-GB", {
     day: "numeric",
     month: "short",
@@ -122,7 +126,12 @@ export default async function DevNotificationsPage() {
                 {item.status === "not_linked" && (
                   <p className="mt-1 text-[12px] text-warn">Held: Telegram is not linked yet. Sent once you link, if still valid.</p>
                 )}
-                {item.status === "parked" && (
+                {item.status === "parked" && item.lastError === "staff_line" && (
+                  <p className="mt-1 text-[12px] text-muted">
+                    {bundled ? "Listed in a summary." : "A line for your next summary (not sent on its own)."}
+                  </p>
+                )}
+                {item.status === "parked" && item.lastError !== "staff_line" && (
                   <p className="mt-1 text-[12px] text-warn">
                     Daily budget was full, so this was parked
                     {bundled ? ` and listed in the ${KIND_LABELS[bundled.kind as NotificationKind]?.toLowerCase()}` : " for the next summary"}.
@@ -139,6 +148,37 @@ export default async function DevNotificationsPage() {
           })}
         </ul>
       )}
+      <section className="mt-8" aria-labelledby="team-messages-heading">
+        <h2 id="team-messages-heading" className="eyebrow mb-2">
+          Team messages (staff on Telegram, in Russian)
+        </h2>
+        {team.length === 0 ? (
+          <EmptyState>No staff messages yet. Invite someone in Settings → Team on Telegram.</EmptyState>
+        ) : (
+          <ul className="flex flex-col gap-3" aria-label="Team messages">
+            {team.map(({ item, name, short }) => (
+              <li key={item.id} className="card p-3 md:p-4" data-testid="team-message">
+                <div className="flex flex-wrap items-center gap-2 text-[12px]">
+                  <span className="text-[13px] font-semibold">To {short || name}</span>
+                  <span>{KIND_LABELS[item.kind as NotificationKind] ?? item.kind}</span>
+                  <Tag tone={STATUS_TONE[item.status]}>{item.status}</Tag>
+                  {item.status === "sent" && <Tag tone="info">via {item.channel}</Tag>}
+                  <span className="ml-auto text-muted">
+                    {item.sentAt ? `sent ${fmt.format(item.sentAt)}` : `for ${fmt.format(item.scheduledFor)}`}
+                  </span>
+                </div>
+                {item.message ? (
+                  <Message
+                    m={item.message as NeutralMessage}
+                    callbacks={item.channel === "dev" ? (item.payload as { devCallbacks?: ActionCallbacks }).devCallbacks : undefined}
+                  />
+                ) : null}
+                {item.lastError && item.status !== "sent" && <p className="mt-1 text-[12px] text-muted">Reason: {item.lastError}</p>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </>
   );
 }

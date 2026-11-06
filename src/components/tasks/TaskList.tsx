@@ -93,7 +93,9 @@ function TaskRow({
         </button>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className={`text-[14px] ${closed ? "text-muted line-through" : "font-medium"}`}>{task.title}</span>
+            <Link href={`/tasks/${task.id}`} className={`text-[14px] hover:underline ${closed ? "text-muted line-through" : "font-medium"}`}>
+              {task.title}
+            </Link>
             {task.visibility === "private" && (
               <Tag title="Only you can see this">
                 <Icon name="lock" size={11} /> Personal

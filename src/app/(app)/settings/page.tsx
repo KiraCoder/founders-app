@@ -9,7 +9,7 @@ import { TelegramLinkCard } from "@/components/settings/TelegramLinkCard";
 import { ThemeToggle } from "@/components/settings/ThemeToggle";
 import { PageHeader } from "@/components/ui";
 import { getPageContext } from "@/server/context";
-import { devToolsEnabled, telegramBotToken, telegramBotUsername } from "@/server/notifications/config";
+import { devToolsEnabled, inviteBotUsername, telegramBotToken } from "@/server/notifications/config";
 import { canSetUpApp, getReminderClockConfig, getTelegramSetupConfig } from "@/server/services/app-setup";
 import { resolveAppBaseUrl } from "@/server/app-url";
 import { canUseExtension } from "@/server/services/access";
@@ -72,11 +72,27 @@ export default async function SettingsPage() {
         </h2>
         <TelegramLinkCard
           link={link ? { username: link.username, firstName: link.firstName, linkedAt } : null}
-          botUsername={telegramBotUsername()}
+          botUsername={inviteBotUsername()}
           botConfigured={!!telegramBotToken()}
           timeZone={ctx.timeZone}
         />
       </section>
+
+      {founder && (
+        <section className="card mb-5 flex flex-wrap items-center justify-between gap-3 p-4 md:p-5" aria-labelledby="team-tg-heading">
+          <div>
+            <h2 id="team-tg-heading" className="eyebrow mb-1">
+              Team on Telegram
+            </h2>
+            <p className="text-sm text-muted">
+              Invite staff to the bot, switch “bot may message” per person, pause, chase timings, and see what was sent.
+            </p>
+          </div>
+          <Link href="/settings/team-telegram" className="btn">
+            Team on Telegram
+          </Link>
+        </section>
+      )}
 
       {founder && (
         <section className="card mb-5 p-4 md:p-5" aria-labelledby="tg-setup-heading">

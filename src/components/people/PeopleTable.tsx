@@ -5,6 +5,10 @@ import { EMPLOYMENT_TYPE_LABELS, PAY_TYPE_LABELS } from "@/lib/people-schemas";
 import { formatMoney } from "@/lib/money";
 import type { OrgPosition } from "@/server/services/org";
 import type { PersonView } from "@/server/services/people";
+import { InviteToTelegram } from "@/components/staff/InviteToTelegram";
+
+export type PersonTelegram = Record<string, { state: "not_linked" | "invited" | "linked" | "stopped"; botEnabled: boolean }>;
+const TG_LABEL = { not_linked: null, invited: "Invited", linked: "On Telegram", stopped: "Stopped the bot" } as const;
 
 /**
  * People table. The salary column is rendered only when `showSalary` is true, which pages
@@ -16,6 +20,7 @@ export function PeopleTable({
   showCompany = true,
   empty = "No people found.",
   positions = {},
+  telegram,
 }: {
   people: PersonView[];
   showSalary: boolean;
@@ -23,6 +28,8 @@ export function PeopleTable({
   empty?: string;
   /** Org chart positions per person id (head of …, functions). */
   positions?: Record<string, OrgPosition[]>;
+  /** Founders: Telegram state per person and the "Invite to Telegram" button (people without an app account). */
+  telegram?: PersonTelegram;
 }) {
   if (people.length === 0) {
     return <div className="card px-4 py-6 text-center text-[13px] text-muted">{empty}</div>;
@@ -104,6 +111,17 @@ export function PeopleTable({
                   <div className="group/email flex items-center gap-1 truncate">
                     <span className="truncate">{p.email}</span>
                     <CopyButton text={p.email} title={`Copy email for ${p.fullName}`} size={12} className="opacity-0 transition-opacity group-hover/email:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100" />
+                  </div>
+                )}
+                {telegram && !p.isUser && !p.leftAt && (
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5" data-testid="person-telegram">
+                    {TG_LABEL[telegram[p.id]?.state ?? "not_linked"] && (
+                      <Tag tone={telegram[p.id]?.state === "linked" ? (telegram[p.id]?.botEnabled ? "ok" : "info") : "warn"}>
+                        {TG_LABEL[telegram[p.id]!.state]}
+                        {telegram[p.id]?.state === "linked" && !telegram[p.id]?.botEnabled ? " · off" : ""}
+                      </Tag>
+                    )}
+                    {telegram[p.id]?.state !== "linked" && <InviteToTelegram personId={p.id} personName={p.shortName || p.fullName} compact />}
                   </div>
                 )}
               </td>

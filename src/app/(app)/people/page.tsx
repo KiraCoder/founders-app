@@ -7,6 +7,8 @@ import { getPageContext } from "@/server/context";
 import { orgPositionsForPeople } from "@/server/services/org";
 import { listCompanyUnitOptions, listPeople } from "@/server/services/people";
 import { canViewSalaries } from "@/server/services/salaries";
+import { canManageStaffBot } from "@/server/services/access";
+import { telegramStatesFor } from "@/server/services/staff";
 
 export const metadata = { title: "People" };
 
@@ -20,6 +22,7 @@ export default async function PeoplePage({ searchParams }: { searchParams: SP })
   const [options, showSalary] = await Promise.all([listCompanyUnitOptions(ctx), canViewSalaries(ctx)]);
   const people = await listPeople(ctx, filters, { salaryScope: "people_list" });
   const positions = await orgPositionsForPeople(ctx, people.map((p) => p.id));
+  const telegram = canManageStaffBot(ctx) ? await telegramStatesFor(ctx, people.map((p) => p.id)) : undefined;
   const status = filters.status ?? "active";
 
   return (
@@ -90,7 +93,7 @@ export default async function PeoplePage({ searchParams }: { searchParams: SP })
       <p className="mb-2 text-[12px] text-muted">
         <span className="num">{people.length}</span> {people.length === 1 ? "person" : "people"}
       </p>
-      <PeopleTable people={people} showSalary={showSalary} positions={positions} />
+      <PeopleTable people={people} showSalary={showSalary} positions={positions} telegram={telegram} />
     </>
   );
 }
