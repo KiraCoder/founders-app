@@ -260,7 +260,7 @@ describe("who gets messages", () => {
     await edilTask("During pause", "2026-11-05", local(D, "08:50"));
     expect((await tick(local(D, "10:00"))).sent.filter((s) => s.personId)).toHaveLength(0);
     const next = await tick(local("2026-11-03", "09:00"));
-    expect(next.sent.filter((s) => s.personId).map((s) => s.message.title)).toEqual(["Новая задача: During pause"]);
+    expect(next.sent.filter((s) => s.personId).map((s) => s.message.title)).toEqual(["🆕 Новая задача: During pause"]);
   });
 });
 
@@ -271,10 +271,10 @@ describe("task messages to staff", () => {
     const reg = await tick(local(D, "08:45"));
     const toEdil = reg.sent.filter((s) => s.personId === edil);
     expect(toEdil).toHaveLength(1);
-    expect(toEdil[0]!.message.title).toBe("Новая задача: Подготовить отчёт");
-    expect(toEdil[0]!.message.lines[0]!.text).toBe("Срок: 12.11 · Компания: Jobutify");
-    expect(toEdil[0]!.message.actions!.map((a) => a.label)).toEqual(["Принято", "Готово", "Нужна помощь", "Перенести срок"]);
-    expect(Object.keys(toEdil[0]!.callbacks)).toHaveLength(4);
+    expect(toEdil[0]!.message.title).toBe("🆕 Новая задача: Подготовить отчёт");
+    expect(toEdil[0]!.message.lines.slice(0, 2).map((l) => l.text)).toEqual(["🏢 Jobutify", "📅 Срок: 12.11"]);
+    expect(toEdil[0]!.message.actions!.map((a) => a.label)).toEqual(["✅ Готово", "👍 Принято", "💬 Комментарий", "🆘 Нужна помощь", "📅 Перенести срок"]);
+    expect(Object.keys(toEdil[0]!.callbacks)).toHaveLength(5);
     // Not again on the next tick (not due yet: no chase either).
     expect((await tick(local(D, "10:00"))).sent.filter((s) => s.personId)).toHaveLength(0);
     // Founders are not sent anything about the person's task by the staff flow.
@@ -299,20 +299,20 @@ describe("task messages to staff", () => {
     await tick(local("2026-11-01", "10:05"));
     await tick(local(D, "08:30")); // before working hours: nothing
     const at9 = await tick(local(D, "09:00"));
-    expect(at9.sent.filter((s) => s.personId).map((s) => s.message.title)).toEqual(["Напоминание: Сдать акт"]);
+    expect(at9.sent.filter((s) => s.personId).map((s) => s.message.title)).toEqual(["🔔 Напоминание: Сдать акт"]);
     // Same slot (09:00–11:00): no second chase.
     expect((await tick(local(D, "10:30"))).sent.filter((s) => s.personId)).toHaveLength(0);
     // Next slot.
     const at11 = await tick(local(D, "11:00"));
     expect(at11.sent.filter((s) => s.personId)).toHaveLength(1);
-    expect(at11.sent.filter((s) => s.personId)[0]!.message.actions!.map((a) => a.label)).toEqual(["Готово", "Нужна помощь", "Перенести срок"]);
+    expect(at11.sent.filter((s) => s.personId)[0]!.message.actions!.map((a) => a.label)).toEqual(["✅ Готово", "💬 Комментарий", "🆘 Нужна помощь", "📅 Перенести срок"]);
     // After working hours: nothing.
     expect((await tick(local(D, "20:30"))).sent.filter((s) => s.personId)).toHaveLength(0);
     // Overdue tomorrow: chased again, "Задача просрочена".
     const next = await tick(local("2026-11-03", "09:01"));
     const chase = next.sent.filter((s) => s.personId)[0]!;
-    expect(chase.message.title).toBe("Задача просрочена: Сдать акт");
-    expect(chase.message.lines[0]!.text).toContain("Просрочено на 1 дн.");
+    expect(chase.message.title).toBe("⏰ Задача просрочена: Сдать акт");
+    expect(chase.message.lines[1]!.text).toContain("Просрочено на 1 дн.");
 
     // Готово → done, the founder gets one summary line, chasing stops.
     const done = await handleTelegramUpdate(t.handle.db, press(EDIL_CHAT, cb(chase, "staff_done", task.id)), local("2026-11-03", "09:05"));
@@ -339,7 +339,7 @@ describe("task messages to staff", () => {
     await onTelegram(edil, EDIL_CHAT, local(D, "08:00"));
     await edilTask("Today", D, local(D, "09:30"));
     const reg = await tick(local(D, "09:35"));
-    expect(reg.sent.filter((s) => s.personId).map((s) => s.message.title)).toEqual(["Новая задача: Today"]);
+    expect(reg.sent.filter((s) => s.personId).map((s) => s.message.title)).toEqual(["🆕 Новая задача: Today"]);
     const chase = (await personRows(edil)).find((r) => r.kind === "staff_chase");
     expect(chase).toMatchObject({ status: "cancelled", lastError: "already_pushed_this_slot" });
   });
@@ -381,7 +381,7 @@ describe("task messages to staff", () => {
     await setTaskStaffChase(t.ctx("nuraaly"), b.id, { chaseEnabled: "false" });
     expect((await tick(local(D, "09:30"))).sent.filter((s) => s.personId)).toHaveLength(0);
     const r10 = await tick(local(D, "10:00"));
-    expect(r10.sent.filter((s) => s.personId).map((s) => s.message.title)).toEqual(["Напоминание: A"]);
+    expect(r10.sent.filter((s) => s.personId).map((s) => s.message.title)).toEqual(["🔔 Напоминание: A"]);
     expect((await tick(local(D, "11:00"))).sent.filter((s) => s.personId)).toHaveLength(1);
     // Cut-off escalation (heads-up, chasing goes on).
     await setTaskStaffChase(t.ctx("nuraaly"), a.id, { escalateAt: "11:30", escalateAfterChases: "0" });
@@ -459,9 +459,11 @@ describe("what a person can do (own tasks only)", () => {
     const keyboard = Object.values(s.callbacks) as string[];
     const acc = await handleTelegramUpdate(t.handle.db, press(EDIL_CHAT, cb(s, "staff_accept", task.id), keyboard), local(D, "09:05"));
     expect(acc[0]!.params.text).toBe("Принято ✓ Основатели увидят.");
-    // The other buttons stay under the message.
+    // The card is re-drawn in place: «Принято» is shown with its time, the other buttons stay.
     const edit = acc.find((a) => a.method === "editMessageText")!;
-    expect((edit.params.reply_markup as { inline_keyboard: unknown[][] }).inline_keyboard[0]).toHaveLength(3);
+    expect(edit.params.text).toContain("👍 Принято");
+    const rows = (edit.params.reply_markup as { inline_keyboard: { text: string }[][] }).inline_keyboard;
+    expect(rows.map((r) => r.map((b) => b.text))).toEqual([["✅ Готово"], ["💬 Комментарий", "🆘 Нужна помощь"], ["📅 Перенести срок"]]);
     await handleTelegramUpdate(t.handle.db, press(EDIL_CHAT, cb(s, "staff_help", task.id)), local(D, "09:06"));
     const comments = await listTaskComments(t.ctx("nuraaly"), task.id);
     expect(comments.map((c) => [c.text, c.kind, c.source, c.authorName])).toEqual([["Нужна помощь", "help", "telegram", "Edil"]]);

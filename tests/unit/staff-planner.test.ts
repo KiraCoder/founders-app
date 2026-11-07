@@ -130,11 +130,13 @@ describe("staff settings", () => {
 });
 
 describe("Russian messages", () => {
-  it("due wording and a new-task message with four buttons", () => {
+  it("due wording and a new-task card with its five buttons", () => {
     expect(ruDue(D, D)).toBe("Срок: сегодня");
     expect(ruDue("2026-10-30", D)).toBe("Просрочено на 3 дн. (срок был 30.10)");
     const m = buildStaffNewTask({ id: "t", title: "A <b>", dueDate: "2026-11-12", priority: "urgent", companyName: "Kiwi Go" }, D);
-    expect(m.lines[0]!.text).toBe("Срок: 12.11 · Компания: Kiwi Go · Срочно");
+    expect(m.title).toBe("🆕 Новая задача: A <b>");
+    expect(m.lines.map((l) => l.text).slice(0, 2)).toEqual(["🏢 Kiwi Go", "📅 Срок: 12.11 · ‼️ Срочно"]);
+    expect(m.actions!.map((a) => a.label)).toEqual(["✅ Готово", "👍 Принято", "💬 Комментарий", "🆘 Нужна помощь", "📅 Перенести срок"]);
     const r = renderTelegram(m, { "staff_done:t": "a:x" });
     expect(r.text).toContain("A &lt;b&gt;");
   });

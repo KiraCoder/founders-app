@@ -30,3 +30,13 @@ export function statusLabel(v: string) {
 export function priorityLabel(v: string) {
   return PRIORITY_OPTIONS.find((o) => o.value === v)?.label ?? v;
 }
+
+/** Status and priority labels + tones of one task. */
+export function labelsFor(t: { status: string; priority: string }) {
+  return {
+    status: statusLabel(t.status),
+    statusTone: STATUS_TONE[t.status] ?? "neutral",
+    priority: priorityLabel(t.priority),
+    priorityTone: PRIORITY_TONE[t.priority] ?? "neutral",
+  };
+}

@@ -11,8 +11,10 @@ import { applyTaskAction } from "@/server/services/notifications";
 import {
   getPersonTask,
   listPersonOpenTasks,
+  loadStaffCard,
   personAccept,
   personBotSwitched,
+  personCheckItem,
   personComment,
   personContext,
   personHelp,
@@ -20,6 +22,8 @@ import {
   personMessageWithoutTask,
   personRequestDeadline,
   personSentFile,
+  personStartComment,
+  takePendingComment,
   toLite,
 } from "@/server/services/staff-tasks";
 import { decideDeadlineRequest } from "@/server/services/task-comments";
@@ -38,6 +42,9 @@ import {
   buildMoveOptions,
   buildRoutineMessageRu,
   buildRoutinePickRu,
+  buildStaffTaskCard,
+  STAFF_CARD_KINDS,
+  type StaffCardKind,
   buildStaffHelp,
   buildStaffTaskList,
   buildStaffWelcome,
@@ -251,6 +258,13 @@ async function handlePersonMessage(
     default:
       if (command) return [reply(chatId, buildStaffHelp())];
   }
+  // «💬 Комментарий» was pressed: this text is that task's comment.
+  const waiting = await takePendingComment(pctx, link.id);
+  const waitingTask = waiting ? await getPersonTask(pctx, waiting).catch(() => null) : null;
+  if (waitingTask) {
+    await personComment(pctx, waitingTask.task.id, text);
+    return [plain(chatId, waitingTask.task.title, RU.commentSaved)];
+  }
   // Free text right after «Комментарий» / «Частично» / «Не могу»: the comment on that routine run.
   const pending = await findAwaitingComment(pctx.db, { personId: pctx.person.id }, pctx.now);
   if (pending) return routineCommentReply(pctx, chatId, pending, text.slice(0, 2000));
@@ -294,7 +308,7 @@ async function handleCallback(
   if (!link) {
     const personLink = await findPersonLinkByChat(db, String(chat.id), String(cq.from.id));
     if (personLink && !personLink.link.stoppedAt) {
-      return handlePersonCallback(personContext(db, personLink.person, now), cq, answer);
+      return handlePersonCallback(personContext(db, personLink.person, now), personLink.link.id, cq, answer);
     }
     return [answer("This chat is not linked to Founder Cockpit.")];
   }
@@ -337,6 +351,7 @@ async function handleCallback(
 
 async function handlePersonCallback(
   pctx: PersonContext,
+  linkId: string,
   cq: NonNullable<TelegramUpdate["callback_query"]>,
   answer: (text: string) => BotAction,
 ): Promise<BotAction[]> {
@@ -391,6 +406,17 @@ async function handlePersonCallback(
         drop = "all";
         break;
       }
+      case "staff_comment":
+        await personStartComment(pctx, linkId, token.taskId);
+        // The card shows the prompt (and the popup too); the next text is the comment.
+        result = RU.commentPrompt;
+        break;
+      case "staff_check": {
+        const item = typeof token.payload.item === "string" ? token.payload.item : "";
+        const r = await personCheckItem(pctx, token.taskId, item);
+        result = r.status === "already" ? RU.alreadyChecked : RU.checked(r.label, r.remaining);
+        break;
+      }
     }
   } catch (err) {
     const se = toServiceError(err);
@@ -398,6 +424,31 @@ async function handlePersonCallback(
     return [answer(se.code === "not_found" ? RU.notYourTask : se.code === "validation" ? RU.noDeadlineMove : se.message)];
   }
   const actions: BotAction[] = [answer(result)];
+  // A task card (0032): re-draw the SAME message with the task's new state (✅ items, «Принято»,
+  // done) and fresh buttons, instead of only appending a line.
+  const cardKind = token.payload.card;
+  if (cq.message && typeof cardKind === "string" && (STAFF_CARD_KINDS as readonly string[]).includes(cardKind)) {
+    const card = await loadStaffCard(pctx, token.taskId).catch(() => null);
+    if (card) {
+      const message = buildStaffTaskCard(card, today(pctx), cardKind as StaffCardKind, result);
+      const callbacks = message.actions?.length
+        ? await mintActionTokens(pctx.db, { personId: pctx.person.id, outboxId: null, actions: message.actions, now: pctx.now })
+        : undefined;
+      const rendered = renderTelegram(fitTelegram(message).message, callbacks);
+      actions.push({
+        method: "editMessageText",
+        params: {
+          chat_id: chatId,
+          message_id: cq.message.message_id,
+          text: rendered.text,
+          parse_mode: "HTML",
+          // Without reply_markup Telegram removes the keyboard (a closed task has no buttons).
+          ...(rendered.reply_markup ? { reply_markup: rendered.reply_markup } : {}),
+        },
+      });
+      return [...actions, ...extra];
+    }
+  }
   if (cq.message) {
     const keyboard =
       drop === "all"

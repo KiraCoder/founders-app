@@ -1,18 +1,20 @@
 import "server-only";
-import { and, asc, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
 import { addDays, todayInTimeZone, type IsoDate } from "@/lib/dates";
-import { commentTextSchema } from "@/lib/staff-schemas";
+import { commentTextSchema, parseTaskOverride } from "@/lib/staff-schemas";
 import {
   companies,
   notificationsOutbox,
   people,
+  taskChecklistItems,
   taskComments,
   taskDeadlineRequests,
   taskEvents,
   tasks,
+  telegramLinks,
   type Task,
 } from "@/server/db/schema";
-import { ruDate, type StaffTaskLite } from "@/server/notifications/messages-ru";
+import { ruDate, type StaffTaskCard, type StaffTaskLite } from "@/server/notifications/messages-ru";
 import { notifyFounders } from "@/server/notifications/staff-notify";
 import type { NeutralMessage } from "@/server/notifications/types";
 import { assertValidId, staffTasksWhere, type PersonContext } from "./access";
@@ -277,4 +279,122 @@ export async function loadActivePerson(db: PersonContext["db"], personId: string
     .from(people)
     .where(and(eq(people.id, personId), isNull(people.leftAt)));
   return p ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Task cards, checklist ticks and «💬 Комментарий» (0032)
+// ---------------------------------------------------------------------------
+
+function ruStamp(d: Date, timeZone: string): string {
+  return new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", timeZone })
+    .format(d)
+    .replace(", ", " ");
+}
+
+/**
+ * The card of one of the person's tasks as it is NOW (checklist, what they answered). Built at
+ * send time and again after every button, so the message always shows the current state.
+ */
+export async function loadStaffCard(pctx: PersonContext, taskId: string): Promise<StaffTaskCard> {
+  const { task, companyName } = await getPersonTask(pctx, taskId);
+  const [items, accepted, help, pending] = await Promise.all([
+    pctx.db
+      .select({ id: taskChecklistItems.id, title: taskChecklistItems.title, details: taskChecklistItems.details, doneAt: taskChecklistItems.doneAt })
+      .from(taskChecklistItems)
+      .where(eq(taskChecklistItems.taskId, task.id))
+      .orderBy(asc(taskChecklistItems.position), asc(taskChecklistItems.createdAt)),
+    pctx.db
+      .select({ at: taskEvents.createdAt })
+      .from(taskEvents)
+      .where(and(eq(taskEvents.taskId, task.id), eq(taskEvents.actorPersonId, pctx.person.id), sql`${taskEvents.newValue} ->> 'reply' = 'accepted'`))
+      .orderBy(desc(taskEvents.createdAt))
+      .limit(1),
+    pctx.db
+      .select({ id: taskComments.id })
+      .from(taskComments)
+      .where(and(eq(taskComments.taskId, task.id), eq(taskComments.authorPersonId, pctx.person.id), eq(taskComments.kind, "help")))
+      .limit(1),
+    pctx.db
+      .select({ d: taskDeadlineRequests.proposedDueDate })
+      .from(taskDeadlineRequests)
+      .where(and(eq(taskDeadlineRequests.taskId, task.id), eq(taskDeadlineRequests.status, "pending")))
+      .limit(1),
+  ]);
+  const override = parseTaskOverride(task.staffChase);
+  return {
+    ...toLite(task, companyName),
+    details: override.shareNotes ? task.notes : null,
+    checklist: items.map((i) => ({ id: i.id, title: i.title, details: i.details, done: !!i.doneAt })),
+    status: task.status === "done" ? "done" : task.status === "cancelled" ? "cancelled" : "open",
+    acceptedAt: accepted[0] ? ruStamp(accepted[0].at, pctx.timeZone) : null,
+    helpRequested: help.length > 0,
+    deadlineRequested: pending[0]?.d ?? null,
+  };
+}
+
+/** «⬜ item»: ticks one checklist item of the person's own open task (time + who are kept). */
+export async function personCheckItem(
+  pctx: PersonContext,
+  taskId: string,
+  itemId: string,
+): Promise<{ status: "checked" | "already"; label: string; remaining: number }> {
+  assertValidId(itemId, "Item");
+  const { task } = await getPersonTask(pctx, taskId);
+  if (task.status === "done" || task.status === "cancelled") throw new ServiceError("validation", "Task is closed");
+  const [item] = await pctx.db
+    .select()
+    .from(taskChecklistItems)
+    .where(and(eq(taskChecklistItems.id, itemId), eq(taskChecklistItems.taskId, task.id)));
+  if (!item) throw new ServiceError("not_found", "Item not found");
+  let status: "checked" | "already" = "already";
+  if (!item.doneAt) {
+    const [claimed] = await pctx.db
+      .update(taskChecklistItems)
+      .set({ doneAt: pctx.now, doneByPersonId: pctx.person.id, doneByUserId: null, updatedAt: pctx.now })
+      .where(and(eq(taskChecklistItems.id, item.id), isNull(taskChecklistItems.doneAt)))
+      .returning({ id: taskChecklistItems.id });
+    if (claimed) {
+      status = "checked";
+      // An answer on the task, like any button (the planner then resumes chasing normally).
+      await logReply(pctx, task, { reply: "checked", itemId: item.id, item: item.title });
+    }
+  }
+  const [left] = await pctx.db
+    .select({ n: sql<number>`count(*)`.mapWith(Number) })
+    .from(taskChecklistItems)
+    .where(and(eq(taskChecklistItems.taskId, task.id), isNull(taskChecklistItems.doneAt)));
+  return { status, label: item.title, remaining: left?.n ?? 0 };
+}
+
+/** How long a «💬 Комментарий» press waits for the text. */
+export const COMMENT_MODE_MINUTES = 30;
+
+/** «💬 Комментарий»: the person's next text (within COMMENT_MODE_MINUTES) becomes a comment on this task. */
+export async function personStartComment(pctx: PersonContext, linkId: string, taskId: string): Promise<void> {
+  const { task } = await getPersonTask(pctx, taskId);
+  await pctx.db
+    .update(telegramLinks)
+    .set({ pendingCommentTaskId: task.id, pendingCommentAt: pctx.now })
+    .where(and(eq(telegramLinks.id, linkId), eq(telegramLinks.personId, pctx.person.id)));
+}
+
+/** The task a fresh «💬 Комментарий» press waits on, or null; the wait is cleared either way. */
+export async function takePendingComment(pctx: PersonContext, linkId: string): Promise<string | null> {
+  const since = new Date(pctx.now.getTime() - COMMENT_MODE_MINUTES * 60_000);
+  const [row] = await pctx.db
+    .select({ taskId: telegramLinks.pendingCommentTaskId })
+    .from(telegramLinks)
+    .where(
+      and(
+        eq(telegramLinks.id, linkId),
+        eq(telegramLinks.personId, pctx.person.id),
+        isNotNull(telegramLinks.pendingCommentTaskId),
+        gt(telegramLinks.pendingCommentAt, since),
+      ),
+    );
+  await pctx.db
+    .update(telegramLinks)
+    .set({ pendingCommentTaskId: null, pendingCommentAt: null })
+    .where(and(eq(telegramLinks.id, linkId), isNotNull(telegramLinks.pendingCommentTaskId)));
+  return row?.taskId ?? null;
 }

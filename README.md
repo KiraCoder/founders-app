@@ -477,8 +477,18 @@ so they do not use the founders' 3-per-day budget. Stored in `app_settings`
 
 **What the person gets** (planner `planForPerson`, dispatcher `staff-dispatcher.ts`, texts in
 `messages-ru.ts`), for open **shared** tasks assigned to them:
-- **New task** (once, on the next tick; only tasks assigned after the switch-on, within 3 days):
-  «Новая задача: … · Срок: 12.11 · Компания: …» with **Принято / Готово / Нужна помощь / Перенести срок**.
+- **New task** (once, on the next tick; only tasks assigned after the switch-on, within 3 days): a
+  **task card** (HTML, fitted to 4096 characters) — «🆕 Новая задача: …», 🏢 company, 📅 due date, 📝 the
+  notes only when a founder ticked *Send the notes to …*, the checklist with ✅ / ⬜ and progress
+  («Чек-лист · 1 из 3 ▰▰▱▱▱»), what the person already answered — with **✅ Готово / 👍 Принято /
+  💬 Комментарий / 🆘 Нужна помощь / 📅 Перенести срок** and one **⬜ N. item** button per open
+  checklist item (at most 8). Every button press **edits that same message** (`editMessageText`) to
+  show the new state (✅ item, «👍 Принято 02.11 10:05», «✅ Выполнено: …» without buttons) and the result.
+- **Updated card** «✏️ Задача обновлена: …» when a founder changes a task the person already got
+  (checklist items added / edited / removed, title, deadline, priority, shared notes): ONE message,
+  queued a minute later and built when sent, so several changes in a row are one message
+  (`services/task-staff-updates.ts`; kind `staff_task_update`). The app asks first ("Elmurat will get
+  an updated message — continue?").
 - **Reminders** on the due day and every day after, per the cadence above, until done or escalated:
   **one message per slot**, whatever the number of tasks — one task is «Напоминание: …», several are a
   numbered list with a button row per task (*1 · Готово / 1 · Помощь / 1 · Срок*, at most 8, then
@@ -494,10 +504,12 @@ so they do not use the founders' 3-per-day budget. Stored in `app_settings`
 founder's token does nothing):
 - **Готово** → the task is done (logged in the history as that person) and the task's founder gets
   one line in their next summary (a push if the task is urgent).
-- **Принято** → logged (task page → *Telegram delivery*).
+- **Принято** → logged (task page → *Timeline*; the card shows «👍 Принято» with the time).
 - **Нужна помощь** → a comment on the task + a push to the task's founder.
 - **Перенести срок** → +1 / +3 / +7 days → a *request*; the founder approves with one tap (push
   button or the task page). A person can never change a deadline.
+- **💬 Комментарий** → the next text (within 30 minutes) becomes a comment on that task; founders get
+  one line (a push only for urgent tasks), like any comment. **⬜ item** → ticks it (time + who are kept).
 - **Text**: a reply to a task message becomes a comment on that task (the founder gets a line);
   other text → «К какой задаче?» with buttons of their open tasks.
 - **Photos / voice / files** → «Пока принимаю только текст»; nothing is stored, the founders get a line.
@@ -516,11 +528,41 @@ it is off while a Telegram bot token is set (real people are then messaged by th
 
 **Founders' side:** the task page (`/tasks/<id>`, the task title in any list) shows the comment
 thread (founders add, edit and delete their own comments), pending deadline requests with
-*Approve / Decline*, the delivery trail ("New task sent 10:00 · Accepted 10:05 · Marked done 11:40")
-and the per-task chase settings. Personal todos can never be assigned to a person, so they — and
+*Approve / Decline*, the timeline ("New task sent 10:00 · Accepted 10:05 · Marked done 11:40") and
+the per-task reminders (see *Tasks: the control center* below). Personal todos can never be assigned to a person, so they — and
 salaries, holding, numbers — never reach staff. The dev inbox (`/dev/notifications`) lists *Team
 messages* too; its buttons carry their callback data (dev channel only) so a developer can press
 them through the webhook.
+
+### Tasks: the control center
+
+- **+ New** opens the task form in a **dialog** (as do ✎ Edit and *Assign a task*). Pick the
+  **assignee first**: a person limits the companies to the ones they work for now (active link in
+  *People*, not left) and a single company is picked for you; the server checks the same (and
+  infers the company for a person with one company). Field errors show next to the field; every
+  save, tick and button answers with a toast.
+- **Every list row** shows status, due date, assignee, company, the last message sent to the person
+  (and whether it was delivered), their last answer, comments and checklist progress, with icon
+  buttons (accessible names + tooltips): **✓ Done**, **✎ Edit**, **↗ Open**, **🔔 Chase now** (one
+  reminder right away through the dispatcher, even while chasing is off or paused; quiet hours and
+  their daily cap still apply), **⏸ Pause / ▶ Resume chasing**, **🗄 Archive** (= cancelled, asks
+  first; ↺ Restore). Delete is in the edit dialog and asks first.
+- **The task page**: *← Back*, the details read-only with the same icon actions, the **checklist**
+  (add items one by one with optional details; tick / untick; who and when; removing asks first),
+  **Reminders**, comments and the **timeline** (created, status / deadline changes with who and
+  when, each message to the person — numbered reminders, delivered or not — and each button they
+  pressed).
+- **Reminders per task** (segmented control, live plain-language summary under it): *Default* (the
+  person's settings) / **Don't chase** / **Remind once on the due date** / **Remind every N hours or
+  days until done**; escalation *Default* / **Never tell founders** / **If still open N days after
+  due, tell both founders** (once per deadline; reminders go on); and **Founder reminders** for the
+  founder who is nudged (assignee founder, else the creator): *Usual* (12:00 on the due date, then
+  overdue day 1, 3, 7, weekly) / *Only on the due date* / *Don't nudge* — the founders' quiet hours,
+  budget and one-push-per-task rules always apply. Stored in `tasks.staff_chase`
+  (`src/lib/task-chase.ts`, `staff-schemas.ts`); global defaults stay in *Settings → Team on Telegram*.
+- Data: `task_checklist_items` (migration `0032_task_checklist.sql`, RLS + revoke) and
+  `telegram_links.pending_comment_*` for «💬 Комментарий». Services: `task-checklist.ts`,
+  `task-activity.ts` (list activity, timeline, Chase now, Pause), `task-staff-updates.ts`.
 
 ## Routines
 

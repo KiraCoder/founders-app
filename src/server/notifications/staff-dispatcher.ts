@@ -4,14 +4,21 @@ import { addDays, isWithinWindow, todayInTimeZone, windowEndAfter, zonedTimeToUt
 import { effectiveStaffSettings, parsePersonOverride, parseTaskOverride, taskChaseSettings, type StaffSettings } from "@/lib/staff-schemas";
 import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, people, type OutboxItem } from "@/server/db/schema";
-import { getPersonTask, listPersonOpenTasks, personContext, toLite } from "@/server/services/staff-tasks";
+import { getPersonTask, listPersonOpenTasks, loadStaffCard, personContext, toLite } from "@/server/services/staff-tasks";
 import { loadStaffDefaults } from "@/server/services/staff";
 import { routineMessageInput } from "@/server/services/routines";
 import { mintActionTokens } from "./action-tokens";
 import type { ChannelRegistry } from "./channels";
 import { getLinkForPerson } from "./linking";
 import { loadRoutineForMessage, markRoutineMessageSent } from "./routine-planner";
-import { buildRoutineMessageRu, buildStaffGroupedChase, buildStaffInfo, buildStaffMorningList, buildStaffNewTask, type StaffTaskLite } from "./messages-ru";
+import {
+  buildRoutineMessageRu,
+  buildStaffGroupedChase,
+  buildStaffInfo,
+  buildStaffMorningList,
+  buildStaffTaskCard,
+  type StaffTaskLite,
+} from "./messages-ru";
 import { fitTelegram } from "./render-telegram";
 import { taskRef, type NeutralMessage } from "./types";
 
@@ -68,7 +75,9 @@ export async function processPersonItem(
   if (!person.botEnabled) return cancel("bot_off");
   if (item.expiresAt && item.expiresAt.getTime() <= now.getTime()) return cancel("expired");
   if (person.botPausedUntil && person.botPausedUntil.getTime() > now.getTime()) {
-    return item.kind === "staff_new_task" || item.kind === "staff_info" ? hold(person.botPausedUntil, "paused") : cancel("paused");
+    return item.kind === "staff_new_task" || item.kind === "staff_info" || item.kind === "staff_task_update"
+      ? hold(person.botPausedUntil, "paused")
+      : cancel("paused");
   }
   const settings = effectiveStaffSettings(opts.defaults ?? (await loadStaffDefaults(db)), parsePersonOverride(person.staffChase));
   if (isWithinWindow(now, settings.quietStart, settings.quietEnd, tz)) {
@@ -84,11 +93,12 @@ export async function processPersonItem(
     if ("skip" in chase) return cancel(chase.skip);
     message = chase.message;
     listed = chase.listed;
-  } else if (item.kind === "staff_new_task") {
-    const own = item.taskId ? await getPersonTask(pctx, item.taskId).catch(() => null) : null;
-    if (!own) return cancel("task_gone_or_reassigned");
-    if (own.task.status === "done" || own.task.status === "cancelled") return cancel("task_closed");
-    message = buildStaffNewTask(toLite(own.task, own.companyName), today);
+  } else if (item.kind === "staff_new_task" || item.kind === "staff_task_update") {
+    // The task card as it is now (checklist included); an update is one card however many changes.
+    const card = item.taskId ? await loadStaffCard(pctx, item.taskId).catch(() => null) : null;
+    if (!card) return cancel("task_gone_or_reassigned");
+    if (card.status !== "open") return cancel("task_closed");
+    message = buildStaffTaskCard(card, today, item.kind === "staff_new_task" ? "new" : "update");
   } else if (item.kind === "staff_morning_list") {
     const open = await listPersonOpenTasks(pctx);
     if (!open.length) return cancel("nothing_to_send");
@@ -123,7 +133,9 @@ export async function processPersonItem(
       ),
     );
   if ((used?.n ?? 0) >= settings.maxPerDay) {
-    if (item.kind === "staff_new_task") return hold(zonedTimeToUtc(addDays(today, 1), settings.workStart, tz), "daily_cap_full");
+    if (item.kind === "staff_new_task" || item.kind === "staff_task_update") {
+      return hold(zonedTimeToUtc(addDays(today, 1), settings.workStart, tz), "daily_cap_full");
+    }
     return cancel("daily_cap_full");
   }
 
@@ -216,7 +228,9 @@ async function buildChase(
       reasons.push("deadline_moved");
       continue;
     }
-    if (!taskChaseSettings(settings, parseTaskOverride(own.task.staffChase)).chaseEnabled) {
+    // "Chase now" (a founder's explicit tap, 0032) goes out even while chasing is off or paused.
+    const manual = (item.payload as { manual?: boolean } | null)?.manual === true;
+    if (!manual && !taskChaseSettings(settings, parseTaskOverride(own.task.staffChase)).chaseEnabled) {
       reasons.push("chase_off");
       continue;
     }
@@ -270,8 +284,10 @@ async function buildChase(
   );
   const fitted = fitTelegram(built.message);
   const shown = new Set(built.listed.filter((id) => keep.length === 1 || fitted.keptRefs.has(taskRef(id))));
+  // One task: its full card (checklist, details, buttons re-drawn in place when pressed).
+  const card = keep.length === 1 ? await loadStaffCard(pctx, keep[0]!.lite.id).catch(() => null) : null;
   return {
-    message: built.message,
+    message: card ? buildStaffTaskCard(card, today, "chase") : built.message,
     listed: keep.filter((k) => shown.has(k.lite.id)).map((k) => ({ id: k.lite.id, dueDate: k.dueDate })),
   };
 }

@@ -157,6 +157,7 @@ const KIND_TEXT: Record<string, string> = {
   staff_chase: "Reminder sent",
   staff_morning_list: "Listed in the morning list",
   staff_info: "Info sent",
+  staff_task_update: "Updated task sent",
 };
 
 export async function getTaskStaffTrail(ctx: ServiceContext, taskId: string): Promise<TrailEntry[]> {
