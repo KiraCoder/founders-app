@@ -78,7 +78,7 @@ describe("MCP protocol over /api/mcp", () => {
     const list = await (await rpc(nuraaly, "tools/list", {}, 2)).json();
     const names = list.result.tools.map((x: { name: string }) => x.name).sort();
     expect(names).toEqual(
-      ["add_task_comment", "add_tasks", "complete_task", "create_project", "get_project", "list_companies", "list_people", "list_projects", "list_tasks", "update_task"].sort(),
+      ["add_task_comment", "add_tasks", "complete_task", "create_project", "create_task", "get_project", "list_companies", "list_people", "list_projects", "list_tasks", "update_task"].sort(),
     );
     const cp = list.result.tools.find((x: { name: string }) => x.name === "create_project");
     expect(cp.description).toMatch(/ambiguous/);

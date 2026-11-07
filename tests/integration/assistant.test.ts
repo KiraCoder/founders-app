@@ -58,10 +58,10 @@ beforeEach(async () => {
 const toolMessages = (body: Record<string, unknown>) => (body.messages as { role: string; content: string }[]).filter((m) => m.role === "tool").map((m) => m.content);
 
 describe("one tool registry for MCP and the assistant", () => {
-  it("the connector keeps its 10 tools; the assistant gets the same objects plus routine tools", () => {
+  it("the connector keeps its 11 tools; the assistant gets the same objects plus routine tools", () => {
     const mcp = toolsFor("mcp");
     expect(mcp.map((x) => x.name).sort()).toEqual(
-      ["add_task_comment", "add_tasks", "complete_task", "create_project", "get_project", "list_companies", "list_people", "list_projects", "list_tasks", "update_task"].sort(),
+      ["add_task_comment", "add_tasks", "complete_task", "create_project", "create_task", "get_project", "list_companies", "list_people", "list_projects", "list_tasks", "update_task"].sort(),
     );
     const assistant = toolsFor("assistant");
     for (const tool of COCKPIT_TOOLS) expect(assistant).toContain(tool);

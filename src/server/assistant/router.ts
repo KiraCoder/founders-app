@@ -17,7 +17,7 @@ const TASK_RE = /task|todo|to-do|задач|задан|тапшырма|иш\b|�
 
 const GROUPS = {
   base: ["list_tasks", "list_people"],
-  tasks: ["add_tasks", "update_task", "complete_task", "add_task_comment", "get_project"],
+  tasks: ["create_task", "add_tasks", "update_task", "complete_task", "add_task_comment", "get_project"],
   projects: ["list_projects", "get_project", "create_project", "add_tasks"],
   routines: ["list_routines", "get_routine", "create_routine", "update_routine"],
   fallback: ["list_routines", "list_projects", "get_project"],
@@ -108,7 +108,7 @@ function compact(v: unknown, depth: number): unknown {
       out[k] = (x as { name: unknown }).name;
       continue;
     }
-    if (k === "priority" && x === "normal") continue;
+    if (k === "priority" && x === "none") continue;
     out[k] = compact(x, depth + 1);
   }
   return out;

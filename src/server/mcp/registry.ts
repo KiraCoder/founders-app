@@ -1,15 +1,16 @@
 import "server-only";
 import { z } from "zod";
-import { TASK_PRIORITY_VALUES, TASK_STATUS_VALUES, type TaskUpdateInput } from "@/lib/schemas";
+import { TASK_ESTIMATE_VALUES, TASK_PRIORITY_VALUES, TASK_STATUS_VALUES, type TaskUpdateInput } from "@/lib/schemas";
 import type { Db } from "@/server/db/connect";
 import type { ServiceContext } from "@/server/services/context";
 import { toServiceError, ServiceError } from "@/server/services/errors";
 import { listFounders, listPeople } from "@/server/services/people";
 import { createProject, getProject, listProjects, type ProjectView } from "@/server/services/projects";
 import { addTaskComment } from "@/server/services/task-comments";
-import { changeTaskStatus, createTask, getTask, listTasks, updateTask, type TaskView } from "@/server/services/tasks";
+import { changeTaskStatus, createTask, findTaskByKey, getTask, listTasks, updateTask, type TaskView } from "@/server/services/tasks";
+import { listLabels } from "@/server/services/task-labels";
 import { listCompanies } from "@/server/services/companies";
-import { resolveAssignee, resolveCompany, resolveProject, type AssigneeRef } from "./resolve";
+import { normalizeName, pickOne, resolveAssignee, resolveCompany, resolveProject, type AssigneeRef } from "./resolve";
 
 /**
  * The ONE tool registry of Founder Cockpit, shared by the Claude connector (MCP, src/server/mcp/tools.ts)
@@ -105,6 +106,10 @@ export function toolErrorMessage(err: unknown, tag = "tools"): string {
 
 export const MAX_TASKS = 100;
 export const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD");
+/** Old names ("normal", "waiting") are still understood. */
+const priorityInput = z.preprocess((v) => (v === "normal" ? "medium" : v), z.enum(TASK_PRIORITY_VALUES));
+const statusInput = z.preprocess((v) => (v === "waiting" ? "in_review" : v === "canceled" ? "cancelled" : v), z.enum(TASK_STATUS_VALUES));
+const estimateInput = z.number().int().refine((n) => (TASK_ESTIMATE_VALUES as readonly number[]).includes(n), { message: "Use 1, 2, 3, 5, 8 or 13" });
 
 export const taskInput = z.object({
   title: z.string().trim().min(1).max(300).describe("What has to be done"),
@@ -114,11 +119,34 @@ export const taskInput = z.object({
     .optional()
     .describe("Who does it: a founder's name (Nuraaly, Talant), 'me', or the name of a person who works at the company. Omit to leave it unassigned."),
   due_date: isoDate.optional().describe("Deadline, YYYY-MM-DD"),
-  priority: z.enum(TASK_PRIORITY_VALUES).optional().describe("urgent | high | normal (default) | low"),
+  priority: priorityInput.optional().describe("none (default) | urgent | high | medium | low"),
+  status: statusInput.optional().describe("backlog | todo (default) | in_progress | in_review | done | cancelled"),
+  estimate: estimateInput.optional().describe("Estimate points 1, 2, 3, 5, 8 or 13 (1 point = 1 working hour)"),
+  labels: z.array(z.string().min(1).max(40)).max(10).optional().describe("Label names, e.g. ['Operations']"),
   notes: z.string().max(5000).optional().describe("Details, links, acceptance criteria"),
   private: z.boolean().optional().describe("true = a personal todo only you can see (cannot be assigned to anyone else). Default false (shared company task)."),
 });
 type TaskInput = z.infer<typeof taskInput>;
+
+/** Label names → ids (case-insensitive, active labels only); unknown names list the labels there are. */
+export async function resolveLabels(ctx: ServiceContext, names: readonly string[] | undefined): Promise<{ id: string; name: string }[]> {
+  if (!names?.length) return [];
+  const all = await listLabels(ctx);
+  return [...new Set(names.map((n) => n.trim()).filter(Boolean))].map((n) =>
+    pickOne(n, all.map((l) => ({ value: { id: l.id, name: l.name }, label: l.name, keys: [l.id, normalizeName(l.name)] })), "label"),
+  );
+}
+
+/** A task by id or key ("UPS-12"). */
+export async function resolveTaskRef(ctx: ServiceContext, ref: string): Promise<TaskView> {
+  if (/^[0-9a-f-]{36}$/i.test(ref.trim())) return getTask(ctx, ref.trim());
+  const t = await findTaskByKey(ctx, ref);
+  if (!t) throw new ServiceError("not_found", `No task ${ref.trim().toUpperCase()} (use the id or key from list_tasks)`);
+  return t;
+}
+
+const STATUS_WORDS: Record<string, string> = { backlog: "Backlog", todo: "Todo", in_progress: "In Progress", in_review: "In Review", done: "Done", cancelled: "Canceled" };
+const statusWord = (s: string) => STATUS_WORDS[s] ?? s;
 
 // ---------------------------------------------------------------------------
 // Output shapes
@@ -127,15 +155,20 @@ type TaskInput = z.infer<typeof taskInput>;
 export function taskOut(t: TaskView, base: string) {
   return {
     id: t.id,
+    key: t.key,
     title: t.title,
     status: t.status,
     priority: t.priority,
+    estimate: t.estimate,
+    labels: t.labels.map((l) => l.name),
     due_date: t.dueDate,
     overdue: t.isOverdue,
+    over_estimate: t.overEstimate,
     private: t.visibility === "private",
     company: t.company?.name ?? null,
     project: t.project ? { id: t.project.id, name: t.project.name } : null,
     assignee: t.assignee ? `${t.assignee.name}${t.assignee.kind === "user" ? " (founder)" : ""}` : null,
+    needs_review: t.assignee?.kind === "person" ? t.needsReview : undefined,
     notes: t.notes,
     url: `${base}/tasks/${t.id}`,
   };
@@ -157,14 +190,31 @@ function projectOut(p: ProjectView, base: string) {
   };
 }
 
+const prio = (p: string | undefined) => (p && p !== "none" ? p : null);
+
 function taskLine(t: TaskView): string {
-  const bits = [t.assignee ? `→ ${t.assignee.name}` : "unassigned", t.dueDate ? `due ${t.dueDate}` : null, t.priority !== "normal" ? t.priority : null];
-  return `- ${t.title} (${bits.filter(Boolean).join(", ")})`;
+  const bits = [
+    t.assignee ? `→ ${t.assignee.name}` : "unassigned",
+    t.status !== "todo" ? statusWord(t.status) : null,
+    t.dueDate ? `due ${t.dueDate}` : null,
+    prio(t.priority),
+    t.estimate ? `▲ ${t.estimate}` : null,
+    t.labels.length ? t.labels.map((l) => l.name).join(", ") : null,
+  ];
+  return `- ${t.key} ${t.title} (${bits.filter(Boolean).join(", ")})`;
 }
 
 function plannedLine(t: ResolvedTask): string {
   const i = t.input;
-  const bits = [t.assignee ? `→ ${t.assignee.name}` : "unassigned", i.due_date ? `due ${i.due_date}` : null, i.priority && i.priority !== "normal" ? i.priority : null, i.private ? "private" : null];
+  const bits = [
+    t.assignee ? `→ ${t.assignee.name}` : "unassigned",
+    i.status && i.status !== "todo" ? statusWord(i.status) : null,
+    i.due_date ? `due ${i.due_date}` : null,
+    prio(i.priority),
+    i.estimate ? `▲ ${i.estimate}` : null,
+    t.labels.length ? t.labels.map((l) => l.name).join(", ") : null,
+    i.private ? "private" : null,
+  ];
   return `${i.title} (${bits.filter(Boolean).join(", ")})`;
 }
 
@@ -175,41 +225,53 @@ function plannedLine(t: ResolvedTask): string {
 interface ResolvedTask {
   input: TaskInput;
   assignee: AssigneeRef | null;
+  labels: { id: string; name: string }[];
 }
 
-/** Resolves every task's assignee first, reporting all problems at once (nothing is written). */
-async function resolveTasks(ctx: ServiceContext, items: TaskInput[], company: { id: string; name: string }): Promise<ResolvedTask[]> {
+/** Resolves every task's assignee and labels first, reporting all problems at once (nothing is written). */
+async function resolveTasks(ctx: ServiceContext, items: TaskInput[], company: { id: string; name: string } | null): Promise<ResolvedTask[]> {
   const problems: string[] = [];
   const out: ResolvedTask[] = [];
   for (const [i, t] of items.entries()) {
     let assignee: AssigneeRef | null = null;
+    let labels: { id: string; name: string }[] = [];
     if (t.assignee && t.assignee.trim()) {
       try {
-        assignee = await resolveAssignee(ctx, t.assignee, company.id, company.name);
+        assignee = await resolveAssignee(ctx, t.assignee, company?.id ?? null, company?.name);
       } catch (err) {
         const se = toServiceError(err);
         if (!se) throw err;
         problems.push(`Task ${i + 1} “${t.title}”: ${se.message}`);
       }
     }
+    try {
+      labels = await resolveLabels(ctx, t.labels);
+    } catch (err) {
+      const se = toServiceError(err);
+      if (!se) throw err;
+      problems.push(`Task ${i + 1} “${t.title}”: ${se.message}`);
+    }
     if (t.private && assignee && !(assignee.kind === "user" && assignee.id === ctx.user.id)) {
       problems.push(`Task ${i + 1} “${t.title}”: a private todo can only be assigned to you; drop "private" to assign it to ${assignee.name}.`);
     }
-    out.push({ input: t, assignee });
+    out.push({ input: t, assignee, labels });
   }
   if (problems.length) throw new ServiceError("validation", `Nothing was saved.\n${problems.join("\n")}`);
   return out;
 }
 
-async function insertTasks(tx: ServiceContext, project: { id: string; companyId: string }, items: ResolvedTask[]): Promise<TaskView[]> {
+async function insertTasks(tx: ServiceContext, project: { id: string | null; companyId: string | null }, items: ResolvedTask[]): Promise<TaskView[]> {
   const created: TaskView[] = [];
-  for (const { input, assignee } of items) {
+  for (const { input, assignee, labels } of items) {
     created.push(
       await createTask(tx, {
         title: input.title,
         notes: input.notes ?? null,
         dueDate: input.due_date ?? null,
-        priority: input.priority ?? "normal",
+        priority: input.priority ?? "none",
+        status: input.status ?? "todo",
+        estimate: input.estimate ?? null,
+        labelIds: labels.map((l) => l.id),
         visibility: input.private ? "private" : "shared",
         companyId: project.companyId,
         projectId: project.id,
@@ -226,6 +288,7 @@ export function inTransaction<T>(ctx: ServiceContext, fn: (tx: ServiceContext) =
 }
 
 const tasksField = (items: ResolvedTask[]): PreviewField[] => (items.length ? [{ label: `Tasks (${items.length})`, value: items.map(plannedLine).join("\n") }] : []);
+
 
 // ---------------------------------------------------------------------------
 // The tools
@@ -305,14 +368,23 @@ const getProjectTool = readTool({
 const listTasksTool = readTool({
   name: "list_tasks",
   title: "List tasks",
-  description: "Tasks you can see, filtered. Default: open tasks (not done or cancelled).",
+  description:
+    "Tasks you can see, filtered. Default: open tasks (not done or cancelled). Statuses: backlog, todo, in_progress, in_review, done, cancelled; " +
+    "'active' = todo + in_progress + in_review. Each task has a key like UPS-12 (usable as the id in other tools).",
   brief: "Tasks you can see, filtered. Default: open tasks.",
   input: {
     company: z.string().max(200).optional().describe("Company name or slug"),
     project: z.string().max(300).optional().describe("Project id or name"),
     assignee: z.string().max(200).optional().describe("Founder name, 'me', or a person's name"),
-    status: z.enum([...TASK_STATUS_VALUES, "open", "any"]).optional().describe("open (default) | any | todo | in_progress | waiting | done | cancelled"),
+    status: z
+      .preprocess((v) => (v === "waiting" ? "in_review" : v), z.enum([...TASK_STATUS_VALUES, "open", "active", "any"]))
+      .optional()
+      .describe("open (default) | active | any | backlog | todo | in_progress | in_review | done | cancelled"),
+    priority: priorityInput.optional().describe("none | urgent | high | medium | low"),
+    label: z.string().max(40).optional().describe("Only tasks with this label"),
+    search: z.string().max(200).optional().describe("Words of the title, or a key like UPS-12"),
     overdue: z.boolean().optional().describe("true = only open tasks past their deadline"),
+    over_estimate: z.boolean().optional().describe("true = only tasks in progress longer than their estimate"),
     limit: z.number().int().min(1).max(200).optional().describe("At most this many (default 50)"),
   },
   surfaces: BOTH,
@@ -321,6 +393,7 @@ const listTasksTool = readTool({
     const c = args.company ? await resolveCompany(ctx, args.company) : null;
     const p = args.project ? await resolveProject(ctx, args.project, c?.id) : null;
     const who = args.assignee ? await resolveAssignee(ctx, args.assignee, c?.id ?? "any", c?.name) : null;
+    const labels = args.label ? await resolveLabels(ctx, [args.label]) : [];
     // The assignee is filtered in SQL, so it is never lost behind the first 500 rows.
     const rows = await listTasks(ctx, {
       companyId: c?.id ?? p?.companyId,
@@ -328,6 +401,10 @@ const listTasksTool = readTool({
       assigneeUserId: who?.kind === "user" ? who.id : undefined,
       assigneePersonId: who?.kind === "person" ? who.id : undefined,
       status: args.overdue ? "open" : (args.status ?? "open"),
+      priority: args.priority,
+      labelIds: labels.map((l) => l.id),
+      q: args.search,
+      overEstimate: args.over_estimate,
       view: args.overdue ? "overdue" : undefined,
       limit: 500,
     });
@@ -444,6 +521,46 @@ const addTasksTool = writeTool({
   },
 });
 
+interface CreateTaskPlan {
+  company: { id: string; name: string } | null;
+  task: ResolvedTask;
+}
+
+const createTaskTool = writeTool({
+  name: "create_task",
+  title: "Create a task",
+  description:
+    "Creates one task in a company (no project needed), or a private personal todo (private: true, no company needed). " +
+    "Same assignee rules as create_project; status, priority, estimate points and labels are optional.",
+  brief: "Create one task in a company (or a private todo).",
+  input: {
+    company: z.string().max(200).optional().describe("Company name or slug (required unless private)"),
+    ...taskInput.shape,
+  },
+  surfaces: BOTH,
+  group: "tasks",
+  async prepare({ ctx }, { company, ...t }): Promise<{ plan: CreateTaskPlan; preview: ActionPreview }> {
+    const c = company ? await resolveCompany(ctx, company) : null;
+    if (!c && !t.private) throw new ServiceError("validation", "Name the company (or make it a private todo)");
+    const [item] = await resolveTasks(ctx, [t], c ? { id: c.id, name: c.name } : null);
+    const fields: PreviewField[] = [
+      ...(c ? [{ label: "Company", value: c.name }] : [{ label: "Who sees it", value: "Only you (personal todo)" }]),
+      { label: "Task", value: t.title },
+      ...(item!.assignee ? [{ label: "Assignee", value: item!.assignee.name }] : []),
+      ...(t.status ? [{ label: "Status", value: statusWord(t.status) }] : []),
+      ...(prio(t.priority) ? [{ label: "Priority", value: prio(t.priority)! }] : []),
+      ...(t.estimate ? [{ label: "Estimate", value: `▲ ${t.estimate} (${t.estimate} h)` }] : []),
+      ...(item!.labels.length ? [{ label: "Labels", value: item!.labels.map((l) => l.name).join(", ") }] : []),
+      ...(t.due_date ? [{ label: "Due", value: t.due_date }] : []),
+    ];
+    return { plan: { company: c ? { id: c.id, name: c.name } : null, task: item! }, preview: { title: "New task", confirm: "Create", fields } };
+  },
+  async commit({ ctx, baseUrl: base }, plan: CreateTaskPlan) {
+    const [t] = await inTransaction(ctx, (tx) => insertTasks(tx, { id: null, companyId: plan.company?.id ?? null }, [plan.task]));
+    return { summary: `Created ${t!.key} “${t!.title}”: ${base}/tasks/${t!.id}`, data: taskOut(t!, base) };
+  },
+});
+
 interface UpdateTaskPlan {
   id: string;
   patch: TaskUpdateInput;
@@ -452,23 +569,29 @@ interface UpdateTaskPlan {
 const updateTaskTool = writeTool({
   name: "update_task",
   title: "Update a task",
-  description: "Changes a task's title, notes, status, priority, deadline or assignee. Only the fields given change; null clears notes, due_date or assignee.",
+  description:
+    "Changes a task's title, notes, status, priority, estimate, labels, deadline, assignee or 'needs review'. Only the fields given change; " +
+    "null clears notes, due_date, estimate or assignee. labels replaces the task's labels ([] removes them all).",
   brief: "Change a task's fields (only those given; null clears).",
   input: {
-    id: z.uuid().describe("Task id (from list_tasks / get_project)"),
+    id: z.string().min(1).max(60).describe("Task id or key (UPS-12) from list_tasks / get_project"),
     title: z.string().trim().min(1).max(300).optional(),
     notes: z.string().max(5000).nullable().optional(),
-    status: z.enum(TASK_STATUS_VALUES).optional(),
-    priority: z.enum(TASK_PRIORITY_VALUES).optional(),
+    status: statusInput.optional().describe("backlog | todo | in_progress | in_review | done | cancelled"),
+    priority: priorityInput.optional().describe("none | urgent | high | medium | low"),
+    estimate: estimateInput.nullable().optional().describe("1, 2, 3, 5, 8, 13 points, or null to clear"),
+    labels: z.array(z.string().min(1).max(40)).max(10).optional().describe("Label names (replaces the set)"),
+    needs_review: z.boolean().optional().describe("Staff tasks: true = «Готово» goes to In Review for a founder to approve"),
     due_date: isoDate.nullable().optional().describe("YYYY-MM-DD, or null to clear"),
     assignee: z.string().max(200).nullable().optional().describe("Founder name, 'me', a person at the task's company, or null to unassign"),
   },
   surfaces: BOTH,
   group: "tasks",
-  async prepare({ ctx }, { id, ...f }): Promise<{ plan: UpdateTaskPlan; preview: ActionPreview }> {
-    const current = await getTask(ctx, id);
+  async prepare({ ctx }, { id: ref, ...f }): Promise<{ plan: UpdateTaskPlan; preview: ActionPreview }> {
+    const current = await resolveTaskRef(ctx, ref);
+    const id = current.id;
     const patch: TaskUpdateInput = {};
-    const fields: PreviewField[] = [{ label: "Task", value: current.title }];
+    const fields: PreviewField[] = [{ label: "Task", value: `${current.key} ${current.title}` }];
     if (f.title !== undefined) {
       patch.title = f.title;
       fields.push({ label: "Title", value: f.title });
@@ -479,11 +602,24 @@ const updateTaskTool = writeTool({
     }
     if (f.status !== undefined) {
       patch.status = f.status;
-      fields.push({ label: "Status", value: `${current.status} → ${f.status}` });
+      fields.push({ label: "Status", value: `${statusWord(current.status)} → ${statusWord(f.status)}` });
     }
     if (f.priority !== undefined) {
       patch.priority = f.priority;
       fields.push({ label: "Priority", value: `${current.priority} → ${f.priority}` });
+    }
+    if (f.estimate !== undefined) {
+      patch.estimate = f.estimate;
+      fields.push({ label: "Estimate", value: `${current.estimate ? `▲ ${current.estimate}` : "none"} → ${f.estimate ? `▲ ${f.estimate}` : "none"}` });
+    }
+    if (f.labels !== undefined) {
+      const labels = await resolveLabels(ctx, f.labels);
+      patch.labelIds = labels.map((l) => l.id);
+      fields.push({ label: "Labels", value: `${current.labels.map((l) => l.name).join(", ") || "none"} → ${labels.map((l) => l.name).join(", ") || "none"}` });
+    }
+    if (f.needs_review !== undefined) {
+      patch.needsReview = f.needs_review;
+      fields.push({ label: "Needs review", value: f.needs_review ? "yes" : "no" });
     }
     if (f.due_date !== undefined) {
       patch.dueDate = f.due_date;
@@ -506,40 +642,43 @@ const updateTaskTool = writeTool({
   },
   async commit({ ctx, baseUrl: base }, { id, patch }: UpdateTaskPlan) {
     const t = await updateTask(ctx, id, patch);
-    return { summary: `Updated “${t.title}”: ${base}/tasks/${t.id}`, data: taskOut(t, base) };
+    return { summary: `Updated ${t.key} “${t.title}”: ${base}/tasks/${t.id}`, data: taskOut(t, base) };
   },
 });
 
 const completeTaskTool = writeTool({
   name: "complete_task",
   title: "Complete a task",
-  description: "Marks a task done.",
+  description: "Marks a task done (also approves a task In Review).",
   brief: "Mark a task done.",
-  input: { id: z.uuid().describe("Task id") },
+  input: { id: z.string().min(1).max(60).describe("Task id or key (UPS-12)") },
   surfaces: BOTH,
   group: "tasks",
   idempotent: true,
-  async prepare({ ctx }, { id }): Promise<{ plan: { id: string }; preview: ActionPreview }> {
-    const t = await getTask(ctx, id);
-    return { plan: { id }, preview: { title: "Complete task", confirm: "Mark done", fields: [{ label: "Task", value: t.title }, ...(t.assignee ? [{ label: "Assignee", value: t.assignee.name }] : [])] } };
+  async prepare({ ctx }, { id: ref }): Promise<{ plan: { id: string }; preview: ActionPreview }> {
+    const t = await resolveTaskRef(ctx, ref);
+    return {
+      plan: { id: t.id },
+      preview: { title: "Complete task", confirm: "Mark done", fields: [{ label: "Task", value: `${t.key} ${t.title}` }, ...(t.assignee ? [{ label: "Assignee", value: t.assignee.name }] : [])] },
+    };
   },
   async commit({ ctx, baseUrl: base }, { id }: { id: string }) {
     const t = await changeTaskStatus(ctx, id, "done");
-    return { summary: `Done: “${t.title}”.`, data: taskOut(t, base) };
+    return { summary: `Done: ${t.key} “${t.title}”.`, data: taskOut(t, base) };
   },
 });
 
 const addTaskCommentTool = writeTool({
   name: "add_task_comment",
   title: "Comment on a task",
-  description: "Adds a comment to a task (shown on the task page and, for staff tasks, in the delivery trail).",
+  description: "Adds a comment to a task (shown in the task's activity and, for staff tasks, in the delivery trail).",
   brief: "Comment on a task.",
-  input: { id: z.uuid().describe("Task id"), text: z.string().trim().min(1).max(4000).describe("The comment") },
+  input: { id: z.string().min(1).max(60).describe("Task id or key (UPS-12)"), text: z.string().trim().min(1).max(4000).describe("The comment") },
   surfaces: BOTH,
   group: "tasks",
-  async prepare({ ctx }, { id, text }): Promise<{ plan: { id: string; text: string }; preview: ActionPreview }> {
-    const t = await getTask(ctx, id);
-    return { plan: { id, text }, preview: { title: "Comment on task", confirm: "Add comment", fields: [{ label: "Task", value: t.title }, { label: "Comment", value: text }] } };
+  async prepare({ ctx }, { id: ref, text }): Promise<{ plan: { id: string; text: string }; preview: ActionPreview }> {
+    const t = await resolveTaskRef(ctx, ref);
+    return { plan: { id: t.id, text }, preview: { title: "Comment on task", confirm: "Add comment", fields: [{ label: "Task", value: `${t.key} ${t.title}` }, { label: "Comment", value: text }] } };
   },
   async commit({ ctx, baseUrl: base }, { id, text }: { id: string; text: string }) {
     const c = await addTaskComment(ctx, id, text);
@@ -547,6 +686,7 @@ const addTaskCommentTool = writeTool({
     return { summary: `Comment added to “${t.title}”: ${base}/tasks/${t.id}`, data: { comment_id: c.id, task: taskOut(t, base) } };
   },
 });
+
 
 /** Connector + assistant tools over tasks and projects. Routine tools are added by the assistant. */
 export const COCKPIT_TOOLS: readonly AnyTool[] = [
@@ -557,6 +697,7 @@ export const COCKPIT_TOOLS: readonly AnyTool[] = [
   listTasksTool,
   createProjectTool,
   addTasksTool,
+  createTaskTool,
   updateTaskTool,
   completeTaskTool,
   addTaskCommentTool,
