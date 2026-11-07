@@ -1,0 +1,41 @@
+"use server";
+
+import { headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { z } from "zod";
+import { safeNext } from "@/lib/safe-next";
+import { signInWithPassword } from "@/server/auth";
+import { clientIpFromHeaders } from "@/server/auth/login-limiter";
+
+export interface LoginState {
+  error?: string;
+  email?: string;
+}
+
+const loginSchema = z.object({
+  email: z.string().trim().email().max(200),
+  password: z.string().min(1).max(200),
+  next: z.string().optional(),
+});
+
+export async function loginAction(_prev: LoginState, formData: FormData): Promise<LoginState> {
+  const parsed = loginSchema.safeParse(Object.fromEntries(formData));
+  const email = String(formData.get("email") ?? "");
+  if (!parsed.success) return { error: "Enter your email and password.", email };
+
+  const h = await headers();
+  const outcome = await signInWithPassword(parsed.data.email, parsed.data.password, {
+    userAgent: h.get("user-agent"),
+    ip: clientIpFromHeaders(h),
+  });
+  if (!outcome.ok) {
+    return {
+      error:
+        outcome.reason === "rate_limited"
+          ? "Too many sign-in attempts. Wait 15 minutes and try again."
+          : "Wrong email or password.",
+      email,
+    };
+  }
+  redirect(safeNext(parsed.data.next));
+}
