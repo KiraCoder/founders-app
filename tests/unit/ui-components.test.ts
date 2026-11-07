@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { EmptyState, InitialsAvatar, Skeleton, StatusDot, getInitials } from "@/components/ui";
+import { EmptyState, InitialsAvatar, Skeleton, StatusDot, avatarFontSize, getInitials } from "@/components/ui";
 
 describe("UI primitives (design system)", () => {
   describe("getInitials", () => {
@@ -27,6 +27,24 @@ describe("UI primitives (design system)", () => {
       expect(html).toContain("rounded-full");
       expect(html).toContain("width:32px");
       expect(html).toContain("height:32px");
+    });
+
+    it("fits 1–2 letters at every size: xs / sm / md presets, no border eating the circle, one centred line", () => {
+      for (const [size, px] of [["xs", 16], ["sm", 20], ["md", 28]] as const) {
+        const two = renderToStaticMarkup(createElement(InitialsAvatar, { name: "Nuraaly Toktonazar", size }));
+        expect(two).toContain(`width:${px}px`);
+        expect(two).toContain("leading-none");
+        expect(two).toContain("whitespace-nowrap");
+        expect(two).not.toMatch(/\bborder\b/);
+        const font = Number(/font-size:([\d.]+)px/.exec(two)![1]);
+        // Two bold letters are ~1.25 em wide: they must fit inside the circle with a margin.
+        expect(font * 1.25).toBeLessThanOrEqual(px * 0.75);
+        const one = renderToStaticMarkup(createElement(InitialsAvatar, { name: "Edil", size }));
+        expect(one).toContain(">ED<");
+      }
+      expect(avatarFontSize(16, 2)).toBe(6.5);
+      expect(avatarFontSize(28, 2)).toBe(11);
+      expect(avatarFontSize(20, 1)).toBe(10);
     });
   });
 

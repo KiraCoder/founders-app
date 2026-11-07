@@ -108,35 +108,54 @@ export function getInitials(name: string): string {
   return name.trim() ? personInitials(name) : "";
 }
 
+/** Avatar sizes: xs 16 (list rows), sm 20 (pickers, chips), md 28 (top bar); any number works too. */
+export const AVATAR_SIZES = { xs: 16, sm: 20, md: 28, lg: 40 } as const;
+export type AvatarSize = keyof typeof AVATAR_SIZES | number;
+
 /**
- * Avatar displaying initials with Founder Cockpit design tokens.
+ * The initials' font size for a circle: two letters take ~1.25 em of width, so they get 40% of
+ * the diameter (one letter 50%); never above the circle's inner width, never below 6.5 px.
+ */
+export function avatarFontSize(px: number, letters: number): number {
+  const ratio = letters > 1 ? 0.4 : 0.5;
+  return Math.max(6.5, Math.round(px * ratio * 2) / 2);
+}
+
+/**
+ * Avatar displaying initials (1–2 letters) with Founder Cockpit design tokens. The ring is an
+ * inset shadow, not a border, so it takes no room from the letters; the text is centred on one
+ * line (line-height 1, no wrapping) and clipped by the circle only as a last resort.
  */
 export function InitialsAvatar({
   name,
-  size = 28,
+  size = "md",
   tone = "accent",
   className = "",
 }: {
   name: string;
-  size?: number;
+  size?: AvatarSize;
   tone?: "accent" | "neutral" | "sunk";
   className?: string;
 }) {
-  const initials = getInitials(name);
+  const initials = getInitials(name).slice(0, 2);
+  const px = typeof size === "number" ? size : AVATAR_SIZES[size];
   const toneClasses = {
-    accent: "bg-accent-soft text-accent border border-accent/20",
-    neutral: "bg-sunk text-ink border border-line",
-    sunk: "bg-sunk text-muted border border-line",
+    accent: "bg-accent-soft text-accent shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--accent)_22%,transparent)]",
+    neutral: "bg-sunk text-ink shadow-[inset_0_0_0_1px_var(--line)]",
+    sunk: "bg-sunk text-muted shadow-[inset_0_0_0_1px_var(--line)]",
   }[tone];
 
   return (
     <span
       aria-hidden="true"
-      className={`inline-grid shrink-0 place-items-center rounded-full font-semibold select-none ${toneClasses} ${className}`}
+      data-avatar-size={px}
+      className={`inline-flex shrink-0 select-none items-center justify-center overflow-hidden whitespace-nowrap rounded-full font-semibold leading-none ${toneClasses} ${className}`}
       style={{
-        width: size,
-        height: size,
-        fontSize: Math.max(10, Math.round(size * 0.42)),
+        width: px,
+        height: px,
+        minWidth: px,
+        fontSize: avatarFontSize(px, initials.length),
+        letterSpacing: initials.length > 1 ? "-0.02em" : undefined,
       }}
     >
       {initials}

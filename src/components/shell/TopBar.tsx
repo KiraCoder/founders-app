@@ -149,10 +149,10 @@ export function TopBar({ user, agentHires = NO_HIRES }: { user: { name: string; 
               <span className="hidden text-[13px] font-medium lg:inline">{user.shortName}</span>
             </button>
             {menuOpen && (
-              <div role="menu" className="card-raised absolute right-0 top-11 w-60 p-1.5">
+              <div role="menu" className="card-raised absolute right-0 top-11 w-[min(292px,calc(100vw-24px))] p-1.5">
                 <div className="px-2.5 py-2">
-                  <p className="text-[13px] font-medium">{user.name}</p>
-                  <p className="text-[12px] text-muted">{user.email}</p>
+                  <p className="truncate text-[13px] font-medium">{user.name}</p>
+                  <p className="truncate text-[12px] text-muted">{user.email}</p>
                 </div>
                 <div className="border-t border-line px-2 py-2">
                   <ThemeToggle />

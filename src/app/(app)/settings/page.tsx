@@ -60,6 +60,18 @@ export default async function SettingsPage() {
         </Link>
       </section>
 
+      <section className="card mb-5 flex flex-wrap items-center justify-between gap-3 p-4 md:p-5" aria-labelledby="labels-heading">
+        <div>
+          <h2 id="labels-heading" className="eyebrow mb-1">
+            Labels
+          </h2>
+          <p className="text-sm text-muted">Task labels: rename, recolor, archive, or delete the unused ones.</p>
+        </div>
+        <Link href="/settings/labels" className="btn">
+          Manage labels
+        </Link>
+      </section>
+
       {aiUsage && (
         <section className="card mb-5 p-4 md:p-5" aria-labelledby="assistant-heading">
           <h2 id="assistant-heading" className="eyebrow mb-3">
@@ -78,7 +90,9 @@ export default async function SettingsPage() {
             <p className="text-[13px] font-medium">Theme</p>
             <p className="text-[12px] text-muted">Choose light, dark, or follow your system preference.</p>
           </div>
-          <ThemeToggle />
+          <div className="w-full max-w-[300px]">
+            <ThemeToggle />
+          </div>
         </div>
       </section>
 
