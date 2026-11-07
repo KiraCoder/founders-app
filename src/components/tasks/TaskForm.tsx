@@ -13,6 +13,8 @@ export interface TaskFormDefaults {
   companyId?: string;
   projectId?: string;
   orgDepartmentId?: string;
+  /** Preset assignee ("user:<id>" or "person:<id>"), e.g. "Assign a task" on a person page. */
+  assignee?: string;
 }
 
 export function TaskForm({
@@ -38,14 +40,14 @@ export function TaskForm({
   const [companyId, setCompanyId] = useState(task?.company?.id ?? defaults?.companyId ?? "");
   const [projectId, setProjectId] = useState(task?.project?.id ?? defaults?.projectId ?? "");
   const [departmentId, setDepartmentId] = useState(task?.orgDepartment?.id ?? defaults?.orgDepartmentId ?? "");
-  const initialAssignee = task?.assignee ? `${task.assignee.kind}:${task.assignee.id}` : "";
+  const initialAssignee = task?.assignee ? `${task.assignee.kind}:${task.assignee.id}` : task ? "" : (defaults?.assignee ?? "");
   const [assignee, setAssignee] = useState(initialAssignee);
 
   useEffect(() => {
     if (!state.ok) return;
     if (!isEdit) {
       formRef.current?.reset();
-      setAssignee("");
+      setAssignee(defaults?.assignee ?? "");
     }
     onDone?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps

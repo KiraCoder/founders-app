@@ -11,11 +11,12 @@ import { ServiceError } from "@/server/services/errors";
 import { orgPositionsForPerson, type OrgPosition } from "@/server/services/org";
 import { getPerson, listCompanyUnitOptions } from "@/server/services/people";
 import { canViewSalaries } from "@/server/services/salaries";
-import { canManageRoutines, canManageStaffBot } from "@/server/services/access";
+import { canManageRoutines, canManageStaffBot, canSeeTeamTasks } from "@/server/services/access";
 import { listRoutines } from "@/server/services/routines";
 import { RoutinesList } from "@/components/routines/RoutinesList";
 import { getTeamMember } from "@/server/services/staff";
 import { InviteToTelegram } from "@/components/staff/InviteToTelegram";
+import { PersonTasksSection } from "./PersonTasksSection";
 
 export const metadata = { title: "Person" };
 
@@ -151,6 +152,8 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
         </ul>
         <AddLinkForm personId={person.id} companies={companies} showSalary={showSalary} />
       </Section>
+
+      {canSeeTeamTasks(ctx) && <PersonTasksSection ctx={ctx} personId={person.id} left={left} />}
 
       <Section title="Org positions" count={positions.length}>
         <ul className="card mb-3 divide-y divide-line" data-testid="person-org-positions">
