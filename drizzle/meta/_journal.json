@@ -218,6 +218,13 @@
       "when": 1794021245122,
       "tag": "0030_oauth_connector",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1794122922327,
+      "tag": "0033_ai_assistant",
+      "breakpoints": true
     }
   ]
 }

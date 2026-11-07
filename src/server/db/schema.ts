@@ -1800,3 +1800,77 @@ export const oauthTokens = pgTable(
   },
   (t) => [index("oauth_tokens_grant_idx").on(t.grantId), index("oauth_tokens_user_idx").on(t.userId)],
 );
+
+// ---------------------------------------------------------------------------
+// AI assistant (0033): per-founder chat history, write previews waiting for a click, usage log
+// ---------------------------------------------------------------------------
+
+/**
+ * One founder's assistant chat (one thread per founder; "Clear chat" deletes the rows).
+ * role: "user" | "assistant" | "action" (a preview card; `actionId` points at assistant_actions)
+ * | "error" (a friendly failure line shown in the panel, never sent to the model).
+ */
+export const assistantMessages = pgTable(
+  "assistant_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    content: text("content").notNull().default(""),
+    actionId: uuid("action_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("assistant_messages_user_idx").on(t.userId, t.createdAt)],
+);
+
+/**
+ * A write the assistant proposed (create_routine, update_task, ...). Nothing is written until the
+ * founder clicks the card's button: the server then checks the one-time token (SHA-256 stored),
+ * that the row belongs to the clicking founder and is still pending, and runs the stored plan.
+ * status: pending | running | done | cancelled | failed | expired.
+ */
+export const assistantActions = pgTable(
+  "assistant_actions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tool: text("tool").notNull(),
+    plan: jsonb("plan").$type<unknown>().notNull(),
+    preview: jsonb("preview").$type<unknown>().notNull(),
+    tokenHash: text("token_hash").notNull(),
+    status: text("status").notNull().default("pending"),
+    result: text("result"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("assistant_actions_user_idx").on(t.userId, t.status)],
+);
+
+/** One row per assistant request: tokens and outcome (never message content), for limits and cost. */
+export const assistantUsage = pgTable(
+  "assistant_usage",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    day: date("day", { mode: "string" }).notNull(),
+    model: text("model").notNull(),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    /** Input tokens OpenAI served from its prompt cache (cheaper). */
+    cachedTokens: integer("cached_tokens").notNull().default(0),
+    /** null = answered; otherwise the error code (insufficient_quota, rate_limited, invalid_key, ...). */
+    error: text("error"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("assistant_usage_user_day_idx").on(t.userId, t.day), index("assistant_usage_created_idx").on(t.createdAt)],
+);
+
+export type AssistantMessage = typeof assistantMessages.$inferSelect;
+export type AssistantAction = typeof assistantActions.$inferSelect;

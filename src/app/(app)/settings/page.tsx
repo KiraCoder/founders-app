@@ -1,6 +1,8 @@
 import Link from "next/link";
 import { DataSources } from "@/components/metrics/DataSources";
+import { AssistantUsageCard } from "@/components/settings/AssistantUsageCard";
 import { ConnectedAppsCard } from "@/components/settings/ConnectedAppsCard";
+import { usageSummary } from "@/server/assistant/service";
 import { ExtensionKeysCard } from "@/components/settings/ExtensionKeysCard";
 import { PreferencesForm } from "@/components/settings/PreferencesForm";
 import { SalaryAccessCard } from "@/components/settings/SalaryAccessCard";
@@ -35,6 +37,8 @@ export default async function SettingsPage() {
   const founder = canSetUpApp(ctx);
   const [extKeys, ingestLog] = canUseExtension(ctx) ? await Promise.all([listExtensionKeys(ctx), listIngestLog(ctx, 15)]) : [[], []];
   const connectedApps = founder ? await listConnectedApps(ctx) : [];
+  // A failure here never breaks Settings.
+  const aiUsage = ctx.user.role === "founder" ? await usageSummary(ctx).catch(() => null) : null;
   const fmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: ctx.timeZone });
   const linkedAt = link
     ? new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: ctx.timeZone }).format(link.createdAt)
@@ -55,6 +59,15 @@ export default async function SettingsPage() {
           Manage companies
         </Link>
       </section>
+
+      {aiUsage && (
+        <section className="card mb-5 p-4 md:p-5" aria-labelledby="assistant-heading">
+          <h2 id="assistant-heading" className="eyebrow mb-3">
+            AI assistant
+          </h2>
+          <AssistantUsageCard usage={aiUsage} />
+        </section>
+      )}
 
       <section className="card mb-5 p-4 md:p-5" aria-labelledby="appearance-heading">
         <h2 id="appearance-heading" className="eyebrow mb-3">

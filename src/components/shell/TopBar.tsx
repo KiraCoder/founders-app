@@ -6,6 +6,7 @@ import { usePathname, useSearchParams } from "next/navigation";
 import { Icon } from "@/components/Icon";
 import { InitialsAvatar } from "@/components/ui";
 import { ShortcutsModal } from "./ShortcutsModal";
+import { AssistantPanel, OPEN_EVENT } from "@/components/assistant/AssistantPanel";
 import { ThemeToggle } from "@/components/settings/ThemeToggle";
 import { logoutAction } from "@/app/(app)/actions";
 
@@ -118,6 +119,7 @@ export function TopBar({ user, agentHires = [] }: { user: { name: string; shortN
         </form>
         <div className="ml-auto flex items-center gap-1.5">
           <ShortcutsModal />
+          <AssistantPanel />
           <button
             type="button"
             className="btn btn-ghost px-2.5"
@@ -183,10 +185,17 @@ export function TopBar({ user, agentHires = [] }: { user: { name: string; shortN
         <div className="flex-1 overflow-y-auto">
           <AgentHires hires={agentHires} onNavigate={() => setAgentOpen(false)} />
           <div className="mx-4 mb-4 flex flex-col gap-1.5 rounded-[10px] border border-line bg-sunk p-3 text-[12px]">
-            <span className="tag tag-info self-start">Chat not connected</span>
-            <p className="text-muted">
-              Talking to the page&apos;s agent arrives after the AI provider is chosen (Nuraaly picks it). Hired roles already run without it; nothing is sent anywhere.
-            </p>
+            <p className="text-muted">Ask the AI assistant about tasks, people and routines, or have it prepare changes for you to confirm.</p>
+            <button
+              type="button"
+              className="btn btn-sm self-start"
+              onClick={() => {
+                setAgentOpen(false);
+                window.dispatchEvent(new Event(OPEN_EVENT));
+              }}
+            >
+              Open assistant (Ctrl/⌘ J)
+            </button>
           </div>
         </div>
       </aside>

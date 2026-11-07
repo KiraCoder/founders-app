@@ -199,6 +199,13 @@ feature stays off without it.
 | `FILE_STORAGE` | No | Where document scans go. Empty: local disk in development, **uploads off in production** ("File uploads arrive with Supabase storage"); `local`: local disk on a server with a lasting disk (ignored on Vercel); `supabase`: placeholder, off until written |
 | `HOLDING_ACTS_GRACE_DAYS` | No | Days into the next month before a month's акт is expected (default 10) |
 | `AI_PROVIDER` | No | Empty / `none` (the only value implemented): AI roles run rule-based, no AI summary |
+| `OPENAI_API_KEY` | For the AI assistant | **Secret.** OpenAI API key (see *AI assistant*). Empty: the assistant says "AI not set up" and nothing breaks |
+| `OPENAI_MODEL` | No | Assistant model. Default `gpt-5-mini` |
+| `OPENAI_BASE_URL` | No | Default `https://api.openai.com/v1` (an OpenAI-compatible proxy also works) |
+| `OPENAI_REASONING_EFFORT` | No | `minimal` (default for gpt-5 / o-models), `low`, `medium`, `high` or `off` |
+| `AI_DAILY_LIMIT` | No | Assistant requests per founder per day (default 200) |
+| `AI_MAX_OUTPUT_TOKENS` | No | Output cap per model call (default 700) |
+| `AI_PRICE_IN`, `AI_PRICE_CACHED`, `AI_PRICE_OUT` | No | USD per 1M tokens for the cost estimate in Settings (defaults 0.25 / 0.025 / 2.00, gpt-5-mini) |
 | `KIWIGO_API_URL`, `KIWIGO_API_TOKEN` | Not used yet | Kiwi Go app data source (from Edil). The connector is a placeholder: no network calls until a developer writes it |
 | `WMS_API_URL`, `WMS_API_TOKEN` | Not used yet | WMS (wms.jobutify.com) data source, same as above |
 | `ALURA_ERP_API_URL`, `ALURA_ERP_API_TOKEN` | Not used yet | Alura Style ERP data source, same as above |
@@ -1240,8 +1247,9 @@ remove the connector in Claude.
 
 - `POST /api/mcp` — MCP **Streamable HTTP** transport from `@modelcontextprotocol/sdk` (pinned
   1.32.2, `WebStandardStreamableHTTPServerTransport`), stateless, JSON responses; GET → 405.
-  `src/server/http/mcp.ts`, tools in `src/server/mcp/tools.ts`, name resolution in
-  `src/server/mcp/resolve.ts`.
+  `src/server/http/mcp.ts`, server in `src/server/mcp/tools.ts`; the tools themselves are the
+  shared registry `src/server/mcp/registry.ts` (+ `all-tools.ts`), also used by the in-app AI
+  assistant; name resolution (exact → partial → typo/Cyrillic-tolerant) in `src/server/mcp/resolve.ts`.
 - OAuth 2.1 (`src/server/services/oauth.ts`, `src/server/http/oauth.ts`): dynamic client
   registration `POST /api/oauth/register` (RFC 7591; 10 per IP per minute), consent page
   `GET /oauth/authorize` (signed-in founder) → `POST /api/oauth/authorize` (same-origin + HMAC
@@ -1272,6 +1280,66 @@ remove the connector in Claude.
 - Try it locally with the MCP Inspector: `npx @modelcontextprotocol/inspector`, transport
   *Streamable HTTP*, URL `http://localhost:3000/api/mcp`, then *Open Auth Settings → Quick OAuth
   Flow*.
+
+## AI assistant
+
+A chat for the founders, from any page: **Ctrl+J** (Windows) / **⌘J** (Mac), or **Ask AI** in
+the top bar (full screen on a phone). Write casually — typos, English, Russian or Kyrgyz; it
+answers in your language: *"what's overdue for Elmurat?"*, *"did Asan finish today's checklist?"*,
+*"элмурат каждый день кроме вс в 15:00 вносит 1С, чеклист киви апсел"*.
+
+- **It never saves on its own.** Anything that creates or changes (a routine, tasks, a project,
+  a comment, *done*) comes as a card — who, company, days, time, checklist, reminders — with
+  **Create / Change / Cancel**. Only your click saves it (the card carries a one-time token,
+  bound to you and that card; it expires after 30 minutes).
+- **Privacy.** Founders only. It sees what you see in the app, through the same rules: never
+  salaries, and only *your own* private todos. Each founder has their own chat; **Clear chat**
+  deletes it.
+- **Free quick commands** (no AI call, work even without a key): `/tasks`, `/overdue`,
+  `/routines`, `/routine <name>`, `/help`.
+- **Usage and cost:** Settings → *AI assistant* (requests today, tokens, cached tokens, estimated
+  cost this month, the daily limit). If OpenAI runs out of credit, the panel and Settings say so.
+
+### Set it up (once, about 3 minutes)
+
+1. Go to **platform.openai.com** → sign in → **Settings → Billing** → add a payment method and
+   some credit (e.g. $5–10; auto-recharge off is fine).
+2. **API keys** (platform.openai.com/api-keys) → **Create new secret key** → name it
+   `founders-app` → **Create** → **Copy** (you see it only once). Never paste it into the code,
+   a chat or a message.
+3. **Vercel** → your project → **Settings → Environment Variables** → **Add**: Key
+   `OPENAI_API_KEY`, Value: the key, Environment **Production** → **Save**.
+4. **Deployments** → the latest one → **⋯ → Redeploy**. Open the app, press Ctrl/⌘ J, ask
+   something.
+
+Optional: `OPENAI_MODEL` (default `gpt-5-mini`), `AI_DAILY_LIMIT` (default 200 per founder per
+day). To switch the key off, delete the variable and redeploy.
+
+**Cost.** gpt-5-mini costs about $0.25 per million input tokens (cached input $0.025) and $2 per
+million output tokens. A typical question is ~2,000–2,500 input tokens (most of it cached on
+repeat questions) and ~100–300 output tokens — roughly **$0.001–0.002 per message** (two calls when it looks data up), so a few hundred
+messages a month is well under $1. The daily limit caps the worst case (200 × 2 founders a day).
+
+### How it works (for developers)
+
+- `src/server/assistant/`: `service.ts` (chat, tool loop, confirm tokens, limits, usage),
+  `openai.ts` (plain `fetch` to Chat Completions, injectable for tests; errors mapped to clear
+  messages, only the error code is logged), `prompt.ts` (a small static prompt sent first and
+  byte-identical, for OpenAI prompt caching; date / founder / companies after it), `router.ts`
+  (only the relevant tools per message, max 8; compact tool results, 20 rows max), `local.ts`
+  (commands answered without the model), `routine-tools.ts` and **`routine-adapter.ts`** (the one
+  place mapping tool arguments onto the routines service input).
+- Tools: the shared registry (`src/server/mcp/registry.ts`). Write tools are split into
+  `prepare` (resolve names, validate, no writes → plan + preview card) and `commit`. The Claude
+  connector runs both at once; the assistant stores the plan in `assistant_actions` with a
+  SHA-256-hashed one-time token and commits only on `POST /api/v1/assistant/actions/:id`
+  `{token, decision}` by the same founder while pending (atomic pending → running).
+- Limits: last 8 turns + a one-line summary of older ones, `max_completion_tokens` 700, 4 model
+  calls per message, 8 requests per minute, `AI_DAILY_LIMIT` per day. Tables
+  `assistant_messages`, `assistant_actions`, `assistant_usage` (tokens and error code, never
+  content) — migration `0033_ai_assistant.sql` (RLS + revoke).
+- REST: `GET /api/v1/assistant`, `DELETE /api/v1/assistant`, `POST /api/v1/assistant/messages`
+  `{text}`, `POST /api/v1/assistant/actions/:id`.
 
 ## Folder map
 

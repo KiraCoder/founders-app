@@ -6,6 +6,7 @@ import { Icon } from "@/components/Icon";
 const SHORTCUTS = [
   { key: "/", description: "Focus search" },
   { key: "?", description: "Show keyboard shortcuts" },
+  { key: "Ctrl/⌘ J", description: "Open the AI assistant" },
   { key: "Esc", description: "Close a dialog or menu" },
 ];
 
@@ -23,7 +24,7 @@ function focusables(root: HTMLElement): HTMLElement[] {
 
 /**
  * Keyboard shortcuts dialog for desktop founders, opened with "?" or the help button.
- * Global keys never fire while typing in a field or with Ctrl / Cmd / Alt held.
+ * Global keys never fire while typing in a field or with Ctrl / Cmd / Alt held (Ctrl/⌘ J, the assistant, is handled by AssistantPanel).
  * The dialog takes focus, keeps Tab inside, closes on Esc or a click outside, and gives
  * focus back to where it was.
  */

@@ -39,6 +39,57 @@ function list(labels: string[]): string {
   return labels.length > MAX_LISTED ? `${shown} (+${labels.length - MAX_LISTED} more)` : shown;
 }
 
+const TRANSLIT: Record<string, string> = {
+  а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ж: "zh", з: "z", и: "i", й: "y", к: "k", л: "l", м: "m", н: "n", о: "o",
+  п: "p", р: "r", с: "s", т: "t", у: "u", ф: "f", х: "h", ц: "ts", ч: "ch", ш: "sh", щ: "sch", ъ: "", ы: "y", ь: "", э: "e",
+  ю: "yu", я: "ya", ө: "o", ү: "u", ң: "n", қ: "k", ғ: "g", ұ: "u", ә: "a", і: "i",
+};
+
+/** Cyrillic (Russian / Kyrgyz) → Latin, roughly; enough to compare names. */
+export function translit(s: string): string {
+  return [...s].map((ch) => TRANSLIT[ch] ?? ch).join("");
+}
+
+/** Levenshtein distance, capped (stops early above `max`). */
+export function editDistance(a: string, b: string, max = 3): number {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      const v = Math.min(prev[j]! + 1, cur[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+      cur.push(v);
+      rowMin = Math.min(rowMin, v);
+    }
+    if (rowMin > max) return max + 1;
+    prev = cur;
+  }
+  return prev[b.length]!;
+}
+
+/** Candidates whose name (or a word of it) is within a small edit distance of `ref`; the closest ones. */
+function fuzzyMatches<T>(r: string, candidates: Candidate<T>[]): Candidate<T>[] {
+  const ref = translit(r);
+  if (ref.length < 3) return [];
+  const allowed = ref.length <= 4 ? 1 : 2;
+  let best = allowed + 1;
+  let out: Candidate<T>[] = [];
+  for (const c of candidates) {
+    let d = allowed + 1;
+    for (const k of c.keys) {
+      const key = translit(k);
+      if (key.includes(ref) || (ref.length >= 4 && key.startsWith(ref.slice(0, -1)))) d = Math.min(d, 0);
+      else d = Math.min(d, editDistance(ref, key, allowed));
+    }
+    if (d < best) {
+      best = d;
+      out = [c];
+    } else if (d === best && d <= allowed) out.push(c);
+  }
+  return best <= allowed ? out : [];
+}
+
 export function pickOne<T>(ref: string, candidates: Candidate<T>[], what: string, where = ""): T {
   const r = normalizeName(ref);
   if (!r) throw new ServiceError("validation", `Give a ${what} name`);
@@ -53,11 +104,17 @@ export function pickOne<T>(ref: string, candidates: Candidate<T>[], what: string
   if (partial.length > 1) {
     throw new ServiceError("validation", `“${ref}” matches several ${plural}${where}: ${list(partial.map((c) => c.label))}. Ask which one is meant and pass the full name.`);
   }
+  // Typos and Cyrillic spellings ("асан", "Elmrat"): transliterate, then the closest name word.
+  const fuzzy = fuzzyMatches(r, candidates);
+  if (fuzzy.length === 1) return fuzzy[0]!.value;
+  if (fuzzy.length > 1) {
+    throw new ServiceError("validation", `“${ref}” matches several ${plural}${where}: ${list(fuzzy.map((c) => c.label))}. Ask which one is meant and pass the full name.`);
+  }
   const all = candidates.map((c) => c.label);
   throw new ServiceError("validation", `No ${what} called “${ref}”${where}.${all.length ? ` Options: ${list(all)}.` : ""}`);
 }
 
-function nameKeys(...names: (string | null | undefined)[]): string[] {
+export function nameKeys(...names: (string | null | undefined)[]): string[] {
   const keys = new Set<string>();
   for (const n of names) {
     if (!n) continue;
