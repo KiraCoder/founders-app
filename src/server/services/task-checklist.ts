@@ -155,6 +155,32 @@ export async function removeChecklistItem(ctx: ServiceContext, itemId: string): 
   return { notified: n.queued, personName: n.personName };
 }
 
+/**
+ * Moves an item one place up or down (positions are rewritten 0, 1, 2 … in the new order). The
+ * person's card lists the items in order, so a sent task gets ONE updated card like other edits.
+ */
+export async function moveChecklistItem(ctx: ServiceContext, itemId: string, direction: "up" | "down"): Promise<StaffNotice> {
+  if (direction !== "up" && direction !== "down") throw new ServiceError("validation", "Invalid direction");
+  const item = await loadItem(ctx, itemId);
+  const order = (
+    await ctx.db
+      .select({ id: taskChecklistItems.id })
+      .from(taskChecklistItems)
+      .where(eq(taskChecklistItems.taskId, item.taskId))
+      .orderBy(asc(taskChecklistItems.position), asc(taskChecklistItems.createdAt))
+  ).map((r) => r.id);
+  const i = order.indexOf(item.id);
+  const j = direction === "up" ? i - 1 : i + 1;
+  if (i < 0 || j < 0 || j >= order.length) return { notified: false, personName: null };
+  [order[i], order[j]] = [order[j]!, order[i]!];
+  await ctx.db.transaction(async (tx) => {
+    for (const [pos, id] of order.entries()) await tx.update(taskChecklistItems).set({ position: pos }).where(eq(taskChecklistItems.id, id));
+  });
+  await logChecklist(ctx, item.taskId, { action: "moved", item: item.title, direction });
+  const n = await queueStaffTaskUpdate(ctx.db, item.taskId, ctx.now);
+  return { notified: n.queued, personName: n.personName };
+}
+
 /** A founder ticks / unticks an item (no message to the person: the next card shows it). */
 export async function setChecklistItemDone(ctx: ServiceContext, itemId: string, done: boolean): Promise<void> {
   const item = await loadItem(ctx, itemId);

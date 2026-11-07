@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RoutineActions } from "@/components/routines/RoutineActions";
+import { RoutineChecklistCard } from "@/components/routines/RoutineChecklistCard";
 import { formatNextDue } from "@/components/routines/RoutinesList";
 import { RoutineStatusScope, RoutineStatusTag } from "@/components/routines/RoutineStatus";
 import { routineFormValues, todayRunOf } from "@/components/routines/form-values";
@@ -111,20 +112,13 @@ export default async function RoutinePage({ params, searchParams }: { params: Pr
         </div>
       </dl>
 
-      {r.confirmation === "checklist" && r.items.length > 0 && (
-        <Section title="Checklist" count={r.items.length}>
-          <ol className="card divide-y divide-line text-[13px]">
-            {r.items.map((i, n) => (
-              <li key={i.key} className="flex flex-wrap items-baseline gap-2 px-4 py-2">
-                <span className="num w-5 text-muted">{n + 1}</span>
-                <span className="font-medium">{i.label}</span>
-                {i.needsComment && <Tag tone="info">needs a comment</Tag>}
-                {i.details && <span className="w-full pl-7 text-[12px] italic text-muted">{i.details}</span>}
-              </li>
-            ))}
-          </ol>
-        </Section>
-      )}
+      <RoutineChecklistCard
+        routineId={r.id}
+        items={r.confirmation === "checklist" ? routineFormValues(view).items : []}
+        today={todayRunOf(view)}
+        assigneeName={view.assigneeName}
+        canEdit={view.status !== "archived"}
+      />
 
       <Section title="Run history" count={runs.length}>
         {runs.length === 0 ? (

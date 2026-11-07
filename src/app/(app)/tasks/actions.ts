@@ -8,12 +8,15 @@ import { toServiceError } from "@/server/services/errors";
 import { chaseTaskNow, setTaskChase, setTaskChasePaused } from "@/server/services/task-activity";
 import {
   addChecklistItem,
+  listChecklist,
+  moveChecklistItem,
   parseChecklistField,
   removeChecklistItem,
   setChecklistItemDone,
   updateChecklistItem,
 } from "@/server/services/task-checklist";
 import { createTask, deleteTask, updateTaskDetailed } from "@/server/services/tasks";
+import type { ChecklistItemData } from "@/components/tasks/TaskChecklist";
 
 /**
  * Tasks (0032): the dialog's save, the list's one-tap actions, the checklist and the chase
@@ -162,6 +165,27 @@ export async function removeChecklistItemAction(itemId: string): Promise<TaskAct
     const r = await removeChecklistItem(ctx, itemId);
     return { message: updatedLine(r, "Item removed") };
   });
+}
+
+export async function moveChecklistItemAction(itemId: string, direction: "up" | "down"): Promise<TaskActionResult> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const r = await moveChecklistItem(ctx, itemId, direction);
+    return { message: updatedLine(r, direction === "up" ? "Moved up" : "Moved down") };
+  });
+}
+
+/** The edit dialog's checklist (the list rows only carry counts). Read-only, so no revalidation. */
+export async function loadChecklistAction(taskId: string): Promise<{ items: ChecklistItemData[]; error?: string }> {
+  const ctx = await getPageContext();
+  try {
+    const items = await listChecklist(ctx, taskId);
+    return { items: items.map((i) => ({ ...i, doneAt: i.doneAt?.toISOString() ?? null })) };
+  } catch (err) {
+    const se = toServiceError(err);
+    if (!se) throw err;
+    return { items: [], error: se.message };
+  }
 }
 
 export async function toggleChecklistItemAction(itemId: string, done: boolean): Promise<TaskActionResult> {

@@ -14,6 +14,7 @@ import {
   runRoutineNow,
   setRoutineStatus,
   updateRoutine,
+  updateRoutineChecklist,
   type TodayEffect,
 } from "@/server/services/routines";
 
@@ -100,6 +101,20 @@ export async function updateRoutineAction(_p: RoutineFormState, fd: FormData): P
       if (effect === "open_run_updated" || effect === "reopened") await sendNow(ctx);
     },
     () => (effect ? EFFECT_TEXT[effect] : "Saved"),
+  );
+  return { ...state, id: str(fd, "id") };
+}
+
+/** The routine page's checklist card: only the items (`items` JSON, `applyToToday`). */
+export async function saveRoutineChecklistAction(_p: RoutineFormState, fd: FormData): Promise<RoutineFormState> {
+  const ctx = await getPageContext();
+  let effect: TodayEffect = null;
+  const state = await run(
+    async () => {
+      effect = (await updateRoutineChecklist(ctx, str(fd, "id"), str(fd, "items"), { applyToToday: str(fd, "applyToToday") === "1" })).todayEffect;
+      if (effect === "open_run_updated" || effect === "reopened") await sendNow(ctx);
+    },
+    () => (effect ? EFFECT_TEXT[effect] : "Checklist saved"),
   );
   return { ...state, id: str(fd, "id") };
 }

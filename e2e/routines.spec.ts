@@ -108,7 +108,7 @@ test("routine for a linked person (dialog, checklist builder) → Run now → Ru
   await expect(page.getByTestId("routine-message").first()).toBeVisible();
 
   // Edit (dialog): a new item while today's run is done → the confirm explains, "from the next run".
-  await page.getByRole("button", { name: "Edit" }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
   const editForm = page.getByRole("dialog", { name: `Edit “${title}”` }).getByRole("form", { name: "Routine" });
   await editForm.getByLabel("New item").fill("Alura Brand");
   await editForm.getByRole("button", { name: "+ Add item" }).click();

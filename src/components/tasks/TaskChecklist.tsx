@@ -3,6 +3,8 @@
 import { useActionState, useEffect, useId, useOptimistic, useRef, useState, useTransition } from "react";
 import {
   addChecklistItemAction,
+  loadChecklistAction,
+  moveChecklistItemAction,
   removeChecklistItemAction,
   toggleChecklistItemAction,
   updateChecklistItemAction,
@@ -79,8 +81,8 @@ function ItemFields({ idPrefix, title, details, errors }: { idPrefix: string; ti
 
 /**
  * The task's checklist on the task page / edit dialog: tick (time + who are shown), add one by one,
- * edit, remove. When the task was already sent to its person, the first change asks once: they get
- * ONE updated message with the whole checklist.
+ * edit, move up / down, remove. When the task was already sent to its person, the first change
+ * asks once: they get ONE updated message with the whole checklist.
  */
 export function TaskChecklist({
   taskId,
@@ -88,6 +90,7 @@ export function TaskChecklist({
   notifyName,
   readOnly,
   timeZone,
+  onChanged,
 }: {
   taskId: string;
   items: ChecklistItemData[];
@@ -95,6 +98,8 @@ export function TaskChecklist({
   notifyName: string | null;
   readOnly?: boolean;
   timeZone: string;
+  /** Called after every saved change (the edit dialog reloads its copy; the page re-renders itself). */
+  onChanged?: () => Promise<void> | void;
 }) {
   const [state, addAction, adding] = useActionState<TaskActionResult, FormData>(addChecklistItemAction, {});
   const addForm = useRef<HTMLFormElement>(null);
@@ -116,6 +121,7 @@ export function TaskChecklist({
     if (state.ok) {
       addForm.current?.reset();
       toast(state.message ?? "Saved");
+      void onChanged?.();
     } else if (state.error) toast(state.error, { tone: "risk" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.nonce, state.error]);
@@ -131,8 +137,11 @@ export function TaskChecklist({
     } catch {
       r = { ok: false, error: "Could not reach the server. Nothing was changed." };
     }
-    if (r.ok) toast(r.message ?? "Saved");
-    else toast(r.error ?? "Something went wrong", { tone: "risk" });
+    if (r.ok) {
+      toast(r.message ?? "Saved");
+      // Inside the same transition: the optimistic state holds until the fresh copy is in.
+      await onChanged?.();
+    } else toast(r.error ?? "Something went wrong", { tone: "risk" });
   };
   const act = (fn: () => Promise<TaskActionResult>) => start(() => settle(fn));
   const toggle = (id: string, on: boolean) =>
@@ -159,7 +168,10 @@ export function TaskChecklist({
             {editing === item.id ? (
               <EditItem
                 item={item}
-                onDone={() => setEditing(null)}
+                onDone={() => {
+                  setEditing(null);
+                  void onChanged?.();
+                }}
                 guard={(go) => guarded("edit this item", go)}
               />
             ) : (
@@ -179,6 +191,20 @@ export function TaskChecklist({
             )}
             {!readOnly && editing !== item.id && (
               <div className="flex shrink-0 gap-0.5">
+                <IconButton
+                  icon="chevronUp"
+                  size="sm"
+                  label={`Move “${item.title}” up`}
+                  disabled={pending || n === 0}
+                  onClick={() => guarded("reorder the checklist", () => act(() => moveChecklistItemAction(item.id, "up")))}
+                />
+                <IconButton
+                  icon="chevronDown"
+                  size="sm"
+                  label={`Move “${item.title}” down`}
+                  disabled={pending || n === shown.length - 1}
+                  onClick={() => guarded("reorder the checklist", () => act(() => moveChecklistItemAction(item.id, "down")))}
+                />
                 <IconButton icon="edit" label={`Edit “${item.title}”`} onClick={() => setEditing(item.id)} />
                 <IconButton
                   icon="trash"
@@ -329,5 +355,37 @@ export function DraftChecklist({ items, onChange }: { items: DraftItem[]; onChan
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * The checklist inside the task's edit dialog: list rows only carry counts, so the items are read
+ * when the dialog opens and again after each change (every change is saved at once).
+ */
+export function DialogChecklist({ taskId, notifyName, timeZone }: { taskId: string; notifyName: string | null; timeZone: string }) {
+  const [items, setItems] = useState<ChecklistItemData[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const reload = async () => {
+    const r = await loadChecklistAction(taskId);
+    setError(r.error ?? null);
+    setItems(r.items);
+  };
+  useEffect(() => {
+    void reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId]);
+  return (
+    <section className="mt-5 border-t border-line pt-4" aria-labelledby={`${taskId}-dialog-checklist`}>
+      <h3 id={`${taskId}-dialog-checklist`} className="label mb-2">
+        Checklist <span className="font-normal text-muted">· each change is saved at once</span>
+      </h3>
+      {error ? (
+        <p className="text-[13px] text-risk">{error}</p>
+      ) : items === null ? (
+        <p className="text-[13px] text-muted">Loading the checklist…</p>
+      ) : (
+        <TaskChecklist taskId={taskId} items={items} notifyName={notifyName} timeZone={timeZone} onChanged={reload} />
+      )}
+    </section>
   );
 }

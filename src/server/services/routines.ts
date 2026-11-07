@@ -477,6 +477,38 @@ export async function updateRoutine(ctx: ServiceContext, id: string, input: unkn
   return Object.assign(row!, { todayEffect });
 }
 
+/**
+ * Only the checklist (the routine page's checklist card): everything else stays as it is. Same
+ * effect on today's run as an edit in the dialog (`todayEffect`: the open run is updated and the
+ * person gets ONE updated message; a finished run gets the new items only with `applyToToday`).
+ * A routine with a plain "Done" button becomes a checklist routine.
+ */
+export async function updateRoutineChecklist(
+  ctx: ServiceContext,
+  id: string,
+  items: unknown,
+  opts: { applyToToday?: boolean } = {},
+): Promise<Routine & { todayEffect: TodayEffect }> {
+  const view = await getRoutine(ctx, id);
+  const r = view.routine;
+  return updateRoutine(ctx, id, {
+    title: r.title,
+    description: r.description,
+    companyId: r.companyId ?? "",
+    assignee: r.assigneePersonId ? `person:${r.assigneePersonId}` : `user:${r.assigneeUserId}`,
+    scheduleKind: r.scheduleKind,
+    days: r.days ?? [],
+    monthDay: r.monthDay ?? "",
+    times: view.times,
+    startsOn: r.startsOn ?? "",
+    endsOn: r.endsOn ?? "",
+    confirmation: "checklist",
+    items,
+    chase: view.override,
+    applyToToday: !!opts.applyToToday,
+  });
+}
+
 /** Pause / resume / archive / restore. Pausing or archiving cancels waiting messages; today's open run is closed when the day ends. */
 export async function setRoutineStatus(ctx: ServiceContext, id: string, status: RoutineStatus): Promise<Routine> {
   const current = await loadRoutine(ctx, id);
