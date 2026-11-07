@@ -35,8 +35,11 @@ export const SHARED_CACHE_SECONDS = 300;
 /**
  * Part of every key: Vercel's data cache outlives a deployment, and a new deployment may bring
  * a migration (new columns) or new seed data, so entries are never shared between deployments.
+ * Locally (no Vercel id) the key changes with every server start: `.next/cache` survives a
+ * `db:reset` / re-seed (done with the server stopped), and old entries would point at rows that
+ * no longer exist.
  */
-const BUILD_ID = process.env.VERCEL_DEPLOYMENT_ID ?? process.env.VERCEL_GIT_COMMIT_SHA ?? "local";
+const BUILD_ID = process.env.VERCEL_DEPLOYMENT_ID ?? process.env.VERCEL_GIT_COMMIT_SHA ?? `local-${Date.now().toString(36)}`;
 
 // Dates survive the JSON round trip of the data cache as {"$d": iso}.
 function encode(value: unknown): string {
