@@ -174,6 +174,9 @@ export async function listTasks(ctx: ServiceContext, rawFilters: TaskFilters = {
   }
   if (f.companyId) where.push(eq(tasks.companyId, f.companyId));
   if (f.projectId) where.push(eq(tasks.projectId, f.projectId));
+  if (f.assigneeUserId) where.push(eq(tasks.assigneeUserId, f.assigneeUserId));
+  // A person's task (the view shows a founder assignee first when both are set).
+  if (f.assigneePersonId) where.push(isNull(tasks.assigneeUserId), eq(tasks.assigneePersonId, f.assigneePersonId));
   if (f.priority) where.push(eq(tasks.priority, f.priority));
   if (f.status === "open") where.push(openWhere());
   else if (f.status && f.status !== "any") where.push(eq(tasks.status, f.status));

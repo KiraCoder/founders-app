@@ -267,18 +267,21 @@ export function buildCockpitServer({ ctx, baseUrl: base }: ToolEnv): McpServer {
         const c = args.company ? await resolveCompany(ctx, args.company) : null;
         const p = args.project ? await resolveProject(ctx, args.project, c?.id) : null;
         const who = args.assignee ? await resolveAssignee(ctx, args.assignee, c?.id ?? "any", c?.name) : null;
+        // The assignee is filtered in SQL, so it is never lost behind the first 500 rows.
         const rows = await listTasks(ctx, {
           companyId: c?.id ?? p?.companyId,
           projectId: p?.id,
+          assigneeUserId: who?.kind === "user" ? who.id : undefined,
+          assigneePersonId: who?.kind === "person" ? who.id : undefined,
           status: args.overdue ? "open" : (args.status ?? "open"),
           view: args.overdue ? "overdue" : undefined,
           limit: 500,
         });
-        const filtered = who ? rows.filter((t) => t.assignee?.kind === who.kind && t.assignee.id === who.id) : rows;
         const limit = args.limit ?? 50;
-        const shown = filtered.slice(0, limit);
-        const more = filtered.length > shown.length ? ` (showing ${shown.length}; ask with a higher limit or narrower filters)` : "";
-        return result(`${filtered.length} tasks${more}.`, shown.map((t) => taskOut(t, base)));
+        const shown = rows.slice(0, limit);
+        const total = rows.length >= 500 ? "500+" : String(rows.length);
+        const more = rows.length > shown.length ? ` (showing ${shown.length}; ask with a higher limit or narrower filters)` : "";
+        return result(`${total} tasks${more}.`, shown.map((t) => taskOut(t, base)));
       }),
   );
 

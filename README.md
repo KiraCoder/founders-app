@@ -222,7 +222,9 @@ feature stays off without it.
   grouped by who has it — one section per founder and person, plus *Unassigned* (shared tasks nobody
   has) — with counts (open, overdue, due today, waiting, done in the last 7 days), each person's
   Telegram status and filters (company, person, status, overdue only). It reads through
-  `visibleTasksWhere`, so a founder's personal todos appear only in their own group, to them. The
+  `visibleTasksWhere`, so a founder's personal todos appear only in their own group, to them. It
+  reads at most 3000 tasks (`TEAM_TASKS_LIMIT`); beyond that the page says "Showing the first 3000
+  tasks only — narrow the filters" (groups and counts then cover only those). The
   person page has a *Tasks* section (overdue / open / done this week) and **Assign a task** (the task
   form preset with that person and their company).
 - **Company numbers** (metrics, values, connector runs) belong to their company and follow the

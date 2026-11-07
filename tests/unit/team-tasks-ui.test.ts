@@ -11,12 +11,20 @@ vi.mock("@/app/(app)/actions", () => ({
   setTaskStatusAction: vi.fn(),
 }));
 
-const { TeamBoard, TeamCountsLine } = await import("@/components/tasks/TeamBoard");
+const { TeamBoard, TeamCapNotice, TeamCountsLine } = await import("@/components/tasks/TeamBoard");
 
 const options = { currentUserId: "u1", companies: [], projects: [], founders: [], peopleByCompany: {}, departmentsByCompany: {} };
 const counts = { open: 2, overdue: 1, dueToday: 1, waiting: 1, doneRecent: 3 };
 
 describe("Team view markup", () => {
+  it("cap notice: only when the board was cut, naming the limit", () => {
+    expect(renderToStaticMarkup(createElement(TeamCapNotice, { capped: false, limit: 3000 }))).toBe("");
+    const html = renderToStaticMarkup(createElement(TeamCapNotice, { capped: true, limit: 3000 }));
+    expect(html).toContain('data-testid="team-capped"');
+    expect(html).toContain(">3000<");
+    expect(html).toContain("narrow the filters");
+  });
+
   it("counts line marks overdue red only when there is something overdue", () => {
     const html = renderToStaticMarkup(createElement(TeamCountsLine, { counts }));
     expect(html).toMatch(/tag tag-risk"><span class="num" data-count="overdue">1</);

@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { people, tasks, telegramLinks } from "@/server/db/schema";
 import { createTask } from "@/server/services/tasks";
-import { getPersonTasks, getTeamTasks, type TeamBoard } from "@/server/services/team-tasks";
+import { getPersonTasks, getTeamTasks, TEAM_TASKS_LIMIT, type TeamBoard } from "@/server/services/team-tasks";
 import { createTestDb, FIXED_NOW, type TestDb } from "../helpers/db";
 
 let t: TestDb;
@@ -151,6 +151,16 @@ describe("team view: filters and the Unassigned group", () => {
 
     const any = await getTeamTasks(t.ctx("talant"), { status: "any" });
     expect(titles(any, `person:${t.personIds.elmurat}`)).toHaveLength(4);
+  });
+
+  it("says when the task limit cut the board (capped + limit), not otherwise", async () => {
+    const full = await getTeamTasks(t.ctx("talant"), { status: "any" });
+    expect(full).toMatchObject({ capped: false, limit: TEAM_TASKS_LIMIT });
+    const n = allTitles(full).length;
+    const cut = await getTeamTasks(t.ctx("talant"), { status: "any" }, { limit: n - 1 });
+    expect(cut).toMatchObject({ capped: true, limit: n - 1 });
+    expect(allTitles(cut)).toHaveLength(n - 1);
+    expect((await getTeamTasks(t.ctx("talant"), { status: "any" }, { limit: n })).capped).toBe(false);
   });
 
   it("refuses malformed filters", async () => {

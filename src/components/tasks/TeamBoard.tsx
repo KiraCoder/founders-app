@@ -14,6 +14,17 @@ export const TELEGRAM_LABEL: Record<TeamTelegramStatus, { label: string; tone: T
   not_linked: { label: "Not linked", tone: "neutral", title: "Not on Telegram yet" },
 };
 
+/** Shown when the Team view read only its first `limit` tasks (TEAM_TASKS_LIMIT): groups and counts are partial. */
+export function TeamCapNotice({ capped, limit }: { capped: boolean; limit: number }) {
+  if (!capped) return null;
+  return (
+    <p role="status" data-testid="team-capped" className="card mb-3 px-4 py-2 text-[13px] text-risk">
+      Showing the first <span className="num">{limit}</span> tasks only (counts too) — narrow the filters (company, person, status) to
+      see the rest.
+    </p>
+  );
+}
+
 /** Counts line of a group: open, overdue (red), due today, waiting, done in the last 7 days. */
 export function TeamCountsLine({ counts }: { counts: TeamCounts }) {
   return (

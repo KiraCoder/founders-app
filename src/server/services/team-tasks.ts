@@ -19,6 +19,8 @@ import { queryVisibleTasks, type TaskView } from "./tasks";
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** "Done in the last 7 days" window. */
 export const RECENT_DONE_DAYS = 7;
+/** The Team view reads at most this many tasks; beyond it the page says so (narrow the filters). */
+export const TEAM_TASKS_LIMIT = 3000;
 
 const blankToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 
@@ -71,6 +73,9 @@ export interface TeamBoard {
   today: string;
   groups: TeamGroup[];
   filters: z.output<typeof teamTaskFiltersSchema>;
+  /** More tasks matched than `limit`: groups and counts cover only the first `limit` of them. */
+  capped: boolean;
+  limit: number;
 }
 
 const emptyCounts = (): TeamCounts => ({ open: 0, overdue: 0, dueToday: 0, waiting: 0, doneRecent: 0 });
@@ -152,11 +157,15 @@ async function telegramStatuses(ctx: ServiceContext, personIds: string[], userId
 }
 
 /** The Team view: tasks grouped by founder / person, with counts. Founders only. */
-export async function getTeamTasks(ctx: ServiceContext, rawFilters: TeamTaskFilters = {}): Promise<TeamBoard> {
-  return loadBoard(ctx, rawFilters, { keepRecentDone: false });
+export async function getTeamTasks(ctx: ServiceContext, rawFilters: TeamTaskFilters = {}, opts: { limit?: number } = {}): Promise<TeamBoard> {
+  return loadBoard(ctx, rawFilters, { keepRecentDone: false, limit: opts.limit });
 }
 
-async function loadBoard(ctx: ServiceContext, rawFilters: TeamTaskFilters, opts: { keepRecentDone: boolean }): Promise<TeamBoard> {
+async function loadBoard(
+  ctx: ServiceContext,
+  rawFilters: TeamTaskFilters,
+  opts: { keepRecentDone: boolean; limit?: number },
+): Promise<TeamBoard> {
   assertTeamTasksAccess(ctx);
   const f = teamTaskFiltersSchema.parse(rawFilters);
   const todayIso = today(ctx);
@@ -168,11 +177,15 @@ async function loadBoard(ctx: ServiceContext, rawFilters: TeamTaskFilters, opts:
   const scope =
     f.status === "any" ? undefined : or(open, recentDone, f.status === "open" ? undefined : eq(tasks.status, f.status));
 
-  const rows = await queryVisibleTasks(ctx, [
+  const limit = opts.limit ?? TEAM_TASKS_LIMIT;
+  // One more than the limit tells whether anything was left out.
+  const fetched = await queryVisibleTasks(ctx, [
     f.companyId ? eq(tasks.companyId, f.companyId) : undefined,
     assigneeWhere(f.assignee),
     scope,
-  ], 3000);
+  ], limit + 1);
+  const capped = fetched.length > limit;
+  const rows = capped ? fetched.slice(0, limit) : fetched;
 
   // Founders always have a group (when not filtered to someone else).
   const founders = await ctx.db
@@ -253,7 +266,7 @@ async function loadBoard(ctx: ServiceContext, rawFilters: TeamTaskFilters, opts:
   const order = (g: TeamGroup) =>
     g.kind === "user" ? (g.id === ctx.user.id ? 0 : 1) : g.kind === "person" ? 2 : 3;
   list.sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name));
-  return { today: todayIso, groups: list, filters: f };
+  return { today: todayIso, groups: list, filters: f, capped, limit };
 }
 
 async function firstCompanies(ctx: ServiceContext, personIds: string[]): Promise<Map<string, string>> {

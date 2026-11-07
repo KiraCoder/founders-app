@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, like } from "drizzle-orm";
 import { people, personCompanies, projects, taskComments, tasks } from "@/server/db/schema";
 import { handleMcpRequest } from "@/server/http/mcp";
 import { createTask, getTask, listTasks } from "@/server/services/tasks";
@@ -275,5 +275,30 @@ describe("task tools", () => {
     expect(toPerson.isError).toBe(true);
     const toMe = await call(nuraaly, "update_task", { id: todo.id, assignee: "me" });
     expect(toMe.data.assignee).toBe("Nuraaly (founder)");
+  });
+
+  it("list_tasks filters the assignee in SQL: a task behind 500+ others is still found", async () => {
+    const kiwi = t.companyIds["kiwi-go"]!;
+    // 520 open tasks that sort first (earlier deadline), none of them Bakyt's.
+    await t.handle.db.insert(tasks).values(
+      Array.from({ length: 520 }, (_, i) => ({ title: `Filler ${i}`, companyId: kiwi, ownerUserId: t.founders.nuraaly.id, visibility: "shared" as const, dueDate: "2026-10-01" })),
+    );
+    const late = await createTask(t.ctx("nuraaly"), {
+      title: "Gulnara far away",
+      companyId: kiwi,
+      assigneePersonId: ids["Gulnara Sadykova"],
+      dueDate: "2027-06-01",
+    });
+    const res = await call(nuraaly, "list_tasks", { assignee: "Gulnara Sadykova", limit: 200 });
+    expect(res.data.map((x: { id: string }) => x.id)).toContain(late.id);
+    expect(res.data.every((x: { assignee: string }) => x.assignee === "Gulnara Sadykova")).toBe(true);
+    // The service filter is exact: a founder filter never returns a person's task.
+    const byUser = await listTasks(t.ctx("nuraaly"), { assigneeUserId: t.founders.nuraaly.id, status: "any", limit: 500 });
+    expect(byUser.every((x) => x.assignee?.kind === "user" && x.assignee.id === t.founders.nuraaly.id)).toBe(true);
+    const byPerson = await listTasks(t.ctx("nuraaly"), { assigneePersonId: ids["Gulnara Sadykova"], limit: 500 });
+    expect(byPerson.map((x) => x.id)).toContain(late.id);
+    const all = await call(nuraaly, "list_tasks", { company: "Kiwi Go", limit: 5 });
+    expect(all.text).toMatch(/^500\+ tasks \(showing 5/);
+    await t.handle.db.delete(tasks).where(like(tasks.title, "Filler %"));
   });
 });

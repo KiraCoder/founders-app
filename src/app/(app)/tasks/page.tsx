@@ -1,7 +1,7 @@
 import { NewTaskPanel } from "@/components/tasks/NewTaskPanel";
 import { TaskFilters } from "@/components/tasks/TaskFilters";
 import { TaskList } from "@/components/tasks/TaskList";
-import { TeamBoard } from "@/components/tasks/TeamBoard";
+import { TeamBoard, TeamCapNotice } from "@/components/tasks/TeamBoard";
 import { TeamFilters } from "@/components/tasks/TeamFilters";
 import { toTaskItem } from "@/components/tasks/types";
 import { PageHeader, TabNav } from "@/components/ui";
@@ -127,6 +127,7 @@ async function TeamTasksView({
         <span className="num">{total}</span> {total === 1 ? "task" : "tasks"} · <span className="num">{board.groups.length}</span>{" "}
         {board.groups.length === 1 ? "person" : "people"}
       </p>
+      <TeamCapNotice capped={board.capped} limit={board.limit} />
       <TeamBoard groups={board.groups} today={board.today} options={options} />
     </>
   );

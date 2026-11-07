@@ -58,6 +58,9 @@ export const taskFiltersSchema = z.object({
   view: z.preprocess(blankToNull, z.enum(TASK_VIEWS).nullable().optional()),
   companyId: optionalUuid,
   projectId: optionalUuid,
+  /** Only tasks assigned to this founder / person (exact assignee, not "relevant to"). */
+  assigneeUserId: optionalUuid,
+  assigneePersonId: optionalUuid,
   status: z.preprocess(
     blankToNull,
     z.enum([...TASK_STATUS_VALUES, "open", "any"]).nullable().optional(),
