@@ -38,8 +38,15 @@ export const routineArgs = {
   schedule: z.enum(["weekly", "monthly"]).optional().describe("Default weekly"),
   days: z.array(day).max(7).optional().describe("Weekly: 1=Mon … 7=Sun"),
   month_day: z.number().int().min(1).max(31).optional().describe("Monthly: day 1–31"),
-  time: hm.describe("Ask time HH:MM (Bishkek)"),
-  checklist: z.array(z.string().trim().min(1).max(60)).max(20).optional().describe("Items to tick; empty = one Done button"),
+  time: hm.optional().describe("One ask time HH:MM (or use times)"),
+  times: z.array(hm).min(1).max(6).optional().describe("Ask times HH:MM (Bishkek), e.g. [\"10:00\",\"16:00\"]"),
+  starts_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional().describe("YYYY-MM-DD"),
+  ends_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional().describe("YYYY-MM-DD; stops after"),
+  checklist: z
+    .array(z.union([z.string().trim().min(1).max(60), z.object({ label: z.string().trim().min(1).max(60), details: z.string().max(500).optional() })]))
+    .max(20)
+    .optional()
+    .describe("Items to tick (text or {label,details}); empty = one Done button"),
   description: z.string().max(2000).optional(),
   chase_every: z.number().int().min(15).max(1440).optional().describe("Reminder every N min"),
   chase_until: hm.optional().describe("No reminders after HH:MM"),
@@ -53,8 +60,25 @@ export type RoutineUpdateArgs = Partial<RoutineArgs>;
 
 const pad = (t: string) => (t.length === 4 ? `0${t}` : t);
 
+/** What this adapter builds (the service parses it with routineInputSchema, whose input type is `unknown`). */
+export interface AssistantRoutineInput {
+  title: string;
+  description: string;
+  companyId: string | null;
+  assignee: string;
+  scheduleKind: "weekly" | "monthly";
+  days: number[];
+  monthDay?: number;
+  times: string[];
+  startsOn?: string;
+  endsOn?: string;
+  confirmation: "button" | "checklist";
+  items: { label: string; details?: string }[];
+  chase: Record<string, unknown>;
+}
+
 export interface ResolvedRoutine {
-  input: RoutineInput;
+  input: AssistantRoutineInput & RoutineInput;
   who: string;
   companyName: string | null;
 }
@@ -81,7 +105,9 @@ export async function toRoutineInput(ctx: ServiceContext, a: RoutineArgs): Promi
   const kind = a.schedule ?? (a.month_day && !a.days?.length ? "monthly" : "weekly");
   if (kind === "weekly" && !a.days?.length) throw new ServiceError("validation", "Which days? (1=Mon … 7=Sun)");
   if (kind === "monthly" && !a.month_day) throw new ServiceError("validation", "Which day of the month?");
-  const items = a.checklist ?? [];
+  const askTimes = [...new Set((a.times?.length ? a.times : a.time ? [a.time] : []).map(pad))].sort();
+  if (!askTimes.length) throw new ServiceError("validation", "At what time should the bot ask? (HH:MM)");
+  const items = (a.checklist ?? []).map((x) => (typeof x === "string" ? { label: x } : x));
   const chase: Record<string, unknown> = {};
   if (a.chase_every !== undefined) chase.chaseEveryMinutes = a.chase_every;
   if (a.chase_until !== undefined) chase.chaseUntil = pad(a.chase_until);
@@ -97,10 +123,12 @@ export async function toRoutineInput(ctx: ServiceContext, a: RoutineArgs): Promi
       scheduleKind: kind,
       days: kind === "weekly" ? [...new Set(a.days)].sort() : [],
       monthDay: kind === "monthly" ? a.month_day : undefined,
-      time: pad(a.time),
+      times: askTimes,
+      startsOn: a.starts_on ?? undefined,
+      endsOn: a.ends_on ?? undefined,
       confirmation: items.length ? "checklist" : "button",
       items,
-      chase: chase as RoutineInput["chase"],
+      chase,
     },
   };
 }
@@ -116,8 +144,10 @@ export function currentArgs(v: RoutineView): RoutineArgs {
     schedule: r.scheduleKind === "monthly" ? "monthly" : "weekly",
     days: r.days ?? [],
     month_day: r.monthDay ?? undefined,
-    time: r.time,
-    checklist: r.confirmation === "checklist" ? r.items.map((i) => i.label) : [],
+    times: r.times?.length ? r.times : [r.time],
+    starts_on: r.startsOn ?? null,
+    ends_on: r.endsOn ?? null,
+    checklist: r.confirmation === "checklist" ? r.items.map((i) => (i.details ? { label: i.label, details: i.details } : i.label)) : [],
     description: r.description,
     chase_every: o.chaseEveryMinutes,
     chase_until: o.chaseUntil,
@@ -130,21 +160,23 @@ export function routinePreview(r: ResolvedRoutine): PreviewField[] {
   const i = r.input;
   const schedule =
     i.scheduleKind === "monthly"
-      ? describeSchedule({ kind: "monthly", monthDay: Number(i.monthDay ?? 1), time: i.time })
-      : describeSchedule({ kind: "weekly", days: (i.days as number[]) ?? [], time: i.time });
+      ? describeSchedule({ kind: "monthly", monthDay: Number(i.monthDay ?? 1), time: i.times[0] ?? "", times: i.times })
+      : describeSchedule({ kind: "weekly", days: (i.days as number[]) ?? [], time: i.times[0] ?? "", times: i.times });
   const c = (i.chase ?? {}) as Record<string, unknown>;
   const chase = [
     c.chaseEveryMinutes ? `every ${c.chaseEveryMinutes} min` : null,
     c.chaseUntil ? `until ${c.chaseUntil}` : null,
     c.escalateAt === null ? "no escalation" : c.escalateAt ? `escalate at ${c.escalateAt}` : null,
   ].filter(Boolean);
-  const items = (i.items as string[]) ?? [];
+  const items = ((i.items ?? []) as { label: string; details?: string }[]).map((x) => (x.details ? `${x.label} — ${x.details}` : x.label));
+  const times = ((i.times as string[] | undefined) ?? []).join(", ");
   return [
     { label: "Routine", value: i.title },
     { label: "Who", value: r.who },
     { label: "Company", value: r.companyName ?? "—" },
     { label: "Days", value: schedule.replace(/,?\s\d{2}:\d{2}$/, "") || schedule },
-    { label: "Time", value: i.time },
+    { label: "Times", value: times },
+    ...(i.startsOn || i.endsOn ? [{ label: "Dates", value: `${i.startsOn ?? "now"} → ${i.endsOn ?? "no end"}` }] : []),
     { label: "Checklist", value: items.length ? items.map((x) => `☐ ${x}`).join("\n") : "One “Done” button" },
     { label: "Chase", value: chase.length ? chase.join(", ") : "Default reminders" },
   ];

@@ -138,7 +138,7 @@ describe("confirm before write", () => {
     expect(res.messages.at(-1)!.text).toMatch(/Проверьте карточку/);
     expect(card).toMatchObject({ title: "New routine", confirm: "Create", status: "pending" });
     const fields = Object.fromEntries(card.fields.map((x) => [x.label, x.value]));
-    expect(fields).toMatchObject({ Who: "Asan Usupov", Company: "Kiwi Go", Days: "Mon–Sat", Time: "15:00" });
+    expect(fields).toMatchObject({ Who: "Asan Usupov", Company: "Kiwi Go", Days: "Mon–Sat", Times: "15:00" });
     expect(fields.Checklist).toContain("Upsell");
     expect(card.token).toBeTruthy();
     expect((await t.handle.db.select().from(routines)).length).toBe(before);
