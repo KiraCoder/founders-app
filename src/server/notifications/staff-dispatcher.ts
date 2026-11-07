@@ -9,7 +9,8 @@ import { loadStaffDefaults } from "@/server/services/staff";
 import { mintActionTokens } from "./action-tokens";
 import type { ChannelRegistry } from "./channels";
 import { getLinkForPerson } from "./linking";
-import { buildStaffGroupedChase, buildStaffInfo, buildStaffMorningList, buildStaffNewTask, type StaffTaskLite } from "./messages-ru";
+import { loadRoutineForMessage, markRoutineMessageSent } from "./routine-planner";
+import { buildRoutineMessageRu, buildStaffGroupedChase, buildStaffInfo, buildStaffMorningList, buildStaffNewTask, type StaffTaskLite } from "./messages-ru";
 import { fitTelegram } from "./render-telegram";
 import { taskRef, type NeutralMessage } from "./types";
 
@@ -95,6 +96,21 @@ export async function processPersonItem(
     const text = (item.payload as { text?: string }).text;
     if (!text) return cancel("nothing_to_send");
     message = buildStaffInfo(text);
+  } else if (item.kind === "staff_routine") {
+    const loaded = await loadRoutineForMessage(db, item, { personId: person.id });
+    if ("skip" in loaded) return cancel(loaded.skip);
+    const { routine, run } = loaded;
+    message = buildRoutineMessageRu(
+      {
+        runId: run.id,
+        title: routine.title,
+        description: routine.description,
+        confirmation: routine.confirmation as "button" | "checklist",
+        items: run.items,
+        itemsDone: run.itemsDone,
+      },
+      loaded.reminder,
+    );
   } else {
     return cancel("unknown_kind");
   }
@@ -154,6 +170,7 @@ export async function processPersonItem(
           }
         : {}),
     });
+    if (item.kind === "staff_routine") await markRoutineMessageSent(db, item, now);
     report.sent++;
   } else if (result.permanent || attempts >= opts.maxAttempts) {
     await finish({ status: "failed", attempts, lastError: result.error ?? "error", channel: channel.name, nextAttemptAt: null });

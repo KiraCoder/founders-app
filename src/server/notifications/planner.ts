@@ -41,6 +41,7 @@ import { makeContext } from "@/server/services/context";
 import { planHoldingAsks } from "@/server/services/holding-asks";
 import { getTodaySummary } from "@/server/services/tasks";
 import { listFounders } from "./founders";
+import { planRoutinesTick, type RoutinePlanReport } from "./routine-planner";
 import { taskTouchKey } from "./types";
 import { enqueue, enqueueForPerson, type EnqueueInput, type PersonEnqueueInput } from "./outbox";
 import { loadPreferences, type Preferences } from "./preferences";
@@ -449,6 +450,8 @@ export interface PlanReport {
   created: number;
   /** Staff on Telegram: messages queued for people and escalations to founders. */
   staff?: { planned: number; created: number; escalated: number };
+  /** Routines: runs opened, messages queued, escalations, runs closed. */
+  routines?: RoutinePlanReport;
   /** "Ask Elmurat" items created (one per founder per round). */
   holdingCreated?: number;
 }
@@ -497,6 +500,12 @@ export async function planTick(db: Db, now: Date, opts: PlanOptions = {}): Promi
     } catch (err) {
       console.error("[planner] staff planning failed", err);
     }
+  }
+  // Routines (staff and founders). A failure here must not stop the reminders.
+  try {
+    report.routines = await planRoutinesTick(db, now, { persons: opts.staff !== false, userIds: opts.userIds });
+  } catch (err) {
+    console.error("[planner] routines failed", err);
   }
   // Holding: the monthly "ask Elmurat" item and the weekly reminder (shown inside the
   // morning summary, never as a separate push). A failure here must not stop the reminders.

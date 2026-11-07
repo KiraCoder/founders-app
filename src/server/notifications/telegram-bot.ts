@@ -24,7 +24,14 @@ import {
 } from "@/server/services/staff-tasks";
 import { decideDeadlineRequest } from "@/server/services/task-comments";
 import { getTodaySummary } from "@/server/services/tasks";
-import { consumeActionToken, consumePersonActionToken, liveCallbacks, mintActionTokens, type ConsumedStaffAction } from "./action-tokens";
+import {
+  consumeActionToken,
+  consumePersonActionToken,
+  liveCallbacks,
+  mintActionTokens,
+  type ConsumedRoutineAction,
+  type ConsumedStaffAction,
+} from "./action-tokens";
 import { consumeLinkCode, findLinkByChat, findPersonLinkByChat, setPersonLinkStopped } from "./linking";
 import { buildHelp, buildMorningSummary, buildNotLinked, buildTasksList } from "./messages";
 import {
@@ -32,11 +39,14 @@ import {
   buildStaffHelp,
   buildStaffTaskList,
   buildStaffWelcome,
+  buildRoutineMessageRu,
   buildWhichTask,
   MOVE_DAYS,
   RU,
+  RU_ROUTINE,
   ruDate,
 } from "./messages-ru";
+import { listOpenRunsForPerson, tickRoutineRun, type TickActor } from "@/server/services/routines";
 import { escapeHtml, renderTelegram } from "./render-telegram";
 import { TelegramApi, type TelegramMessage, type TelegramUpdate } from "./telegram-api";
 import type { NeutralMessage } from "./types";
@@ -189,6 +199,25 @@ async function handlePersonMessage(
       return [reply(chatId, buildStaffHelp())];
     case "/tasks":
       return [await withButtons(pctx, chatId, buildStaffTaskList(await listPersonOpenTasks(pctx), today(pctx)))];
+    case "/routines": {
+      // Today's open runs, each with its buttons (a checklist shows only what is not ticked yet).
+      const runs = await listOpenRunsForPerson(pctx.db, pctx.person.id, pctx.now);
+      if (!runs.length) return [plain(chatId, "Рутины", RU_ROUTINE.none)];
+      const out: BotAction[] = [];
+      for (const { routine, run } of runs) {
+        out.push(
+          await withButtons(
+            pctx,
+            chatId,
+            buildRoutineMessageRu(
+              { runId: run.id, title: routine.title, description: routine.description, confirmation: routine.confirmation as "checklist", items: run.items, itemsDone: run.itemsDone },
+              run.itemsDone.length > 0,
+            ),
+          ),
+        );
+      }
+      return out;
+    }
     case "/stop":
       await setPersonLinkStopped(pctx.db, link.id, pctx.now);
       await pctx.db
@@ -262,6 +291,10 @@ async function handleCallback(
   const token = await consumeActionToken(db, cq.data, link.user.id, now);
   if (!token) return [answer("This button has expired or was already used.")];
 
+  if (token.kind === "routine") {
+    return routineCallback(db, cq, { userId: link.user.id }, token, now, answer, false);
+  }
+
   let result: string;
   try {
     const ctx = makeContext(db, link.user, now);
@@ -296,8 +329,10 @@ async function handlePersonCallback(
   cq: NonNullable<TelegramUpdate["callback_query"]>,
   answer: (text: string) => BotAction,
 ): Promise<BotAction[]> {
-  const token: ConsumedStaffAction | null = await consumePersonActionToken(pctx.db, cq.data!, pctx.person.id, pctx.now);
-  if (!token) return [answer(RU.buttonExpired)];
+  const consumed = await consumePersonActionToken(pctx.db, cq.data!, pctx.person.id, pctx.now);
+  if (!consumed) return [answer(RU.buttonExpired)];
+  if (consumed.kind === "routine") return routineCallback(pctx.db, cq, { personId: pctx.person.id }, consumed, pctx.now, answer, true);
+  const token: ConsumedStaffAction = consumed;
   const chatId = cq.message!.chat.id;
   const extra: BotAction[] = [];
   let result: string;
@@ -386,7 +421,59 @@ function editAction(chatId: number, message: TelegramMessage, result: string, ke
 }
 
 type Button = { text: string; callback_data: string };
-type Live = { taskId: string | null; holdingAskId: string | null; deadlineRequestId: string | null };
+type Live = { taskId: string | null; holdingAskId: string | null; deadlineRequestId: string | null; routineRunId: string | null };
+
+/**
+ * A routine button (founder or person): ticks one item or the whole run, as the routine's assignee
+ * only (another person's or a forged token never gets here: tokens are bound to their owner, and
+ * tickRoutineRun re-checks the assignee). The message keeps the buttons of items still open.
+ */
+async function routineCallback(
+  db: Db,
+  cq: NonNullable<TelegramUpdate["callback_query"]>,
+  actor: TickActor,
+  token: ConsumedRoutineAction,
+  now: Date,
+  answer: (text: string) => BotAction,
+  russian: boolean,
+): Promise<BotAction[]> {
+  let result: string;
+  let done = false;
+  try {
+    const r = await tickRoutineRun(db, token.runId, actor, token.action === "routine_tick" ? token.item : null, now);
+    done = r.status === "done" || r.status === "closed" || (r.status === "already" && r.run.status === "done");
+    if (russian) {
+      result =
+        r.status === "done"
+          ? RU_ROUTINE.done
+          : r.status === "closed"
+            ? RU_ROUTINE.closed
+            : r.status === "already"
+              ? RU_ROUTINE.already
+              : RU_ROUTINE.ticked(r.label ?? "", r.remaining.length);
+    } else {
+      result =
+        r.status === "done"
+          ? "Routine done ✓"
+          : r.status === "closed"
+            ? "Today's run is already closed"
+            : r.status === "already"
+              ? "Already ticked"
+              : `✓ ${r.label}. ${r.remaining.length} left`;
+    }
+  } catch (err) {
+    const se = toServiceError(err);
+    if (!se) throw err;
+    return [answer(se.code === "not_found" ? (russian ? RU_ROUTINE.notYours : "Not found.") : se.message)];
+  }
+  const actions: BotAction[] = [answer(result)];
+  if (cq.message) {
+    const owner = "personId" in actor ? { personId: actor.personId } : actor.userId;
+    const keyboard = done ? [] : await remainingKeyboard(db, cq.message, cq.data!, () => false, owner, now);
+    actions.push(editAction(cq.message.chat.id, cq.message, result, keyboard));
+  }
+  return actions;
+}
 
 async function remainingKeyboard(
   db: Db,

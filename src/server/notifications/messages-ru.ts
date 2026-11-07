@@ -201,6 +201,7 @@ export function buildStaffHelp(): NeutralMessage {
     title: "Что умеет бот",
     lines: [
       { text: "/tasks — ваши открытые задачи", style: "text" },
+      { text: "/routines — рутины на сегодня (что ещё не отмечено)", style: "text" },
       { text: "/done 2 — отметить задачу №2 из списка выполненной", style: "text" },
       { text: "/stop — больше не присылать сообщения", style: "text" },
       { text: "Кнопки под задачами: Принято, Готово, Нужна помощь, Перенести срок.", style: "muted" },
@@ -233,4 +234,66 @@ export const RU = {
   moveRequested: (date: string) => `Запрос на перенос срока до ${date} отправлен. Основатель подтвердит.`,
   doneNotFound: "Нет задачи с таким номером. Отправьте /tasks, чтобы увидеть список.",
   noDeadlineMove: "Перенести можно только открытую задачу.",
+} as const;
+
+// ---------------------------------------------------------------------------
+// Routines (0029)
+// ---------------------------------------------------------------------------
+
+/** What a routine message needs (no DB): the routine and today's run state. */
+export interface RoutineMessageInput {
+  runId: string;
+  title: string;
+  description: string;
+  confirmation: "button" | "checklist" | "number";
+  items: readonly { key: string; label: string }[];
+  itemsDone: readonly string[];
+}
+
+/** Labels of checklist items not ticked yet. */
+export function remainingItems(r: Pick<RoutineMessageInput, "items" | "itemsDone">) {
+  const done = new Set(r.itemsDone);
+  return r.items.filter((i) => !done.has(i.key));
+}
+
+/**
+ * The ask (`reminder` = false) or a reminder about today's run. A checklist shows ONLY the items not
+ * ticked yet, one «✓ item» button each (two per row), plus «✓ Всё сделано» when more than one is left.
+ * A button routine has one «Готово».
+ */
+export function buildRoutineMessageRu(r: RoutineMessageInput, reminder: boolean): NeutralMessage {
+  const lines: MessageLine[] = [];
+  if (r.description) lines.push({ text: r.description, style: "text" });
+  if (r.confirmation === "checklist") {
+    const left = remainingItems(r);
+    lines.push({
+      text: reminder && r.itemsDone.length ? `Осталось отметить (${left.length} из ${r.items.length}):` : "Отметьте, что сделано:",
+      style: "muted",
+    });
+    for (const i of left) lines.push({ text: i.label, style: "item" });
+    const actions: MessageAction[] = left.map((i, n) => ({
+      action: "routine_tick" as const,
+      runId: r.runId,
+      item: i.key,
+      label: `✓ ${i.label}`,
+      row: Math.floor(n / 2),
+    }));
+    if (left.length > 1) actions.push({ action: "routine_done", runId: r.runId, label: "✓ Всё сделано", row: 100 });
+    return { title: `${reminder ? "Напоминание" : "Рутина"}: ${r.title}`, lines, actions };
+  }
+  lines.push({ text: "Нажмите «Готово», когда сделаете.", style: "muted" });
+  return {
+    title: `${reminder ? "Напоминание" : "Рутина"}: ${r.title}`,
+    lines,
+    actions: [{ action: "routine_done", runId: r.runId, label: "Готово" }],
+  };
+}
+
+export const RU_ROUTINE = {
+  none: "Сегодня открытых рутин нет. Спасибо!",
+  ticked: (label: string, left: number) => (left ? `✓ ${label}. Осталось: ${left}` : `✓ ${label}`),
+  done: "Рутина выполнена ✓ Спасибо!",
+  already: "Уже отмечено.",
+  closed: "Эта рутина на сегодня уже закрыта.",
+  notYours: "Эта рутина вам недоступна.",
 } as const;

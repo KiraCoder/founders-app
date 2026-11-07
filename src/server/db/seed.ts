@@ -15,6 +15,7 @@ import { ORG_SEED } from "@/lib/org";
 import { isPayLikeMetric } from "@/server/ai/narrative";
 import { defaultAskPersonId } from "./ask-person";
 import { createChartFromTemplate } from "./org-charts";
+import { ensureExampleRoutine } from "./example-routines";
 import type { Db } from "./connect";
 import {
   aiRoleTemplates,
@@ -277,6 +278,9 @@ async function seedInTransaction(db: Db, hash: string, options: SeedOptions): Pr
 
   // --- Holding: the known intercompany flows (only missing ones are added) ------
   await seedIntercompanyFlows(db, companyIds, { sampleSince: options.withSamples === true ? SAMPLE_FLOW_SINCE : null });
+
+  // --- Routines: the founder's first routine (Elmurat — daily 1C entries), once, if absent --
+  await ensureExampleRoutine(db, options.now ?? new Date());
 
   // --- Samples ---------------------------------------------------------------
   if (options.withSamples === true) {

@@ -7,12 +7,14 @@ import {
   actionKey,
   DEADLINE_ACTIONS,
   HOLDING_ACTIONS,
+  ROUTINE_ACTIONS,
   STAFF_ACTIONS,
   TASK_ACTIONS,
   type ActionCallbacks,
   type DeadlineAction,
   type HoldingAction,
   type MessageAction,
+  type RoutineAction,
   type StaffAction,
   type TaskAction,
 } from "./types";
@@ -42,8 +44,9 @@ export async function mintActionTokens(
       taskId: a.taskId ?? null,
       holdingAskId: a.askId ?? null,
       deadlineRequestId: a.requestId ?? null,
+      routineRunId: a.runId ?? null,
       action: a.action,
-      payload: a.payload ?? null,
+      payload: a.payload ?? ((a as { item?: string }).item ? { item: (a as { item?: string }).item } : null),
       outboxId: opts.outboxId,
       expiresAt,
     };
@@ -52,7 +55,22 @@ export async function mintActionTokens(
   return callbacks;
 }
 
+/** A routine button (founder or person): the run and, for routine_tick, the checklist item key. */
+export interface ConsumedRoutineAction {
+  kind: "routine";
+  runId: string;
+  action: RoutineAction;
+  item: string | null;
+}
+
+function routineOf(row: { routineRunId: string | null; action: string; payload: Record<string, unknown> | null }): ConsumedRoutineAction | null {
+  if (!row.routineRunId || !(ROUTINE_ACTIONS as readonly string[]).includes(row.action)) return null;
+  const item = typeof row.payload?.item === "string" ? row.payload.item : null;
+  return { kind: "routine", runId: row.routineRunId, action: row.action as RoutineAction, item };
+}
+
 export type ConsumedAction =
+  | ConsumedRoutineAction
   | { kind: "task"; taskId: string; action: TaskAction }
   | { kind: "holding"; askId: string; action: HoldingAction }
   | { kind: "deadline"; requestId: string; action: DeadlineAction };
@@ -79,7 +97,7 @@ export async function consumePersonActionToken(
   callbackData: string,
   personId: string,
   now: Date,
-): Promise<ConsumedStaffAction | null> {
+): Promise<ConsumedStaffAction | ConsumedRoutineAction | null> {
   const token = parseCallback(callbackData);
   if (!token) return null;
   const [row] = await db
@@ -93,8 +111,16 @@ export async function consumePersonActionToken(
         gt(notificationActionTokens.expiresAt, now),
       ),
     )
-    .returning({ taskId: notificationActionTokens.taskId, action: notificationActionTokens.action, payload: notificationActionTokens.payload });
-  if (!row?.taskId || !(STAFF_ACTIONS as readonly string[]).includes(row.action)) return null;
+    .returning({
+      taskId: notificationActionTokens.taskId,
+      routineRunId: notificationActionTokens.routineRunId,
+      action: notificationActionTokens.action,
+      payload: notificationActionTokens.payload,
+    });
+  if (!row) return null;
+  const routine = routineOf(row);
+  if (routine) return routine;
+  if (!row.taskId || !(STAFF_ACTIONS as readonly string[]).includes(row.action)) return null;
   return { kind: "staff", taskId: row.taskId, action: row.action as StaffAction, payload: row.payload ?? {} };
 }
 
@@ -126,9 +152,13 @@ export async function consumeActionToken(
       taskId: notificationActionTokens.taskId,
       holdingAskId: notificationActionTokens.holdingAskId,
       deadlineRequestId: notificationActionTokens.deadlineRequestId,
+      routineRunId: notificationActionTokens.routineRunId,
       action: notificationActionTokens.action,
+      payload: notificationActionTokens.payload,
     });
   if (!row) return null;
+  const routine = routineOf(row);
+  if (routine) return routine;
   if (row.deadlineRequestId && (DEADLINE_ACTIONS as readonly string[]).includes(row.action)) {
     return { kind: "deadline", requestId: row.deadlineRequestId, action: row.action as DeadlineAction };
   }
@@ -150,7 +180,7 @@ export async function liveCallbacks(
   callbackDatas: readonly string[],
   owner: string | { personId: string },
   now: Date,
-): Promise<Map<string, { taskId: string | null; holdingAskId: string | null; deadlineRequestId: string | null }>> {
+): Promise<Map<string, { taskId: string | null; holdingAskId: string | null; deadlineRequestId: string | null; routineRunId: string | null }>> {
   const ownerWhere =
     typeof owner === "string" ? eq(notificationActionTokens.userId, owner) : eq(notificationActionTokens.personId, owner.personId);
   const byHash = new Map<string, string>();
@@ -166,6 +196,7 @@ export async function liveCallbacks(
       taskId: notificationActionTokens.taskId,
       holdingAskId: notificationActionTokens.holdingAskId,
       deadlineRequestId: notificationActionTokens.deadlineRequestId,
+      routineRunId: notificationActionTokens.routineRunId,
     })
     .from(notificationActionTokens)
     .where(
@@ -177,6 +208,9 @@ export async function liveCallbacks(
       ),
     );
   return new Map(
-    rows.map((r) => [byHash.get(r.tokenHash)!, { taskId: r.taskId, holdingAskId: r.holdingAskId, deadlineRequestId: r.deadlineRequestId }]),
+    rows.map((r) => [
+      byHash.get(r.tokenHash)!,
+      { taskId: r.taskId, holdingAskId: r.holdingAskId, deadlineRequestId: r.deadlineRequestId, routineRunId: r.routineRunId },
+    ]),
   );
 }

@@ -566,6 +566,8 @@ export const notificationActionTokens = pgTable(
     holdingAskId: uuid("holding_ask_id").references((): AnyPgColumn => holdingAskItems.id, { onDelete: "cascade" }),
     /** A founder's Approve / Decline on a person's deadline request (0028). */
     deadlineRequestId: uuid("deadline_request_id").references((): AnyPgColumn => taskDeadlineRequests.id, { onDelete: "cascade" }),
+    /** A routine run a "✓ item" / "Готово" button ticks (0029); the item key is in payload. */
+    routineRunId: uuid("routine_run_id").references((): AnyPgColumn => routineRuns.id, { onDelete: "cascade" }),
     /** "done" | "snooze_1d" | "move_1d" | "move_3d" | "holding_asked" | staff actions (see types.ts) */
     action: text("action").notNull(),
     /** Small server-side data for the action (e.g. the text a "К какой задаче?" button attaches). */
@@ -580,7 +582,7 @@ export const notificationActionTokens = pgTable(
     index("notification_action_tokens_person_idx").on(t.personId),
     check(
       "notification_action_tokens_subject",
-      sql`${t.taskId} is not null or ${t.holdingAskId} is not null or ${t.deadlineRequestId} is not null`,
+      sql`${t.taskId} is not null or ${t.holdingAskId} is not null or ${t.deadlineRequestId} is not null or ${t.routineRunId} is not null`,
     ),
     check("notification_action_tokens_one_owner", sql`(${t.userId} is null) <> (${t.personId} is null)`),
   ],
@@ -655,6 +657,88 @@ export const appSettings = pgTable("app_settings", {
   updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: updatedAt(),
 });
+
+// ---------------------------------------------------------------------------
+// Routines (0029): recurring jobs assigned to a person (staff, on Telegram) or a founder.
+// Read and written only through services/routines.ts (founders only); the bot acts for a person
+// only on runs of routines assigned to them.
+// ---------------------------------------------------------------------------
+export const routines = pgTable(
+  "routines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** The company it is for, or null for group-wide work (e.g. 1C entries for all companies). */
+    companyId: uuid("company_id").references(() => companies.id, { onDelete: "set null" }),
+    title: text("title").notNull(),
+    description: text("description").notNull().default(""),
+    /** Exactly one assignee: a person (staff, via Telegram) or a founder (users). */
+    assigneePersonId: uuid("assignee_person_id").references(() => people.id, { onDelete: "cascade" }),
+    assigneeUserId: uuid("assignee_user_id").references(() => users.id, { onDelete: "cascade" }),
+    /** "weekly" (days of week 1 = Mon … 7 = Sun) | "monthly" (month_day; 31 = the last day of shorter months). */
+    scheduleKind: text("schedule_kind").notNull().default("weekly"),
+    days: integer("days").array(),
+    monthDay: integer("month_day"),
+    /** Local time of the ask, "HH:MM". */
+    time: text("time").notNull(),
+    timezone: text("timezone").notNull().default("Asia/Bishkek"),
+    /** "button" | "checklist" | "number" (later). */
+    confirmation: text("confirmation").notNull().default("button"),
+    /** Checklist items [{ key, label }] (keys stay stable when labels are edited). */
+    items: jsonb("items").$type<{ key: string; label: string }[]>().notNull().default([]),
+    /** Chase override (src/lib/routines.ts RoutineChaseOverride); null = the person's / global defaults. */
+    chase: jsonb("chase").$type<Record<string, unknown>>(),
+    /** "active" | "paused" | "archived" */
+    status: text("status").notNull().default("active"),
+    /** Seeded examples ("elmurat-1c"): created once, only if absent. */
+    seedKey: text("seed_key").unique(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("routines_company_idx").on(t.companyId),
+    index("routines_person_idx").on(t.assigneePersonId),
+    check("routines_one_assignee", sql`(${t.assigneePersonId} is null) <> (${t.assigneeUserId} is null)`),
+    check("routines_schedule_kind_ck", sql`${t.scheduleKind} in ('weekly', 'monthly')`),
+    check("routines_confirmation_ck", sql`${t.confirmation} in ('button', 'checklist', 'number')`),
+    check("routines_status_ck", sql`${t.status} in ('active', 'paused', 'archived')`),
+    check("routines_month_day_ck", sql`${t.monthDay} is null or ${t.monthDay} between 1 and 31`),
+  ],
+);
+
+/** One day of a routine: opened at the ask time, ticked by the assignee, closed at the day's end. */
+export const routineRuns = pgTable(
+  "routine_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    routineId: uuid("routine_id")
+      .notNull()
+      .references(() => routines.id, { onDelete: "cascade" }),
+    runDate: date("run_date", { mode: "string" }).notNull(),
+    /** "open" | "escalated" | "done" | "partly" | "missed" */
+    status: text("status").notNull().default("open"),
+    /** The checklist as it was when the run opened. */
+    items: jsonb("items").$type<{ key: string; label: string }[]>().notNull().default([]),
+    /** Keys of the ticked items. */
+    itemsDone: jsonb("items_done").$type<string[]>().notNull().default([]),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    doneAt: timestamp("done_at", { withTimezone: true }),
+    lastChasedAt: timestamp("last_chased_at", { withTimezone: true }),
+    chaseCount: integer("chase_count").notNull().default(0),
+    escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("routine_runs_routine_day_uq").on(t.routineId, t.runDate),
+    index("routine_runs_status_idx").on(t.status, t.runDate),
+    check("routine_runs_status_ck", sql`${t.status} in ('open', 'escalated', 'done', 'partly', 'missed')`),
+  ],
+);
+
+export type Routine = typeof routines.$inferSelect;
+export type RoutineRun = typeof routineRuns.$inferSelect;
 
 /** "Snooze 1 day": no reminders/chases for this task to this user until `snoozedUntil`. */
 export const reminderSnoozes = pgTable(

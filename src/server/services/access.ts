@@ -257,3 +257,20 @@ export function staffTasksWhere(pctx: PersonContext): SQL {
     inArray(tasks.companyId, pctx.db.select({ id: companies.id }).from(companies).where(isNull(companies.archivedAt))),
   )!;
 }
+
+// ---------------------------------------------------------------------------
+// Routines (0029)
+// ---------------------------------------------------------------------------
+
+/**
+ * Routine rule: creating, editing, pausing, archiving, running and reading routines and their
+ * history is founders-only. A person (staff) reaches routines only through the bot, and only runs
+ * of routines assigned to them (services/routines.ts `tickRoutineRun` checks the assignee).
+ */
+export function canManageRoutines(ctx: ServiceContext): boolean {
+  return ctx.user.role === "founder";
+}
+
+export function assertRoutineAccess(ctx: ServiceContext): void {
+  if (!canManageRoutines(ctx)) throw new ServiceError("forbidden", "Only the founders can manage routines");
+}

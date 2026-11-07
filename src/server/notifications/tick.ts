@@ -7,6 +7,7 @@ import { cleanupUnattachedFiles } from "@/server/services/holding-files";
 import type { ChannelRegistry } from "./channels";
 import { dispatch, type DispatchReport } from "./dispatcher";
 import { planStaffTick, planTick, type PlanReport } from "./planner";
+import { planRoutinesTick } from "./routine-planner";
 
 export interface TickReport {
   now: string;
@@ -55,6 +56,7 @@ export async function runStaffDevTick(db: Db, now: Date, opts: { registry: Chann
   }
   const timeZone = process.env.APP_TIMEZONE || "Asia/Bishkek";
   const plan = await planStaffTick(db, now, timeZone);
+  const routines = await planRoutinesTick(db, now, { founders: false });
   const sent = await dispatch(db, now, { registry: opts.registry, onlyStaff: true, timeZone });
-  return { now: now.toISOString(), plan, dispatch: sent };
+  return { now: now.toISOString(), plan, routines, dispatch: sent };
 }

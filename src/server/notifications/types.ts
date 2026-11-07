@@ -27,6 +27,10 @@ export const NOTIFICATION_KINDS = [
   "staff_chase",
   "staff_morning_list",
   "staff_info",
+  /** Routines (0029): the ask / a reminder about today's run, to the person (staff) … */
+  "staff_routine",
+  /** … or to the founder the routine is assigned to (normal founder rules: budget, quiet hours). */
+  "routine_reminder",
 ] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
@@ -50,10 +54,12 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   staff_chase: "Staff · reminder",
   staff_morning_list: "Staff · morning list",
   staff_info: "Staff · info",
+  staff_routine: "Staff · routine",
+  routine_reminder: "Routine",
 };
 
 /** Kinds that go to a person (people row) instead of a founder. */
-export const PERSON_KINDS = ["staff_new_task", "staff_chase", "staff_morning_list", "staff_info"] as const;
+export const PERSON_KINDS = ["staff_new_task", "staff_chase", "staff_morning_list", "staff_info", "staff_routine"] as const;
 export type PersonKind = (typeof PERSON_KINDS)[number];
 
 /** Actions a founder can take straight from a task notification. */
@@ -107,6 +113,10 @@ export const STAFF_ACTIONS = [
 ] as const;
 export type StaffAction = (typeof STAFF_ACTIONS)[number];
 
+/** Routine buttons: tick one checklist item (`item` = its key) or the whole run ("Готово" / "✓ Всё сделано"). */
+export const ROUTINE_ACTIONS = ["routine_tick", "routine_done"] as const;
+export type RoutineAction = (typeof ROUTINE_ACTIONS)[number];
+
 /** A founder's one tap on a person's "Перенести срок" request. */
 export const DEADLINE_ACTIONS = ["deadline_approve", "deadline_decline"] as const;
 export type DeadlineAction = (typeof DEADLINE_ACTIONS)[number];
@@ -119,17 +129,31 @@ export type MessageAction =
       taskId: string;
       askId?: undefined;
       requestId?: undefined;
+      runId?: undefined;
       row?: number;
       /** Server-side data stored with the button's token (never sent to Telegram). */
       payload?: Record<string, unknown>;
     }
-  | { label: string; action: HoldingAction; askId: string; taskId?: undefined; requestId?: undefined; row?: number; payload?: undefined }
+  | { label: string; action: HoldingAction; askId: string; taskId?: undefined; requestId?: undefined; runId?: undefined; row?: number; payload?: undefined }
   | {
       label: string;
       action: DeadlineAction;
       requestId: string;
       taskId?: undefined;
       askId?: undefined;
+      runId?: undefined;
+      row?: number;
+      payload?: undefined;
+    }
+  | {
+      label: string;
+      action: RoutineAction;
+      runId: string;
+      /** Checklist item key (routine_tick). */
+      item?: string;
+      taskId?: undefined;
+      askId?: undefined;
+      requestId?: undefined;
       row?: number;
       payload?: undefined;
     };
@@ -168,8 +192,9 @@ export interface NotificationChannel {
 }
 
 /** Key used in ActionCallbacks for one button. */
-export function actionKey(a: { action: string; taskId?: string; askId?: string; requestId?: string }): string {
-  return `${a.action}:${a.taskId ?? a.askId ?? a.requestId}`;
+export function actionKey(a: { action: string; taskId?: string; askId?: string; requestId?: string; runId?: string; item?: string }): string {
+  const base = `${a.action}:${a.taskId ?? a.askId ?? a.requestId ?? a.runId}`;
+  return a.item ? `${base}:${a.item}` : base;
 }
 
 /**

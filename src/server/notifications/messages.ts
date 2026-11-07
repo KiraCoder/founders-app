@@ -357,3 +357,30 @@ export function buildNotLinked(): NeutralMessage {
     ],
   };
 }
+
+/** A founder's own routine (English): the ask or a reminder, only the items not ticked yet. */
+export function buildRoutineMessage(
+  r: {
+    runId: string;
+    title: string;
+    description: string;
+    confirmation: "button" | "checklist" | "number";
+    items: readonly { key: string; label: string }[];
+    itemsDone: readonly string[];
+  },
+  reminder: boolean,
+): NeutralMessage {
+  const done = new Set(r.itemsDone);
+  const left = r.items.filter((i) => !done.has(i.key));
+  const lines: MessageLine[] = r.description ? [{ text: r.description, style: "text" }] : [];
+  const title = `${reminder ? "Reminder" : "Routine"}: ${r.title}`;
+  if (r.confirmation === "checklist") {
+    lines.push({ text: reminder && done.size ? `Still to tick (${left.length} of ${r.items.length}):` : "Tick what is done:", style: "muted" });
+    for (const i of left) lines.push({ text: i.label, style: "item" });
+    const actions: MessageAction[] = left.map((i, n) => ({ action: "routine_tick" as const, runId: r.runId, item: i.key, label: `✓ ${i.label}`, row: Math.floor(n / 2) }));
+    if (left.length > 1) actions.push({ action: "routine_done", runId: r.runId, label: "✓ All done", row: 100 });
+    return { title, lines, actions };
+  }
+  lines.push({ text: "Press Done when it is done.", style: "muted" });
+  return { title, lines, actions: [{ action: "routine_done", runId: r.runId, label: "Done" }] };
+}

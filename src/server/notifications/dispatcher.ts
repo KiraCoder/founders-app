@@ -14,10 +14,11 @@ import { mintActionTokens } from "./action-tokens";
 import { createChannelRegistry, type ChannelRegistry } from "./channels";
 import { getFounder, listFounders } from "./founders";
 import { getLinkForUser } from "./linking";
-import { buildEveningCheck, buildGroupedChase, buildMorningSummary, buildTaskMessage, parkedLine, type ParkedItem } from "./messages";
+import { buildEveningCheck, buildGroupedChase, buildMorningSummary, buildRoutineMessage, buildTaskMessage, parkedLine, type ParkedItem } from "./messages";
 import { loadPreferences, type Preferences } from "./preferences";
 import { fitTelegram } from "./render-telegram";
 import { processPersonItem } from "./staff-dispatcher";
+import { loadRoutineForMessage, markRoutineMessageSent } from "./routine-planner";
 import { loadStaffDefaults } from "@/server/services/staff";
 import { taskDeadlineRequests } from "@/server/db/schema";
 import {
@@ -233,6 +234,19 @@ async function collectParked(ctx: ServiceContext): Promise<{ drop: string[]; ite
       add(`staff:${r.id}`, r.id, () => ({ text: line }));
       continue;
     }
+    if (r.kind === "routine_reminder") {
+      // A parked routine ask / reminder: one line per run, while the run is still open.
+      const loaded = await loadRoutineForMessage(ctx.db, { ...r, scheduledFor: new Date(8.64e15) }, { userId: ctx.user.id });
+      if ("skip" in loaded) {
+        drop.push(r.id);
+        continue;
+      }
+      const left = loaded.run.items.filter((i) => !loaded.run.itemsDone.includes(i.key)).map((i) => i.label);
+      add(`routine:${loaded.run.id}`, r.id, () => ({
+        text: `Routine still open: ${loaded.routine.title}${left.length ? ` — left: ${left.join(", ")}` : ""}`,
+      }));
+      continue;
+    }
     if (r.kind === REPORT_KIND) {
       // A parked "report ready" push: one line, if the report still exists.
       const runId = (r.payload as { runId?: string }).runId;
@@ -305,6 +319,24 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
       if (!req || req.status !== "pending") return { skip: "request_decided" };
     }
     return { message: p.message };
+  }
+  if (kind === "routine_reminder") {
+    const loaded = await loadRoutineForMessage(ctx.db, item, { userId: ctx.user.id });
+    if ("skip" in loaded) return { skip: loaded.skip };
+    const { routine, run } = loaded;
+    return {
+      message: buildRoutineMessage(
+        {
+          runId: run.id,
+          title: routine.title,
+          description: routine.description,
+          confirmation: routine.confirmation as "button" | "checklist",
+          items: run.items,
+          itemsDone: run.itemsDone,
+        },
+        loaded.reminder,
+      ),
+    };
   }
   if (kind === REPORT_KIND) {
     const runId = (item.payload as { runId?: string }).runId;
@@ -590,6 +622,7 @@ async function processItem(
       lastError: null,
       nextAttemptAt: null,
     });
+    if (item.kind === "routine_reminder") await markRoutineMessageSent(db, item, now);
     const shownAsks = (built.holdingItemIds ?? []).filter((id) => keptRefs.has(holdingRef(id)));
     const shownRequests = (built.aiRequestIds ?? []).filter((id) => keptRefs.has(aiRequestRef(id)));
     const bundle = [...keptRefs].filter((r) => r.startsWith("p:")).map((r) => r.slice(2));
