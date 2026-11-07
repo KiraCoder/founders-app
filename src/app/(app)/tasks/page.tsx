@@ -64,13 +64,11 @@ export default async function TasksPage({ searchParams }: { searchParams: SP }) 
 
   return (
     <>
-      <PageHeader eyebrow="Workspace" title="Tasks" />
-      <div className="mb-4">
-        <NewTaskPanel
-          options={options}
-          defaults={{ visibility: view === "my" ? "private" : "shared", companyId: companyId }}
-        />
-      </div>
+      <PageHeader
+        eyebrow="Workspace"
+        title="Tasks"
+        actions={<NewTaskPanel options={options} defaults={{ visibility: view === "my" ? "private" : "shared", companyId: companyId }} />}
+      />
       <TabNav active={view} tabs={tabsFor(canSeeTeamTasks(ctx), qs)} />
       <TaskFilters view={view} companies={options.companies} values={{ companyId, status, priority }} />
       <p className="eyebrow mb-2">
@@ -113,10 +111,11 @@ async function TeamTasksView({
 
   return (
     <>
-      <PageHeader eyebrow="Workspace" title="Tasks" />
-      <div className="mb-4">
-        <NewTaskPanel options={options} defaults={{ visibility: "shared", companyId: f.companyId }} />
-      </div>
+      <PageHeader
+        eyebrow="Workspace"
+        title="Tasks"
+        actions={<NewTaskPanel options={options} defaults={{ visibility: "shared", companyId: f.companyId }} />}
+      />
       <TabNav active="team" tabs={tabsFor(true, tabQs)} />
       <TeamFilters
         companies={options.companies}

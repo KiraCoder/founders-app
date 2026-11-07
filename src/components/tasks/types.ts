@@ -1,3 +1,5 @@
+import type { ChaseFormValue } from "@/lib/task-chase";
+
 /** Serializable task shape passed from server components to client components. */
 export interface TaskItem {
   id: string;
@@ -14,6 +16,17 @@ export interface TaskItem {
   orgDepartment?: { id: string; number: number; name: string } | null;
   assignee: { kind: "user" | "person"; id: string; name: string } | null;
   isOverdue: boolean;
+}
+
+/** What the list shows next to a task (services/task-activity.ts, serializable). */
+export interface TaskActivityItem {
+  comments: number;
+  checklist: { done: number; total: number } | null;
+  lastSent: { at: string; what: string; status: "sent" | "failed" | "waiting" } | null;
+  lastReply: { at: string; what: string } | null;
+  reminders: number;
+  sentToPerson: boolean;
+  chase: ChaseFormValue;
 }
 
 /** Strips server-only fields (timestamps) before handing tasks to client components. */

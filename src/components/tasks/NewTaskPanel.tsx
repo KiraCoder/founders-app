@@ -1,15 +1,19 @@
 "use client";
 
 import { useState } from "react";
-import { Icon } from "@/components/Icon";
 import type { TaskFormOptions } from "@/server/services/options";
 import { TaskForm, type TaskFormDefaults } from "./TaskForm";
+import { Dialog } from "./ui/Dialog";
+import { ToastScope } from "./ui/Toast";
 
-/** "New task" button that expands into the full form. */
+/**
+ * "+ New" (short button; its accessible name says "New task") that opens the task form in a
+ * dialog. `label` replaces the text where the context needs more ("Assign a task" on a person).
+ */
 export function NewTaskPanel({
   options,
   defaults,
-  label = "New task",
+  label,
   startOpen = false,
 }: {
   options: TaskFormOptions;
@@ -18,16 +22,14 @@ export function NewTaskPanel({
   startOpen?: boolean;
 }) {
   const [open, setOpen] = useState(startOpen);
-  if (!open) {
-    return (
-      <button type="button" className="btn btn-primary" onClick={() => setOpen(true)}>
-        <Icon name="plus" size={16} /> {label}
-      </button>
-    );
-  }
   return (
-    <div className="card-raised w-full p-4">
-      <TaskForm options={options} defaults={defaults} onDone={() => setOpen(false)} />
-    </div>
+    <ToastScope>
+      <button type="button" className="btn btn-primary" onClick={() => setOpen(true)} aria-label={label ?? "New task"} aria-haspopup="dialog">
+        <span aria-hidden="true">+</span> {label ?? "New"}
+      </button>
+      <Dialog open={open} onClose={() => setOpen(false)} title={label ?? "New task"} size="lg">
+        <TaskForm options={options} defaults={defaults} onDone={() => setOpen(false)} />
+      </Dialog>
+    </ToastScope>
   );
 }
