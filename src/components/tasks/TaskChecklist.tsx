@@ -102,6 +102,9 @@ export function TaskChecklist({
   const [confirmed, setConfirmed] = useState(false);
   const [ask, setAsk] = useState<null | { what: string; go: () => void }>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  // Optimistic ticks until the server data comes back.
+  const [ticks, setTicks] = useState<Record<string, boolean>>({});
+  useEffect(() => setTicks({}), [items]);
   const [pending, start] = useTransition();
   const fid = useId();
   const fmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone });
@@ -136,10 +139,14 @@ export function TaskChecklist({
             <input
               type="checkbox"
               className="mt-1 size-[18px] shrink-0 accent-[var(--accent)]"
-              checked={!!item.doneAt}
+              checked={ticks[item.id] ?? !!item.doneAt}
               disabled={readOnly || pending}
               aria-label={`${item.doneAt ? "Untick" : "Tick"} “${item.title}”`}
-              onChange={(e) => act(() => toggleChecklistItemAction(item.id, e.target.checked))}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setTicks((s) => ({ ...s, [item.id]: on }));
+                act(() => toggleChecklistItemAction(item.id, on));
+              }}
             />
             {editing === item.id ? (
               <EditItem

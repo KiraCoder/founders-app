@@ -329,6 +329,10 @@ async function validateRelations(ctx: ServiceContext, r: Relations): Promise<str
   if (r.assigneePersonId && r.visibility === "shared" && r.checkPerson !== false) {
     personCompanyList = await personActiveCompanies(ctx, r.assigneePersonId);
     if (!companyId && personCompanyList.length === 1) companyId = personCompanyList[0]!.id;
+    if (!companyId && personCompanyList.length > 1) {
+      const msg = `Pick a company: ${personCompanyList.map((c) => c.name).join(", ")}`;
+      throw new ServiceError("validation", msg, { companyId: [msg] });
+    }
   }
 
   if (companyId) await assertCompanyAccess(ctx, companyId);
