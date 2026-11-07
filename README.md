@@ -217,6 +217,13 @@ feature stays off without it.
   someone moves the deadline or closes the task. Every deadline change is written to `task_events`.
 - The task history (`task_events`) follows the same rule as the task: the history of a personal
   todo is visible only to its owner, also after the task was deleted or made private.
+- **Tasks → Team** (`/tasks?view=team`, founders only, `services/team-tasks.ts`): every visible task
+  grouped by who has it — one section per founder and person, plus *Unassigned* (shared tasks nobody
+  has) — with counts (open, overdue, due today, waiting, done in the last 7 days), each person's
+  Telegram status and filters (company, person, status, overdue only). It reads through
+  `visibleTasksWhere`, so a founder's personal todos appear only in their own group, to them. The
+  person page has a *Tasks* section (overdue / open / done this week) and **Assign a task** (the task
+  form preset with that person and their company).
 - **Company numbers** (metrics, values, connector runs) belong to their company and follow the
   company rule (`visibleMetricsWhere` / `assertMetricAccess` in `access.ts`): shared between the
   founders, never mixed between companies.

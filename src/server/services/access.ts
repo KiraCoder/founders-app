@@ -259,6 +259,23 @@ export function staffTasksWhere(pctx: PersonContext): SQL {
 }
 
 // ---------------------------------------------------------------------------
+// Team view of tasks (who has what; services/team-tasks.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Team view rule: the per-person board of tasks (and a person page's Tasks section) is
+ * founders-only. It never widens task visibility: every row still goes through
+ * `visibleTasksWhere`, so a founder's personal todos appear only to that founder, in their own group.
+ */
+export function canSeeTeamTasks(ctx: ServiceContext): boolean {
+  return ctx.user.role === "founder";
+}
+
+export function assertTeamTasksAccess(ctx: ServiceContext): void {
+  if (!canSeeTeamTasks(ctx)) throw new ServiceError("forbidden", "Only the founders can see the team view");
+}
+
+// ---------------------------------------------------------------------------
 // Routines (0029)
 // ---------------------------------------------------------------------------
 

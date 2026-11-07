@@ -199,6 +199,25 @@ export async function getTask(ctx: ServiceContext, id: string): Promise<TaskView
   return toView(row, today(ctx));
 }
 
+/**
+ * Visible tasks (access rule + archived companies hidden, like listTasks) matching extra
+ * conditions, in list order. Read-only building block for other views (services/team-tasks.ts).
+ */
+export async function queryVisibleTasks(ctx: ServiceContext, extra: (SQL | undefined)[], limit = 1000): Promise<TaskView[]> {
+  const todayIso = today(ctx);
+  const rows = await baseSelect(ctx)
+    .where(
+      and(
+        visibleTasksWhere(ctx),
+        sql`(${tasks.companyId} is null or ${tasks.companyId} in (select ${companies.id} from ${companies} where ${companies.archivedAt} is null))`,
+        ...extra,
+      ),
+    )
+    .orderBy(asc(closedRank), sql`${tasks.dueDate} asc nulls last`, asc(priorityRank), desc(tasks.createdAt))
+    .limit(Math.min(Math.max(limit, 1), 5000));
+  return rows.map((r) => toView(r, todayIso));
+}
+
 export interface TodaySummary {
   today: IsoDate;
   overdue: TaskView[];
