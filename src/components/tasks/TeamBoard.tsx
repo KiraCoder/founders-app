@@ -25,7 +25,7 @@ export function TeamCapNotice({ capped, limit }: { capped: boolean; limit: numbe
   );
 }
 
-/** Counts line of a group: open, overdue (red), due today, waiting, done in the last 7 days. */
+/** Counts line of a group: open, overdue (red), due today, in review, ▲ points, over estimate, done in the last 7 days. */
 export function TeamCountsLine({ counts }: { counts: TeamCounts }) {
   return (
     <p className="flex flex-wrap items-center gap-1.5 text-[12px] text-muted" data-testid="team-counts">
@@ -38,9 +38,17 @@ export function TeamCountsLine({ counts }: { counts: TeamCounts }) {
       <Tag tone={counts.dueToday > 0 ? "warn" : "neutral"}>
         <span className="num" data-count="dueToday">{counts.dueToday}</span> due today
       </Tag>
-      <Tag>
-        <span className="num" data-count="waiting">{counts.waiting}</span> waiting
+      <Tag tone={counts.inReview > 0 ? "info" : "neutral"} title="In Review: waiting for a founder to approve">
+        <span className="num" data-count="inReview">{counts.inReview}</span> in review
       </Tag>
+      <Tag title="Estimate points of the open tasks (1 point = 1 working hour)">
+        ▲ <span className="num" data-count="points">{counts.points}</span> pts
+      </Tag>
+      {counts.overEstimate > 0 && (
+        <Tag tone="warn" title="In progress longer than the estimate">
+          <span className="num" data-count="overEstimate">{counts.overEstimate}</span> over estimate
+        </Tag>
+      )}
       <Tag tone={counts.doneRecent > 0 ? "ok" : "neutral"}>
         <span className="num" data-count="doneRecent">{counts.doneRecent}</span> done · 7d
       </Tag>
@@ -67,7 +75,7 @@ export function TeamBoard({
         <section key={g.key} className="min-w-0" aria-labelledby={`team-${g.key}`} data-testid="team-group" data-group={g.key}>
           <header className="mb-2 space-y-1.5">
             <div className="flex flex-wrap items-center gap-2">
-              {g.kind !== "unassigned" && <InitialsAvatar name={g.name} size={22} />}
+              {g.kind !== "unassigned" && <InitialsAvatar name={g.name} size="sm" />}
               <h2 id={`team-${g.key}`} className="text-[15px] font-semibold">
                 {g.personId ? (
                   <Link href={`/people/${g.personId}`} className="hover:underline">

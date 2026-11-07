@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { CompaniesManager, type CompanyRow } from "@/components/companies/CompaniesManager";
 import { PageHeader } from "@/components/ui";
+import { prefixFromSlug } from "@/lib/task-keys";
 import { COMPANY_KINDS } from "@/server/db/schema";
 import { getPageContext } from "@/server/context";
 import {
@@ -45,6 +46,7 @@ export default async function CompaniesSettingsPage({ searchParams }: { searchPa
     color: c.color,
     legalName: c.legalName ?? "",
     description: c.description ?? "",
+    taskPrefix: c.taskPrefix ?? prefixFromSlug(c.slug),
     archived: !!c.archivedAt,
     usage: describeUsage(c.usage),
     canDelete: c.canDelete,

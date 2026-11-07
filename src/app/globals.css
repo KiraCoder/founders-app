@@ -22,6 +22,8 @@
   --risk-line: #f2c2bd;
   --info: #1f4e8c;
   --info-soft: #e4ecf7;
+  /* Urgent priority (the orange square with "!"). */
+  --urgent: #e8590c;
   --shadow: 0 1px 2px rgba(16, 24, 20, 0.06), 0 6px 20px rgba(16, 24, 20, 0.06);
   color-scheme: light;
 }
@@ -45,6 +47,7 @@
     --risk-line: #6a2f2a;
     --info: #8fb5ec;
     --info-soft: #18243a;
+    --urgent: #f76707;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 20px rgba(0, 0, 0, 0.25);
     color-scheme: dark;
   }
@@ -68,6 +71,7 @@
   --risk-line: #6a2f2a;
   --info: #8fb5ec;
   --info-soft: #18243a;
+  --urgent: #f76707;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 6px 20px rgba(0, 0, 0, 0.25);
   color-scheme: dark;
 }
@@ -91,6 +95,7 @@
   --color-risk-line: var(--risk-line);
   --color-info: var(--info);
   --color-info-soft: var(--info-soft);
+  --color-urgent: var(--urgent);
   --shadow-card: var(--shadow);
   --radius-card: 12px;
   --radius-btn: 8px;

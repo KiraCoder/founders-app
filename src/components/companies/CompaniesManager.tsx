@@ -24,6 +24,7 @@ export interface CompanyRow {
   color: string;
   legalName: string;
   description: string;
+  taskPrefix: string;
   archived: boolean;
   /** "12 tasks, 3 people" — empty when nothing refers to the company. */
   usage: string;
@@ -143,6 +144,10 @@ export function CompaniesManager({ companies, kinds, openNew }: { companies: Com
                     </Link>
                     <p className="truncate text-[12px] text-muted">
                       <span className="font-mono">/{c.slug}</span>
+                      {" · "}
+                      <span className="font-mono" title="Task key prefix">
+                        {c.taskPrefix}-…
+                      </span>
                       {c.legalName && ` · ${c.legalName}`}
                       {c.usage && ` · ${c.usage}`}
                     </p>

@@ -62,6 +62,7 @@ function formFields(fd: FormData) {
     color: text(fd, "color") || undefined,
     legalName: text(fd, "legalName") ?? "",
     description: text(fd, "description") ?? "",
+    ...(fd.has("taskPrefix") ? { taskPrefix: text(fd, "taskPrefix") ?? "" } : {}),
   };
 }
 

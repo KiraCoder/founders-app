@@ -18,6 +18,8 @@ export interface CompanyFormValues {
   color: string;
   legalName: string;
   description: string;
+  /** Task key prefix ("UPS" → UPS-12); "" on a new company = from the slug. */
+  taskPrefix?: string;
 }
 
 /** Preset dot colors (any hex can still be picked). */
@@ -116,6 +118,24 @@ export function CompanyForm({
         />
         <p className="mt-1 text-[12px] text-muted">/companies/{shownSlug || "…"}</p>
         <FieldError msg={fe.slug} />
+      </div>
+      <div>
+        <label className="label" htmlFor={id("prefix")}>
+          Task key prefix
+        </label>
+        <input
+          id={id("prefix")}
+          name="taskPrefix"
+          className="input font-mono uppercase"
+          maxLength={6}
+          defaultValue={initial.taskPrefix ?? ""}
+          placeholder={isNew ? "3 letters of the slug" : ""}
+          required={!isNew}
+          pattern="[A-Za-z][A-Za-z0-9]{1,5}"
+          title="2–6 letters or digits, starting with a letter"
+        />
+        <p className="mt-1 text-[12px] text-muted">Tasks get keys like {(initial.taskPrefix || "UPS").toUpperCase()}-12. Changing it renames every key of the company.</p>
+        <FieldError msg={fe.taskPrefix} />
       </div>
       <div>
         <label className="label" htmlFor={id("kind")}>

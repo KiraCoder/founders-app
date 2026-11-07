@@ -13,8 +13,8 @@ vi.mock("@/app/(app)/actions", () => ({
 
 const { TeamBoard, TeamCapNotice, TeamCountsLine } = await import("@/components/tasks/TeamBoard");
 
-const options = { currentUserId: "u1", companies: [], projects: [], founders: [], peopleByCompany: {}, departmentsByCompany: {} };
-const counts = { open: 2, overdue: 1, dueToday: 1, waiting: 1, doneRecent: 3 };
+const options = { currentUserId: "u1", companies: [], projects: [], founders: [], peopleByCompany: {}, departmentsByCompany: {}, labels: [] };
+const counts = { open: 2, overdue: 1, dueToday: 1, inReview: 1, points: 0, overEstimate: 0, doneRecent: 3 };
 
 describe("Team view markup", () => {
   it("cap notice: only when the board was cut, naming the limit", () => {

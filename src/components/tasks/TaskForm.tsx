@@ -7,7 +7,8 @@ import { assigneePeopleOptions } from "@/lib/task-assignee";
 import { chaseFormValue, type ChaseFormValue } from "@/lib/task-chase";
 import type { TaskFormOptions } from "@/server/services/options";
 import { ChaseControl } from "./ChaseControl";
-import { PRIORITY_OPTIONS, STATUS_OPTIONS } from "./labels";
+import { ESTIMATE_OPTIONS, PRIORITY_OPTIONS, STATUS_OPTIONS } from "./labels";
+import { LabelsPicker, type LabelLite } from "./TaskPickers";
 import { DraftChecklist, type DraftItem } from "./TaskChecklist";
 import type { TaskItem } from "./types";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -68,6 +69,8 @@ export function TaskForm({
   const [dueDate, setDueDate] = useState(task?.dueDate ?? "");
   const [chaseValue, setChaseValue] = useState<ChaseFormValue>(chase ?? { ...chaseFormValue({}), shareNotes: !isEdit });
   const [draft, setDraft] = useState<DraftItem[]>([]);
+  const [labels, setLabels] = useState<LabelLite[]>(task?.labels ?? []);
+  const [needsReview, setNeedsReview] = useState(task?.needsReview ?? true);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const byPerson = useMemo(() => companiesByPerson(options), [options]);
@@ -104,6 +107,8 @@ export function TaskForm({
         setAssignee(defaults?.assignee ?? "");
         setDraft([]);
         setDueDate("");
+        setLabels([]);
+        setNeedsReview(true);
       }
       onDone?.();
     } else if (state.error) {
@@ -262,7 +267,7 @@ export function TaskForm({
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
           <div>
             <label className="label" htmlFor={fieldId("dueDate")}>
               Due date
@@ -274,13 +279,27 @@ export function TaskForm({
             <label className="label" htmlFor={fieldId("priority")}>
               Priority
             </label>
-            <select id={fieldId("priority")} name="priority" className="input" defaultValue={task?.priority ?? "normal"}>
+            <select id={fieldId("priority")} name="priority" className="input" defaultValue={task?.priority ?? "none"}>
               {PRIORITY_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
                   {o.label}
                 </option>
               ))}
             </select>
+          </div>
+          <div>
+            <label className="label" htmlFor={fieldId("estimate")}>
+              Estimate
+            </label>
+            <select id={fieldId("estimate")} name="estimate" className="input" defaultValue={task?.estimate ? String(task.estimate) : ""}>
+              <option value="">No estimate</option>
+              {ESTIMATE_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n} point{n === 1 ? "" : "s"} ({n} h)
+                </option>
+              ))}
+            </select>
+            <FieldError f="estimate" />
           </div>
           <div>
             <label className="label" htmlFor={fieldId("visibility")}>
@@ -352,15 +371,41 @@ export function TaskForm({
         </div>
 
         <div>
-          <label className="label" htmlFor={fieldId("notes")}>
-            Notes
+          <span className="label" id={fieldId("labels")}>
+            Labels
+          </span>
+          <input type="hidden" name="labelsField" value="1" />
+          {labels.map((l) => (
+            <input key={l.id} type="hidden" name="labelIds" value={l.id} />
+          ))}
+          <div className="rounded-[8px] border border-line" aria-labelledby={fieldId("labels")}>
+            <LabelsPicker value={labels} options={options} variant="field" onChange={(_ids, next) => setLabels(next)} />
+          </div>
+        </div>
+
+        {personId && visibility === "shared" && (
+          <label className="flex items-start gap-2 text-[13px]">
+            <input type="checkbox" className="mt-0.5" checked={needsReview} onChange={(e) => setNeedsReview(e.target.checked)} />
+            <span>
+              Needs review
+              <span className="block text-[12px] text-muted">
+                «Готово» on Telegram moves it to In Review; you approve it to Done. Off: «Готово» closes it.
+              </span>
+            </span>
           </label>
-          <textarea id={fieldId("notes")} name="notes" rows={2} maxLength={5000} className="input" defaultValue={task?.notes ?? ""} />
+        )}
+        <input type="hidden" name="needsReview" value={needsReview ? "true" : "false"} />
+
+        <div>
+          <label className="label" htmlFor={fieldId("notes")}>
+            Description
+          </label>
+          <textarea id={fieldId("notes")} name="notes" rows={3} maxLength={5000} className="input" defaultValue={task?.notes ?? ""} placeholder="Markdown: # heading, **bold**, - list, 1. list, - [ ] checkbox" />
         </div>
 
         {!isEdit && (
           <fieldset>
-            <legend className="label">Checklist</legend>
+            <legend className="label">Sub-tasks</legend>
             <DraftChecklist items={draft} onChange={setDraft} />
           </fieldset>
         )}

@@ -27,7 +27,7 @@ export default async function TodayPage() {
   const ctx = await getPageContext();
   const [summary, options] = await Promise.all([getTodaySummary(ctx), getTaskFormOptions(ctx)]);
   // The four lists' activity in one read (a task can be in two lists: due today and personal).
-  const shown = [...new Map([...summary.overdue, ...summary.dueToday, ...summary.thisWeek, ...summary.personal].map((t) => [t.id, t])).values()];
+  const shown = [...new Map([...summary.review, ...summary.overdue, ...summary.dueToday, ...summary.thisWeek, ...summary.personal].map((t) => [t.id, t])).values()];
   const activity = shown.length ? await taskActivityFor(ctx, shown) : {};
   const list = (items: typeof summary.overdue, empty: string) => (
     <TaskList tasks={items.map(toTaskItem)} today={summary.today} options={options} empty={empty} activity={activity} />
@@ -46,6 +46,12 @@ export default async function TodayPage() {
       <div className="mb-6">
         <QuickAdd />
       </div>
+
+      {summary.review.length > 0 && (
+        <Section title="Waiting for your review" count={summary.review.length} tone="info">
+          <div className="mb-5">{list(summary.review, "Nothing to review.")}</div>
+        </Section>
+      )}
 
       <div className="grid gap-x-6 lg:grid-cols-2">
         <div>

@@ -52,6 +52,7 @@ export function TeamFilters({
         <label className="label" htmlFor="team-status">Status</label>
         <select id="team-status" name="status" className="input" defaultValue={values.status ?? "open"}>
           <option value="open">Open</option>
+          <option value="active">Active</option>
           <option value="any">Any status</option>
           {STATUS_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>

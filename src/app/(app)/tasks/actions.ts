@@ -11,11 +11,14 @@ import {
   listChecklist,
   moveChecklistItem,
   parseChecklistField,
+  promoteChecklistItem,
   removeChecklistItem,
   setChecklistItemDone,
   updateChecklistItem,
 } from "@/server/services/task-checklist";
-import { createTask, deleteTask, updateTaskDetailed } from "@/server/services/tasks";
+import { bulkUpdateTasks, createTask, deleteTask, updateTaskDetailed } from "@/server/services/tasks";
+import { ServiceError } from "@/server/services/errors";
+import { createLabel } from "@/server/services/task-labels";
 import type { ChecklistItemData } from "@/components/tasks/TaskChecklist";
 
 /**
@@ -45,13 +48,15 @@ async function run(fn: () => Promise<{ message: string; taskId?: string }>): Pro
   return { ok: true, message: out.message, taskId: out.taskId, nonce: Date.now() };
 }
 
-const TASK_FORM_FIELDS = ["title", "notes", "companyId", "projectId", "orgDepartmentId", "visibility", "status", "priority", "dueDate"] as const;
+const TASK_FORM_FIELDS = ["title", "notes", "companyId", "projectId", "orgDepartmentId", "visibility", "status", "priority", "dueDate", "estimate", "needsReview"] as const;
 const CHASE_FIELDS = ["chase", "everyN", "everyUnit", "escalation", "escalateDays", "founderNudge", "shareNotes"] as const;
 
 function taskFields(fd: FormData): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of TASK_FORM_FIELDS) if (fd.has(key)) out[key] = fd.get(key);
   if (fd.has("assignee")) Object.assign(out, parseAssignee(fd.get("assignee")));
+  // The label picker posts one labelIds per label, plus labelsField so "none" is told from "not shown".
+  if (fd.has("labelsField")) out.labelIds = fd.getAll("labelIds").map(String).filter(Boolean);
   return out;
 }
 
@@ -193,5 +198,137 @@ export async function toggleChecklistItemAction(itemId: string, done: boolean): 
   return run(async () => {
     await setChecklistItemDone(ctx, itemId, done);
     return { message: done ? "Ticked" : "Unticked" };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Inline changes (the Linear-style list and the task page's properties, 0034)
+// ---------------------------------------------------------------------------
+
+/** One property change from a row or the task page. `assignee` is "user:<id>", "person:<id>" or "". */
+export interface TaskPatchInput {
+  title?: string;
+  notes?: string | null;
+  status?: string;
+  priority?: string;
+  estimate?: number | null;
+  dueDate?: string | null;
+  assignee?: string;
+  companyId?: string | null;
+  projectId?: string | null;
+  labelIds?: string[];
+  needsReview?: boolean;
+}
+
+function toUpdate(p: TaskPatchInput): TaskUpdateInput {
+  const out: Record<string, unknown> = {};
+  for (const k of ["title", "notes", "status", "priority", "estimate", "dueDate", "companyId", "projectId", "labelIds", "needsReview"] as const) {
+    if (p[k] !== undefined) out[k] = p[k];
+  }
+  if (p.assignee !== undefined) Object.assign(out, parseAssignee(p.assignee));
+  return out as TaskUpdateInput;
+}
+
+const STATUS_WORD: Record<string, string> = { backlog: "Backlog", todo: "Todo", in_progress: "In Progress", in_review: "In Review", done: "Done", cancelled: "Canceled" };
+
+function patchMessage(p: TaskPatchInput): string {
+  if (p.status) return `Status: ${STATUS_WORD[p.status] ?? p.status}`;
+  if (p.priority) return "Priority changed";
+  if (p.estimate !== undefined) return p.estimate ? `Estimate: ${p.estimate} points` : "Estimate cleared";
+  if (p.dueDate !== undefined) return p.dueDate ? `Due ${p.dueDate}` : "Due date cleared";
+  if (p.assignee !== undefined) return p.assignee ? "Assignee changed" : "Unassigned";
+  if (p.labelIds) return "Labels changed";
+  if (p.companyId !== undefined) return "Company changed";
+  if (p.projectId !== undefined) return "Project changed";
+  if (p.title !== undefined) return "Title saved";
+  if (p.notes !== undefined) return "Description saved";
+  if (p.needsReview !== undefined) return p.needsReview ? "Needs review: on" : "Needs review: off";
+  return "Saved";
+}
+
+export async function updateTaskFieldsAction(id: string, patch: TaskPatchInput): Promise<TaskActionResult> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const { task, staffNotice } = await updateTaskDetailed(ctx, id, toUpdate(patch));
+    const base = patchMessage(patch);
+    return { message: staffNotice.notified ? `${base} · ${staffNotice.personName} gets an updated message` : base, taskId: task.id };
+  });
+}
+
+/** The bulk bar: the same change for the selected tasks (labels are added / removed, not replaced). */
+export async function bulkUpdateTasksAction(
+  ids: string[],
+  patch: TaskPatchInput,
+  labels: { add?: string[]; remove?: string[] } = {},
+): Promise<TaskActionResult> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const r = await bulkUpdateTasks(ctx, ids, toUpdate(patch), labels);
+    if (!r.updated && r.failed.length) throw new ServiceError("validation", r.failed[0]!.error);
+    const failed = r.failed.length ? ` · ${r.failed.length} not changed: ${r.failed[0]!.error}` : "";
+    return { message: `${r.updated} task${r.updated === 1 ? "" : "s"} updated${failed}` };
+  });
+}
+
+export async function bulkDeleteTasksAction(ids: string[]): Promise<TaskActionResult> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    let n = 0;
+    for (const id of new Set(ids)) {
+      await deleteTask(ctx, id);
+      n++;
+    }
+    return { message: `${n} task${n === 1 ? "" : "s"} deleted` };
+  });
+}
+
+/** "+" in a group header: a task with just a title, in that group (status / priority / assignee / company / project). */
+export async function quickCreateTaskAction(input: {
+  title: string;
+  status?: string;
+  priority?: string;
+  assignee?: string;
+  companyId?: string | null;
+  projectId?: string | null;
+  labelIds?: string[];
+}): Promise<TaskActionResult> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const who = parseAssignee(input.assignee ?? "");
+    const shared = !!(input.companyId || input.projectId || who.assigneePersonId || (who.assigneeUserId && who.assigneeUserId !== ctx.user.id));
+    const task = await createTask(ctx, {
+      title: input.title,
+      status: (input.status ?? "todo") as TaskCreateInput["status"],
+      priority: (input.priority ?? "none") as TaskCreateInput["priority"],
+      visibility: shared ? "shared" : "private",
+      companyId: input.companyId ?? null,
+      projectId: input.projectId ?? null,
+      labelIds: input.labelIds,
+      ...who,
+    });
+    return { message: `${task.key} created${task.visibility === "private" ? " (personal)" : ""}`, taskId: task.id };
+  });
+}
+
+/** A label created from a task's label picker. */
+export async function createLabelInlineAction(name: string): Promise<{ ok: boolean; error?: string; label?: { id: string; name: string; color: string } }> {
+  const ctx = await getPageContext();
+  try {
+    const l = await createLabel(ctx, { name });
+    refreshAfterWrite(CACHE_TAGS.tasks, CACHE_TAGS.labels);
+    return { ok: true, label: { id: l.id, name: l.name, color: l.color } };
+  } catch (err) {
+    const se = toServiceError(err);
+    if (!se) throw err;
+    return { ok: false, error: se.message };
+  }
+}
+
+/** Sub-task → a full task (the checklist item becomes its own task, linked to this one). */
+export async function promoteChecklistItemAction(itemId: string): Promise<TaskActionResult> {
+  const ctx = await getPageContext();
+  return run(async () => {
+    const task = await promoteChecklistItem(ctx, itemId);
+    return { message: `${task.key} created from the sub-task`, taskId: task.id };
   });
 }

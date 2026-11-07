@@ -13,9 +13,11 @@ import type { TaskFormOptions } from "@/server/services/options";
 import { DialogChecklist } from "./TaskChecklist";
 import { TaskForm } from "./TaskForm";
 import type { TaskActivityItem, TaskItem } from "./types";
+import { Icon } from "@/components/Icon";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Dialog } from "@/components/ui/Dialog";
 import { IconButton } from "@/components/ui/IconButton";
+import { Menu, type MenuOption } from "@/components/ui/Menu";
 import { toast } from "@/components/ui/Toast";
 
 type Ask = { kind: "archive" | "chase" | "delete" };
@@ -26,8 +28,8 @@ export type TaskPatch = { status?: TaskItem["status"]; paused?: boolean };
 /**
  * The task (and its activity) with the pending one-tap changes applied (`useOptimistic`): Done /
  * Reopen and Pause / Resume show at once; when the action fails, or once the page is re-rendered,
- * the server's data takes over again (rollback is automatic). A list row calls it to restyle the
- * whole row and passes the result to TaskActions; alone (the task page) TaskActions uses its own.
+ * the server's data takes over again (rollback is automatic). Alone (the task page) TaskActions
+ * uses its own; a list row passes its own patch function.
  */
 export function useOptimisticTask(task: TaskItem, activity?: TaskActivityItem) {
   const [shown, patch] = useOptimistic({ task, activity }, (s, p: TaskPatch) => ({
@@ -38,9 +40,10 @@ export function useOptimisticTask(task: TaskItem, activity?: TaskActivityItem) {
 }
 
 /**
- * The control-center buttons of one task: ✓ Done, ✎ Edit (dialog), ↗ Open, 🔔 Chase now,
- * ⏸ Pause chasing, 🗄 Archive. Each has an accessible name and a tooltip; results go to a toast;
- * archive, delete and anything that messages the person ask first.
+ * A task's actions: Edit (dialog), Open, Chase now, Pause / Resume chasing, Archive / Restore,
+ * Delete. `variant="menu"` (list rows): one "⋯" button opening a menu; `variant="buttons"` (the
+ * task page): icon buttons. Each has an accessible name; results go to a toast; archive, delete
+ * and anything that messages the person ask first.
  */
 export function TaskActions({
   task: given,
@@ -51,6 +54,7 @@ export function TaskActions({
   afterDelete,
   optimistic,
   timeZone = "Asia/Bishkek",
+  variant = "buttons",
 }: {
   task: TaskItem;
   activity?: TaskActivityItem;
@@ -60,10 +64,11 @@ export function TaskActions({
   canChase: boolean;
   /** Where to go after "Delete" (the task page leaves itself). */
   afterDelete?: string;
-  /** The row's optimistic state (`useOptimisticTask`); without it the buttons keep their own. */
-  optimistic?: ReturnType<typeof useOptimisticTask>;
+  /** The row's optimistic state; without it the buttons keep their own. */
+  optimistic?: { task: TaskItem; activity?: TaskActivityItem; patch: (p: TaskPatch) => void };
   /** For the edit dialog's checklist (tick times). */
   timeZone?: string;
+  variant?: "buttons" | "menu";
 }) {
   const own = useOptimisticTask(given, givenActivity);
   const { task, activity, patch } = optimistic ?? own;
@@ -90,58 +95,92 @@ export function TaskActions({
       } else toast(r.error ?? "Something went wrong", { tone: "risk" });
     });
   const done = task.status === "done";
+  const togglePause = () => act(() => pauseChasingAction(task.id, !paused), undefined, { paused: !paused });
+  const restore = () => act(() => setStatusAction(task.id, "todo"), undefined, { status: "todo" });
+
+  const menu: MenuOption[] = [
+    { value: "edit", label: "Edit…", icon: <Icon name="edit" size={14} /> },
+    ...(showOpen ? [{ value: "open", label: "Open task", icon: <Icon name="external" size={14} /> }] : []),
+    ...(person && canChase && !closed
+      ? [
+          { value: "chase", label: `Chase ${person.name} now`, icon: <Icon name="play" size={14} /> },
+          { value: "pause", label: paused ? "Resume chasing" : "Pause chasing", icon: <Icon name={paused ? "play" : "pause"} size={14} /> },
+        ]
+      : []),
+    task.status === "cancelled"
+      ? { value: "restore", label: "Restore", icon: <Icon name="restore" size={14} /> }
+      : { value: "archive", label: "Archive (cancel)", icon: <Icon name="archive" size={14} /> },
+    { value: "delete", label: "Delete…", icon: <Icon name="trash" size={14} /> },
+  ];
+  const onMenu = (v: string) => {
+    if (v === "edit") setEditing(true);
+    else if (v === "open") router.push(`/tasks/${task.id}`);
+    else if (v === "chase") setAsk({ kind: "chase" });
+    else if (v === "pause") togglePause();
+    else if (v === "restore") restore();
+    else if (v === "archive") setAsk({ kind: "archive" });
+    else if (v === "delete") setAsk({ kind: "delete" });
+  };
 
   return (
     <div className={`flex shrink-0 flex-wrap items-center gap-0.5 ${pending ? "opacity-60" : ""}`} role="group" aria-label={`Actions for ${task.title}`} data-testid="task-actions">
-      <IconButton
-        icon="check"
-        label={done ? "Reopen" : "Mark done"}
-        tone="primary"
-        pressed={done}
-        disabled={pending || task.status === "cancelled"}
-        onClick={() => act(() => setStatusAction(task.id, done ? "todo" : "done"), undefined, { status: done ? "todo" : "done" })}
-      />
-      {person && canChase && (
-        <IconButton icon="play" tone="primary" label={`Chase ${person.name} now`} disabled={pending || closed} onClick={() => setAsk({ kind: "chase" })} />
-      )}
-      <IconButton icon="edit" label="Edit" onClick={() => setEditing(true)} disabled={pending} />
-      {person && canChase && (
-        <IconButton
-          icon={paused ? "play" : "pause"}
-          label={paused ? "Resume chasing" : "Pause chasing"}
-          pressed={paused}
-          disabled={pending || closed}
-          onClick={() => act(() => pauseChasingAction(task.id, !paused), undefined, { paused: !paused })}
+      {variant === "menu" ? (
+        <Menu
+          label={`More actions for ${task.title}`}
+          title="More actions"
+          options={menu}
+          value={null}
+          searchable={false}
+          width={220}
+          onSelect={onMenu}
+          trigger={(p) => (
+            <button
+              type="button"
+              {...p}
+              ref={p.ref as (el: HTMLButtonElement | null) => void}
+              className="inline-flex size-6 items-center justify-center rounded-[6px] text-muted opacity-60 hover:bg-sunk hover:text-ink hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-accent group-hover:opacity-100 aria-expanded:opacity-100"
+            >
+              <Icon name="more" size={16} />
+            </button>
+          )}
         />
-      )}
-      {task.status === "cancelled" ? (
-        <IconButton icon="restore" label="Restore" disabled={pending} onClick={() => act(() => setStatusAction(task.id, "todo"))} />
       ) : (
-        <IconButton icon="archive" label="Archive" disabled={pending} onClick={() => setAsk({ kind: "archive" })} />
-      )}
-      {showOpen && (
         <>
-          <IconButton icon="comment" label={`Comments (${activity?.comments ?? 0})`} badge={activity?.comments ?? 0} href={`/tasks/${task.id}#comments`} />
-          <IconButton icon="external" label="Open" href={`/tasks/${task.id}`} />
+          <IconButton
+            icon="check"
+            label={done ? "Reopen" : "Mark done"}
+            tone="primary"
+            pressed={done}
+            disabled={pending || task.status === "cancelled"}
+            onClick={() => act(() => setStatusAction(task.id, done ? "todo" : "done"), undefined, { status: done ? "todo" : "done" })}
+          />
+          {person && canChase && (
+            <IconButton icon="play" tone="primary" label={`Chase ${person.name} now`} disabled={pending || closed} onClick={() => setAsk({ kind: "chase" })} />
+          )}
+          <IconButton icon="edit" label="Edit" onClick={() => setEditing(true)} disabled={pending} />
+          {person && canChase && (
+            <IconButton icon={paused ? "play" : "pause"} label={paused ? "Resume chasing" : "Pause chasing"} pressed={paused} disabled={pending || closed} onClick={togglePause} />
+          )}
+          {task.status === "cancelled" ? (
+            <IconButton icon="restore" label="Restore" disabled={pending} onClick={restore} />
+          ) : (
+            <IconButton icon="archive" label="Archive" disabled={pending} onClick={() => setAsk({ kind: "archive" })} />
+          )}
+          {showOpen && (
+            <>
+              <IconButton icon="comment" label={`Comments (${activity?.comments ?? 0})`} badge={activity?.comments ?? 0} href={`/tasks/${task.id}#comments`} />
+              <IconButton icon="external" label="Open" href={`/tasks/${task.id}`} />
+            </>
+          )}
         </>
       )}
 
-      <Dialog open={editing} onClose={() => setEditing(false)} title="Edit task" description={task.title} size="lg">
-        <TaskForm
-          options={options}
-          task={task}
-          onDone={() => setEditing(false)}
-          sentToPerson={activity?.sentToPerson}
-          chase={activity?.chase}
-        />
-        <DialogChecklist
-          taskId={task.id}
-          notifyName={person && activity?.sentToPerson && !closed ? person.name : null}
-          timeZone={timeZone}
-        />
+      <Dialog open={editing} onClose={() => setEditing(false)} title="Edit task" description={`${task.key} · ${task.title}`} size="lg">
+        <TaskForm options={options} task={task} onDone={() => setEditing(false)} sentToPerson={activity?.sentToPerson} chase={activity?.chase} />
+        <DialogChecklist taskId={task.id} notifyName={person && activity?.sentToPerson && !closed ? person.name : null} timeZone={timeZone} />
         <div className="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
           <a href={`/tasks/${task.id}`} className="text-[13px] text-accent hover:underline">
-            Comments and timeline on the task page →
+            Activity and comments on the task page →
           </a>
           <button type="button" className="btn btn-ghost btn-sm text-risk" onClick={() => setAsk({ kind: "delete" })}>
             Delete task…
@@ -156,10 +195,10 @@ export function TaskActions({
         tone="danger"
         busy={pending}
         onCancel={() => setAsk(null)}
-        onConfirm={() => act(() => setStatusAction(task.id, "cancelled"), () => setAsk(null))}
+        onConfirm={() => act(() => setStatusAction(task.id, "cancelled"), () => setAsk(null), { status: "cancelled" })}
       >
         <p>
-          “{task.title}” is marked <strong>cancelled</strong> and leaves the open lists (history kept; Restore brings it back).
+          “{task.title}” is marked <strong>Canceled</strong> and leaves the active lists (history kept; Restore brings it back).
         </p>
         {person && <p>No more reminders go to {person.name}.</p>}
       </ConfirmDialog>
@@ -193,7 +232,7 @@ export function TaskActions({
           )
         }
       >
-        <p>“{task.title}”, its checklist and comments are deleted. Archive keeps the history instead.</p>
+        <p>“{task.title}”, its sub-tasks and comments are deleted. Archive keeps the history instead.</p>
       </ConfirmDialog>
     </div>
   );

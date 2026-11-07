@@ -5,6 +5,7 @@ import {
   addChecklistItemAction,
   loadChecklistAction,
   moveChecklistItemAction,
+  promoteChecklistItemAction,
   removeChecklistItemAction,
   toggleChecklistItemAction,
   updateChecklistItemAction,
@@ -58,7 +59,7 @@ function ItemFields({ idPrefix, title, details, errors }: { idPrefix: string; ti
           maxLength={300}
           defaultValue={title}
           className="input"
-          placeholder="Checklist item"
+          placeholder="Sub-task"
           aria-invalid={!!errors?.title}
         />
         {errors?.title && <p className="mt-1 text-[12px] text-risk">{errors.title[0]}</p>}
@@ -91,8 +92,11 @@ export function TaskChecklist({
   readOnly,
   timeZone,
   onChanged,
+  canPromote,
 }: {
   taskId: string;
+  /** "Promote to task" per item (the task page). */
+  canPromote?: boolean;
   items: ChecklistItemData[];
   /** The person who gets an updated card on a change (task already sent to them), else null. */
   notifyName: string | null;
@@ -154,7 +158,7 @@ export function TaskChecklist({
     <div className="space-y-3" data-testid="task-checklist">
       {shown.length > 0 && <Progress done={done} total={shown.length} />}
       <ul className={`card divide-y divide-line ${pending ? "opacity-60" : ""}`} aria-label="Checklist">
-        {shown.length === 0 && <li className="px-4 py-3 text-[13px] text-muted">No checklist items yet.</li>}
+        {shown.length === 0 && <li className="px-4 py-3 text-[13px] text-muted">No sub-tasks yet.</li>}
         {shown.map((item, n) => (
           <li key={item.id} className="flex items-start gap-3 px-3 py-2.5 sm:px-4" data-testid="checklist-item">
             <input
@@ -206,6 +210,19 @@ export function TaskChecklist({
                   onClick={() => guarded("reorder the checklist", () => act(() => moveChecklistItemAction(item.id, "down")))}
                 />
                 <IconButton icon="edit" label={`Edit “${item.title}”`} onClick={() => setEditing(item.id)} />
+                {canPromote && (
+                  <IconButton
+                    icon="external"
+                    label={`Promote “${item.title}” to a task`}
+                    disabled={pending}
+                    onClick={() =>
+                      setAsk({
+                        what: `promote “${item.title}”`,
+                        go: () => act(() => promoteChecklistItemAction(item.id)),
+                      })
+                    }
+                  />
+                )}
                 <IconButton
                   icon="trash"
                   label={`Remove “${item.title}”`}
@@ -237,8 +254,8 @@ export function TaskChecklist({
       )}
       <ConfirmDialog
         open={!!ask}
-        title={ask?.what.startsWith("remove") ? "Remove this item?" : "Update the message?"}
-        confirmLabel={ask?.what.startsWith("remove") ? "Remove" : "Continue"}
+        title={ask?.what.startsWith("remove") ? "Remove this item?" : ask?.what.startsWith("promote") ? "Promote to a task?" : "Update the message?"}
+        confirmLabel={ask?.what.startsWith("remove") ? "Remove" : ask?.what.startsWith("promote") ? "Promote" : "Continue"}
         tone={ask?.what.startsWith("remove") ? "danger" : "primary"}
         onCancel={() => setAsk(null)}
         onConfirm={() => {
@@ -249,6 +266,7 @@ export function TaskChecklist({
         }}
       >
         {ask?.what.startsWith("remove") && <p>The item and its tick are removed from the task.</p>}
+        {ask?.what.startsWith("promote") && <p>It becomes its own task (same company, project and assignee), linked to this one, and leaves the sub-tasks.</p>}
         {notifyName && (
           <p>
             {notifyName} already has this task on Telegram, so {notifyName} will get <strong>one updated message</strong> with the whole
