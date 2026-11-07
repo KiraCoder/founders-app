@@ -51,7 +51,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const day = today(ctx);
   const ps = person ? (personSettings[person.id] ?? null) : null;
   const nudged = task.assignee?.kind === "user" ? task.assignee.name : task.ownerName;
-  const back = task.visibility === "private" ? "/tasks?view=my" : "/tasks?view=company";
+  const back = task.visibility === "private" ? "/tasks" : "/tasks?view=company";
   const notifyName = person && activity?.sentToPerson && task.status !== "done" && task.status !== "cancelled" ? person.name : null;
   const L = labelsFor(task);
 
@@ -74,7 +74,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           </div>
           <ActivityLine task={item} a={activity ?? undefined} timeZone={ctx.timeZone} />
         </div>
-        <TaskActions task={item} activity={activity ?? undefined} options={options} showOpen={false} canChase={founders} afterDelete={back} />
+        <TaskActions task={item} activity={activity ?? undefined} options={options} showOpen={false} canChase={founders} afterDelete={back} timeZone={ctx.timeZone} />
       </header>
 
       <section className="card mb-5 p-4" aria-labelledby="task-details-heading">
@@ -180,6 +180,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
         </Section>
       )}
 
+      <div id="comments" className="scroll-mt-20" />
       <Section title="Comments" count={comments.length}>
         <ul className="card mb-3 divide-y divide-line" aria-label="Comments">
           {comments.length === 0 && <li className="px-4 py-4 text-[13px] text-muted">No comments yet.</li>}

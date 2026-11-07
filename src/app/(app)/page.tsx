@@ -64,7 +64,7 @@ export default async function TodayPage() {
             title="My personal todos"
             count={summary.personal.length}
             action={
-              <Link href="/tasks?view=my" className="text-[12px] text-accent hover:underline">
+              <Link href="/tasks?quick=personal" className="text-[12px] text-accent hover:underline">
                 All →
               </Link>
             }

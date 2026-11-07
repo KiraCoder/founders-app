@@ -10,6 +10,7 @@ import {
   type TaskActionResult,
 } from "@/app/(app)/tasks/actions";
 import type { TaskFormOptions } from "@/server/services/options";
+import { DialogChecklist } from "./TaskChecklist";
 import { TaskForm } from "./TaskForm";
 import type { TaskActivityItem, TaskItem } from "./types";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -49,6 +50,7 @@ export function TaskActions({
   canChase,
   afterDelete,
   optimistic,
+  timeZone = "Asia/Bishkek",
 }: {
   task: TaskItem;
   activity?: TaskActivityItem;
@@ -60,6 +62,8 @@ export function TaskActions({
   afterDelete?: string;
   /** The row's optimistic state (`useOptimisticTask`); without it the buttons keep their own. */
   optimistic?: ReturnType<typeof useOptimisticTask>;
+  /** For the edit dialog's checklist (tick times). */
+  timeZone?: string;
 }) {
   const own = useOptimisticTask(given, givenActivity);
   const { task, activity, patch } = optimistic ?? own;
@@ -88,33 +92,38 @@ export function TaskActions({
   const done = task.status === "done";
 
   return (
-    <div className={`flex shrink-0 flex-wrap items-center justify-end gap-0.5 ${pending ? "opacity-60" : ""}`} data-testid="task-actions">
+    <div className={`flex shrink-0 flex-wrap items-center gap-0.5 ${pending ? "opacity-60" : ""}`} role="group" aria-label={`Actions for ${task.title}`} data-testid="task-actions">
       <IconButton
         icon="check"
         label={done ? "Reopen" : "Mark done"}
-        tone="ok"
+        tone="primary"
         pressed={done}
         disabled={pending || task.status === "cancelled"}
         onClick={() => act(() => setStatusAction(task.id, done ? "todo" : "done"), undefined, { status: done ? "todo" : "done" })}
       />
-      <IconButton icon="edit" label="Edit" onClick={() => setEditing(true)} disabled={pending} />
-      {showOpen && <IconButton icon="external" label="Open" href={`/tasks/${task.id}`} />}
       {person && canChase && (
-        <>
-          <IconButton icon="bell" label={`Chase ${person.name} now`} disabled={pending || closed} onClick={() => setAsk({ kind: "chase" })} />
-          <IconButton
-            icon={paused ? "play" : "pause"}
-            label={paused ? "Resume chasing" : "Pause chasing"}
-            pressed={paused}
-            disabled={pending || closed}
-            onClick={() => act(() => pauseChasingAction(task.id, !paused), undefined, { paused: !paused })}
-          />
-        </>
+        <IconButton icon="play" tone="primary" label={`Chase ${person.name} now`} disabled={pending || closed} onClick={() => setAsk({ kind: "chase" })} />
+      )}
+      <IconButton icon="edit" label="Edit" onClick={() => setEditing(true)} disabled={pending} />
+      {person && canChase && (
+        <IconButton
+          icon={paused ? "play" : "pause"}
+          label={paused ? "Resume chasing" : "Pause chasing"}
+          pressed={paused}
+          disabled={pending || closed}
+          onClick={() => act(() => pauseChasingAction(task.id, !paused), undefined, { paused: !paused })}
+        />
       )}
       {task.status === "cancelled" ? (
         <IconButton icon="restore" label="Restore" disabled={pending} onClick={() => act(() => setStatusAction(task.id, "todo"))} />
       ) : (
-        <IconButton icon="archive" label="Archive" tone="danger" disabled={pending} onClick={() => setAsk({ kind: "archive" })} />
+        <IconButton icon="archive" label="Archive" disabled={pending} onClick={() => setAsk({ kind: "archive" })} />
+      )}
+      {showOpen && (
+        <>
+          <IconButton icon="comment" label={`Comments (${activity?.comments ?? 0})`} badge={activity?.comments ?? 0} href={`/tasks/${task.id}#comments`} />
+          <IconButton icon="external" label="Open" href={`/tasks/${task.id}`} />
+        </>
       )}
 
       <Dialog open={editing} onClose={() => setEditing(false)} title="Edit task" description={task.title} size="lg">
@@ -125,9 +134,14 @@ export function TaskActions({
           sentToPerson={activity?.sentToPerson}
           chase={activity?.chase}
         />
+        <DialogChecklist
+          taskId={task.id}
+          notifyName={person && activity?.sentToPerson && !closed ? person.name : null}
+          timeZone={timeZone}
+        />
         <div className="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
           <a href={`/tasks/${task.id}`} className="text-[13px] text-accent hover:underline">
-            Checklist, comments and timeline on the task page →
+            Comments and timeline on the task page →
           </a>
           <button type="button" className="btn btn-ghost btn-sm text-risk" onClick={() => setAsk({ kind: "delete" })}>
             Delete task…

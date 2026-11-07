@@ -4,8 +4,10 @@ import {
   asc,
   desc,
   eq,
+  gte,
   ilike,
   inArray,
+  isNotNull,
   isNull,
   lt,
   lte,
@@ -31,6 +33,7 @@ import {
   people,
   personCompanies,
   projects,
+  taskComments,
   taskEvents,
   tasks,
   users,
@@ -151,16 +154,22 @@ const openWhere = () => notInArray(tasks.status, [...CLOSED_STATUSES]);
 // Queries
 // ---------------------------------------------------------------------------
 
-export async function listTasks(ctx: ServiceContext, rawFilters: TaskFilters = {}): Promise<TaskView[]> {
-  const f = taskFiltersSchema.parse(rawFilters);
-  const todayIso = today(ctx);
+type ParsedTaskFilters = ReturnType<typeof taskFiltersSchema.parse>;
+
+/** Every condition of a task list except its status (the status tabs count across statuses). */
+function taskListWhere(ctx: ServiceContext, f: ParsedTaskFilters, todayIso: IsoDate): (SQL | undefined)[] {
   const where: (SQL | undefined)[] = [
     visibleTasksWhere(ctx),
     // Tasks of archived companies are hidden (personal todos have no company).
     sql`(${tasks.companyId} is null or ${tasks.companyId} in (select ${companies.id} from ${companies} where ${companies.archivedAt} is null))`,
   ];
+  const personal = and(eq(tasks.visibility, "private"), eq(tasks.ownerUserId, ctx.user.id));
+  const assignedToMe = eq(tasks.assigneeUserId, ctx.user.id);
 
   switch (f.view) {
+    case "mine":
+      where.push(or(personal, assignedToMe, and(eq(tasks.ownerUserId, ctx.user.id), isNull(tasks.assigneeUserId), isNull(tasks.assigneePersonId))));
+      break;
     case "my":
       where.push(eq(tasks.visibility, "private"), eq(tasks.ownerUserId, ctx.user.id));
       break;
@@ -180,20 +189,75 @@ export async function listTasks(ctx: ServiceContext, rawFilters: TaskFilters = {
   // A person's task (the view shows a founder assignee first when both are set).
   if (f.assigneePersonId) where.push(isNull(tasks.assigneeUserId), eq(tasks.assigneePersonId, f.assigneePersonId));
   if (f.priority) where.push(eq(tasks.priority, f.priority));
-  if (f.status === "open") where.push(openWhere());
-  else if (f.status && f.status !== "any") where.push(eq(tasks.status, f.status));
   if (f.q) where.push(ilike(tasks.title, `%${escapeLike(f.q)}%`));
+  if (f.search) {
+    const like = `%${escapeLike(f.search)}%`;
+    where.push(or(ilike(tasks.title, like), ilike(people.fullName, like), ilike(assigneeUser.shortName, like), ilike(companies.name, like)));
+  }
+  if (f.dueFrom) where.push(gte(tasks.dueDate, f.dueFrom));
+  if (f.dueTo) where.push(lte(tasks.dueDate, f.dueTo));
+  const week = thisWeekRange(todayIso);
+  for (const q of new Set(f.quick ?? [])) {
+    if (q === "personal") where.push(personal);
+    else if (q === "assigned") where.push(assignedToMe);
+    else if (q === "overdue") where.push(openWhere(), lt(tasks.dueDate, todayIso));
+    else if (q === "week") where.push(gte(tasks.dueDate, todayIso), lte(tasks.dueDate, week.to));
+    // Waiting on a person: open and assigned to a staff member (they answer through the bot).
+    else if (q === "waiting") where.push(openWhere(), isNull(tasks.assigneeUserId), isNotNull(tasks.assigneePersonId));
+    else if (q === "comments") where.push(sql`exists (select 1 from ${taskComments} where ${taskComments.taskId} = ${tasks.id})`);
+  }
+  return where;
+}
 
+function statusWhere(status: ParsedTaskFilters["status"], todayIso: IsoDate): SQL | undefined {
+  if (status === "open") return openWhere();
+  if (status === "overdue") return and(openWhere(), lt(tasks.dueDate, todayIso));
+  if (status && status !== "any") return eq(tasks.status, status);
+  return undefined;
+}
+
+export async function listTasks(ctx: ServiceContext, rawFilters: TaskFilters = {}): Promise<TaskView[]> {
+  const f = taskFiltersSchema.parse(rawFilters);
+  const todayIso = today(ctx);
+  const where = [...taskListWhere(ctx, f, todayIso), statusWhere(f.status, todayIso)];
+  const order =
+    f.sort === "newest"
+      ? [desc(tasks.createdAt)]
+      : f.sort === "title"
+        ? [asc(sql`lower(${tasks.title})`), desc(tasks.createdAt)]
+        : [asc(closedRank), sql`${tasks.dueDate} asc nulls last`, asc(priorityRank), desc(tasks.createdAt)];
   const rows = await baseSelect(ctx)
     .where(and(...where))
-    .orderBy(
-      asc(closedRank),
-      sql`${tasks.dueDate} asc nulls last`,
-      asc(priorityRank),
-      desc(tasks.createdAt),
-    )
+    .orderBy(...order)
     .limit(f.limit ?? 200);
   return rows.map((r) => toView(r, todayIso));
+}
+
+export interface TaskStatusCounts {
+  open: number;
+  overdue: number;
+  done: number;
+  any: number;
+}
+
+/** The status tabs' counts for a list (same filters, every status), in one query. */
+export async function countTasksByStatus(ctx: ServiceContext, rawFilters: TaskFilters = {}): Promise<TaskStatusCounts> {
+  const f = taskFiltersSchema.parse(rawFilters);
+  const todayIso = today(ctx);
+  const open = sql`${tasks.status} not in ('done', 'cancelled')`;
+  const [row] = await ctx.db
+    .select({
+      open: sql<number>`count(*) filter (where ${open})`.mapWith(Number),
+      overdue: sql<number>`count(*) filter (where ${open} and ${tasks.dueDate} < ${todayIso})`.mapWith(Number),
+      done: sql<number>`count(*) filter (where ${tasks.status} = 'done')`.mapWith(Number),
+      any: sql<number>`count(*)`.mapWith(Number),
+    })
+    .from(tasks)
+    .leftJoin(companies, eq(companies.id, tasks.companyId))
+    .leftJoin(assigneeUser, eq(assigneeUser.id, tasks.assigneeUserId))
+    .leftJoin(people, eq(people.id, tasks.assigneePersonId))
+    .where(and(...taskListWhere(ctx, f, todayIso)));
+  return row ?? { open: 0, overdue: 0, done: 0, any: 0 };
 }
 
 /** Returns the task or throws not_found (also for private tasks of the other founder). */

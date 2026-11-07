@@ -54,6 +54,7 @@ test("Today: quick add, Done (optimistic, rollback on failure), Reopen on Tasks,
   await onTasks.getByRole("button", { name: "Reopen" }).click();
   await expect(onTasks).toContainText("To do");
   await page.getByRole("link", { name: "Today" }).first().click();
+  await expect(page.getByRole("heading", { name: /Good day/ })).toBeVisible();
   await expect(page.locator("li[data-task-id]", { hasText: title })).toBeVisible();
 
   // Checklist on the task page: a slow tick shows at once ("saving…"), then who ticked it; a failing one rolls back.
@@ -87,7 +88,8 @@ test("Today: quick add, Done (optimistic, rollback on failure), Reopen on Tasks,
 
 test("Routines: Pause / Resume are optimistic; the routine page and the list stay in step", async ({ page }) => {
   await login(page, "nuraaly");
-  await page.goto("/routines");
+  // "All" keeps a paused routine listed (the default tab shows active ones only).
+  await page.goto("/routines?status=all");
   const first = page.getByTestId("routine-row").filter({ has: page.getByRole("button", { name: "Pause", exact: true }) }).first();
   const title = (await first.getByRole("link").first().textContent())!.trim();
   const row = page.getByTestId("routine-row").filter({ has: page.getByRole("link", { name: title, exact: true }) });

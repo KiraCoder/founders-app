@@ -3,6 +3,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { CompanyDot, InitialsAvatar, Tag } from "@/components/ui";
+import { ListRow, ROW_TITLE } from "@/components/ui/ListRow";
 import { daysBetween, formatDueDate } from "@/lib/dates";
 import type { TaskFormOptions } from "@/server/services/options";
 import { PRIORITY_TONE, STATUS_TONE, priorityLabel, statusLabel } from "./labels";
@@ -139,49 +140,50 @@ function TaskRow({
   const { task, activity } = optimistic;
   const closed = task.status === "done" || task.status === "cancelled";
   return (
-    <li className="px-3 py-2.5 sm:px-4" data-task-id={task.id}>
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <Link href={`/tasks/${task.id}`} className={`text-[14px] hover:underline ${closed ? "text-muted line-through" : "font-medium"}`}>
-              {task.title}
-            </Link>
-            {task.visibility === "private" && (
-              <Tag title="Only you can see this">
-                <span aria-hidden="true">🔒</span> Personal
-              </Tag>
-            )}
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px] text-muted">
-            <Tag tone={STATUS_TONE[task.status]}>{statusLabel(task.status)}</Tag>
-            <DueChip task={task} today={today} />
-            {task.priority !== "normal" && <Tag tone={PRIORITY_TONE[task.priority]}>{priorityLabel(task.priority)}</Tag>}
-            {showCompany && task.company && (
-              <Link href={`/companies/${task.company.slug}`} className="inline-flex items-center gap-1 hover:text-ink">
-                <CompanyDot color={task.company.color} size={7} /> {task.company.name}
-              </Link>
-            )}
-            {task.project && (
-              <Link href={`/projects/${task.project.id}`} className="inline-flex items-center gap-1 hover:text-ink">
-                <span aria-hidden="true">📁</span> {task.project.name}
-              </Link>
-            )}
-            {task.orgDepartment && (
-              <span className="tag" title={`Department ${task.orgDepartment.number} ${task.orgDepartment.name} (org chart)`} data-testid="task-department">
-                {task.orgDepartment.number} {task.orgDepartment.name}
-              </span>
-            )}
-            {task.assignee && (
-              <span className="inline-flex items-center gap-1" aria-label={`Assigned to ${task.assignee.name}`}>
-                <InitialsAvatar name={task.assignee.name} size={16} />
-                <span>{task.assignee.name}</span>
-              </span>
-            )}
-          </div>
-          <ActivityLine task={task} a={activity} timeZone={timeZone} />
-        </div>
-        <TaskActions task={given} activity={givenActivity} options={options} canChase={canChase} optimistic={optimistic} />
-      </div>
-    </li>
+    <ListRow
+      data-task-id={task.id}
+      title={
+        <Link href={`/tasks/${task.id}`} className={closed ? "text-muted line-through hover:underline" : ROW_TITLE}>
+          {task.title}
+        </Link>
+      }
+      badges={
+        <>
+          <Tag tone={STATUS_TONE[task.status]}>{statusLabel(task.status)}</Tag>
+          {task.priority !== "normal" && <Tag tone={PRIORITY_TONE[task.priority]}>{priorityLabel(task.priority)}</Tag>}
+          {task.visibility === "private" && (
+            <Tag title="Only you can see this">
+              <span aria-hidden="true">🔒</span> Personal
+            </Tag>
+          )}
+        </>
+      }
+      meta={[
+        task.assignee && (
+          <span key="who" className="inline-flex items-center gap-1" aria-label={`Assigned to ${task.assignee.name}`}>
+            <InitialsAvatar name={task.assignee.name} size={16} />
+            <span>{task.assignee.name}</span>
+          </span>
+        ),
+        showCompany && task.company && (
+          <Link key="co" href={`/companies/${task.company.slug}`} className="inline-flex items-center gap-1 hover:text-ink">
+            <CompanyDot color={task.company.color} size={7} /> {task.company.name}
+          </Link>
+        ),
+        task.project && (
+          <Link key="pr" href={`/projects/${task.project.id}`} className="inline-flex items-center gap-1 hover:text-ink">
+            <span aria-hidden="true">📁</span> {task.project.name}
+          </Link>
+        ),
+        task.orgDepartment && (
+          <span key="dep" title={`Department ${task.orgDepartment.number} ${task.orgDepartment.name} (org chart)`} data-testid="task-department">
+            {task.orgDepartment.number} {task.orgDepartment.name}
+          </span>
+        ),
+      ]}
+      below={<ActivityLine task={task} a={activity} timeZone={timeZone} />}
+      aside={<DueChip task={task} today={today} />}
+      actions={<TaskActions task={given} activity={givenActivity} options={options} canChase={canChase} optimistic={optimistic} timeZone={timeZone} />}
+    />
   );
 }

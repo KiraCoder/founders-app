@@ -2,43 +2,93 @@ import { notFound } from "next/navigation";
 import { NewRoutineButton } from "@/components/routines/RoutineActions";
 import { RoutinesList } from "@/components/routines/RoutinesList";
 import { ActionForm } from "@/components/staff/ActionForm";
+import { FilterBar } from "@/components/ui/FilterBar";
 import { PageHeader, Section } from "@/components/ui";
-import { ROUTINE_STATUSES, type RoutineStatus } from "@/lib/routines";
+import { todayInTimeZone } from "@/lib/dates";
+import { readListFilters } from "@/lib/list-filters";
 import { getPageContext } from "@/server/context";
 import { canManageRoutines } from "@/server/services/access";
-import { exampleRoutineAvailable, listRoutines, routineFormOptions } from "@/server/services/routines";
+import { exampleRoutineAvailable, listRoutines, routineFormOptions, type RoutineView } from "@/server/services/routines";
 import { createExampleRoutineAction } from "./actions";
 
 export const metadata = { title: "Routines" };
 export const dynamic = "force-dynamic";
 
-/**
- * Routines — the control center: every routine with its status, who, company, schedule and next
- * ask, the latest run (3/5, missed), comments, and icon actions. "+ New" and ✎ Edit open a dialog.
- * `?new=1` (with `who` / `company`) opens the create dialog prefilled (links from company / person pages).
- */
-export default async function RoutinesPage({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
+/** Status tabs: "" = Active (the default), All = every routine that is not archived. */
+const TABS = [
+  { value: "", label: "Active" },
+  { value: "paused", label: "Paused" },
+  { value: "ended", label: "Ended" },
+  { value: "all", label: "All" },
+] as const;
+const CONDITION_STATUSES = [...TABS.map((t) => ({ value: t.value, label: t.label })), { value: "archived", label: "Archived" }, { value: "everything", label: "All, archived too" }];
+const QUICK = [
+  { value: "today", label: "Due today" },
+  { value: "missed", label: "Missed" },
+  { value: "comments", label: "Has comments" },
+  { value: "cant", label: "Can't (❌)" },
+] as const;
+const SORTS = [
+  { value: "title", label: "Title" },
+  { value: "newest", label: "Newest first" },
+  { value: "due", label: "Due soonest" },
+] as const;
+
+function inTab(v: RoutineView, tab: string): boolean {
+  if (tab === "everything") return true;
+  if (tab === "archived") return v.status === "archived";
+  if (v.status === "archived") return false;
+  if (tab === "all") return true;
+  return v.status === (tab || "active");
+}
+
+/** A quick filter on the routine as listed (latest run, comments, next ask). */
+function quickMatch(v: RoutineView, q: string, now: Date): boolean {
+  const run = v.today ?? v.lastRun;
+  switch (q) {
+    case "today":
+      return !!v.nextDueAt && todayInTimeZone(v.nextDueAt, v.routine.timezone) === todayInTimeZone(now, v.routine.timezone);
+    case "missed":
+      return run?.status === "missed";
+    case "comments":
+      return v.commentsCount > 0;
+    case "cant":
+      return !!run && Object.values(run.itemStates ?? {}).some((s) => s.state === "cant");
+    default:
+      return true;
+  }
+}
+
+export default async function RoutinesPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const ctx = await getPageContext();
   if (!canManageRoutines(ctx)) notFound();
   const sp = await searchParams;
-  const status = (ROUTINE_STATUSES as readonly string[]).includes(sp.status ?? "") ? (sp.status as RoutineStatus) : sp.status === "all" ? "all" : null;
-  const [person, user] = sp.who?.startsWith("person:") ? [sp.who.slice(7), null] : sp.who?.startsWith("user:") ? [null, sp.who.slice(5)] : [null, null];
-  const uuid = /^[0-9a-f-]{36}$/i;
-  const filter = {
-    companyId: sp.company && uuid.test(sp.company) ? sp.company : null,
-    personId: person && uuid.test(person) ? person : null,
-    userId: user && uuid.test(user) ? user : null,
-  };
+  const lf = readListFilters(sp, { statuses: CONDITION_STATUSES.map((s) => s.value).filter(Boolean), quick: QUICK.map((q) => q.value), sorts: SORTS.map((s) => s.value) });
   const [items, options] = await Promise.all([
-    // Archived ones only when asked for: filtered below by the shown status ("ended" is computed).
-    listRoutines(ctx, { ...filter, status: "all" }),
+    listRoutines(ctx, { companyId: lf.company, personId: lf.personId, userId: lf.userId, status: "all" }),
     routineFormOptions(ctx),
   ]);
   // An unfiltered list already shows whether the example exists (no extra query then).
-  const example = await exampleRoutineAvailable(ctx, filter.companyId || filter.personId || filter.userId ? undefined : items);
-  const shown = status ? items.filter((v) => status === "all" || v.status === status) : items.filter((v) => v.routine.status !== "archived");
-  const prefillWho = sp.who && /^(person|user):[0-9a-f-]{36}$/i.test(sp.who) ? sp.who : "";
-  const prefillCompany = sp.company && uuid.test(sp.company) ? sp.company : "";
+  const example = await exampleRoutineAvailable(ctx, lf.company || lf.personId || lf.userId ? undefined : items);
+
+  // Search, quick filters and the date range narrow the list; the tabs count what is left.
+  const needle = lf.search.toLowerCase();
+  const narrowed = items.filter(
+    (v) =>
+      (!needle || [v.routine.title, v.assigneeName, v.companyName ?? ""].some((x) => x.toLowerCase().includes(needle))) &&
+      lf.quick.every((q) => quickMatch(v, q, ctx.now)) &&
+      (!lf.from || (!!v.nextDueAt && todayInTimeZone(v.nextDueAt, v.routine.timezone) >= lf.from)) &&
+      (!lf.to || (!!v.nextDueAt && todayInTimeZone(v.nextDueAt, v.routine.timezone) <= lf.to)),
+  );
+  const shown = narrowed.filter((v) => inTab(v, lf.status));
+  if (lf.sort === "newest") shown.sort((a, b) => b.routine.createdAt.getTime() - a.routine.createdAt.getTime());
+  else if (lf.sort === "due") shown.sort((a, b) => (a.nextDueAt?.getTime() ?? Infinity) - (b.nextDueAt?.getTime() ?? Infinity));
+  const people = [
+    ...options.founders.map((f) => ({ value: `user:${f.id}`, label: `${f.name} (founder)`, companyIds: null })),
+    ...options.people.map((p) => ({ value: `person:${p.id}`, label: p.name, companyIds: p.companyIds })),
+  ];
+  const prefillWho = lf.who ?? "";
+  const prefillCompany = lf.company ?? "";
   return (
     <>
       <PageHeader
@@ -61,49 +111,21 @@ export default async function RoutinesPage({ searchParams }: { searchParams: Pro
         </p>
       </PageHeader>
 
-      <form className="mb-4 flex flex-wrap items-end gap-2" method="get" aria-label="Filter routines">
-        <label className="flex min-w-[140px] flex-1 flex-col gap-1 sm:flex-none">
-          <span className="label">Company</span>
-          <select className="input" name="company" defaultValue={sp.company ?? ""}>
-            <option value="">All</option>
-            {options.companies.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex min-w-[140px] flex-1 flex-col gap-1 sm:flex-none">
-          <span className="label">Who</span>
-          <select className="input" name="who" defaultValue={sp.who ?? ""}>
-            <option value="">Everyone</option>
-            {options.people.map((p) => (
-              <option key={p.id} value={`person:${p.id}`}>
-                {p.name}
-              </option>
-            ))}
-            {options.founders.map((f) => (
-              <option key={f.id} value={`user:${f.id}`}>
-                {f.name} (founder)
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="flex min-w-[140px] flex-1 flex-col gap-1 sm:flex-none">
-          <span className="label">Status</span>
-          <select className="input" name="status" defaultValue={sp.status ?? ""}>
-            <option value="">Not archived</option>
-            <option value="active">Active</option>
-            <option value="paused">Paused</option>
-            <option value="ended">Ended</option>
-            <option value="archived">Archived</option>
-            <option value="all">All</option>
-          </select>
-        </label>
-        <button type="submit" className="btn">
-          Filter
-        </button>
-      </form>
+      <FilterBar
+        label="Filter routines"
+        path="/routines"
+        query={lf.query}
+        tabs={TABS.map((t) => ({ value: t.value, label: t.label, count: narrowed.filter((v) => inTab(v, t.value)).length }))}
+        status={lf.status}
+        quick={QUICK.map((q) => ({ ...q }))}
+        savedKey={`fc:filters:routines:${ctx.user.id}`}
+        searchPlaceholder="Search title, person, company"
+        companies={options.companies}
+        people={people}
+        statuses={CONDITION_STATUSES}
+        dateLabel="Next ask"
+        sorts={SORTS.map((s) => ({ ...s }))}
+      />
 
       <Section title="Routines" count={shown.length}>
         <RoutinesList items={shown} options={options} now={ctx.now} empty="No routines match. Create one with + New, or use the Elmurat 1C example." />

@@ -3,6 +3,7 @@ import { Tag, type Tone } from "@/components/ui";
 import { formatDisplayDate, todayInTimeZone } from "@/lib/dates";
 import { runProgress } from "@/lib/routines";
 import type { RoutineView } from "@/server/services/routines";
+import { ListRow, ROW_TITLE } from "@/components/ui/ListRow";
 import { RoutineActions } from "./RoutineActions";
 import { RoutineStatusScope, RoutineStatusTag } from "./RoutineStatus";
 import { routineFormValues, todayRunOf, type RoutineFormOptions } from "./form-values";
@@ -58,53 +59,44 @@ export function RoutinesList({
       {items.map((v) => {
         const r = v.routine;
         return (
-          <li key={r.id} className="flex flex-col gap-2 px-4 py-3 text-[13px] md:flex-row md:items-center" data-testid="routine-row">
-            <RoutineStatusScope status={v.status}>
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <Link href={`/routines/${r.id}`} className="font-semibold hover:underline">
-                    {r.title}
-                  </Link>
+          <RoutineStatusScope key={r.id} status={v.status}>
+            <ListRow
+              data-testid="routine-row"
+              title={
+                <Link href={`/routines/${r.id}`} className={ROW_TITLE}>
+                  {r.title}
+                </Link>
+              }
+              badges={
+                <>
                   <RoutineStatusTag status={v.status} />
                   {v.assigneeKind === "person" && !v.reachable && v.status === "active" && (
                     <Tag tone="warn" title="Runs open only while the bot may message them (Settings → Team on Telegram)">
                       Not reachable on Telegram
                     </Tag>
                   )}
-                </div>
-                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-muted">
-                  <span>
-                    {v.assigneeName}
-                    {v.assigneeKind === "founder" ? " (founder)" : ""}
-                  </span>
-                  <span aria-hidden>·</span>
-                  <span>{v.companyName ?? "Group-wide"}</span>
-                  <span aria-hidden>·</span>
-                  <span>{v.scheduleText}</span>
-                  {r.confirmation === "checklist" && (
-                    <>
-                      <span aria-hidden>·</span>
-                      <span>{r.items.length} items</span>
-                    </>
-                  )}
-                  {v.status === "active" && (
-                    <>
-                      <span aria-hidden>·</span>
-                      <span>next {formatNextDue(v.nextDueAt, r.timezone, now)}</span>
-                    </>
-                  )}
-                  {r.endsOn && <span>· until {formatDisplayDate(r.endsOn)}</span>}
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 md:justify-end">
-                {lastRunTag(v)}
+                </>
+              }
+              meta={[
+                <span key="who">
+                  {v.assigneeName}
+                  {v.assigneeKind === "founder" ? " (founder)" : ""}
+                </span>,
+                <span key="co">{v.companyName ?? "Group-wide"}</span>,
+                <span key="sch">{v.scheduleText}</span>,
+                r.confirmation === "checklist" && <span key="items">{r.items.length} items</span>,
+                v.status === "active" && <span key="next">next {formatNextDue(v.nextDueAt, r.timezone, now)}</span>,
+                r.endsOn && <span key="end">until {formatDisplayDate(r.endsOn)}</span>,
+              ]}
+              aside={lastRunTag(v)}
+              actions={
                 <RoutineActions
                   data={{ id: r.id, title: r.title, status: v.status, todayStatus: v.today?.status ?? null, hasRuns: !!v.lastRun, commentsCount: v.commentsCount }}
                   edit={options ? { initial: routineFormValues(v), today: todayRunOf(v), options } : null}
                 />
-              </div>
-            </RoutineStatusScope>
-          </li>
+              }
+            />
+          </RoutineStatusScope>
         );
       })}
     </ul>

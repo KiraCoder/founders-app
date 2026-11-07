@@ -37,7 +37,7 @@ export function IconButton({ icon, label, tone = "default", size = "md", href, b
         : tone === "ok"
           ? `${pressed ? "text-ok" : "text-muted"} hover:bg-sunk hover:text-ok`
           : "text-muted hover:bg-sunk hover:text-ink";
-  const on = pressed ? "bg-sunk" : "";
+  const on = pressed ? (tone === "primary" ? "bg-accent-soft" : "bg-sunk") : "";
   const cls = `relative inline-flex ${dim} items-center justify-center gap-1 rounded-[var(--radius-btn)] px-1.5 transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:opacity-40 disabled:pointer-events-none ${color} ${on} ${className}`;
   const inner = (
     <>

@@ -9,8 +9,19 @@ export const TASK_STATUS_VALUES = ["todo", "in_progress", "waiting", "done", "ca
 export const TASK_PRIORITY_VALUES = ["urgent", "high", "normal", "low"] as const;
 export const TASK_VISIBILITY_VALUES = ["private", "shared"] as const;
 export const PROJECT_STATUS_VALUES = ["planned", "active", "on_hold", "done", "cancelled"] as const;
-export const TASK_VIEWS = ["my", "assigned", "company", "overdue"] as const;
+/**
+ * Task views. "mine" (the Tasks page's "My tasks") = my personal todos + tasks assigned to me +
+ * shared tasks I created with no assignee. "my" (personal todos only), "assigned" and "overdue"
+ * stay for the REST API / assistant and old links (the page redirects them to "mine").
+ */
+export const TASK_VIEWS = ["mine", "my", "assigned", "company", "overdue"] as const;
 export type TaskView = (typeof TASK_VIEWS)[number];
+
+/** Quick filters of the task list (toggle chips; several combine with AND). */
+export const TASK_QUICK_FILTERS = ["personal", "assigned", "overdue", "week", "waiting", "comments"] as const;
+export type TaskQuickFilter = (typeof TASK_QUICK_FILTERS)[number];
+export const TASK_SORTS = ["due", "newest", "title"] as const;
+export type TaskSort = (typeof TASK_SORTS)[number];
 
 const blankToNull = (v: unknown) => (typeof v === "string" && v.trim() === "" ? null : v);
 
@@ -61,12 +72,21 @@ export const taskFiltersSchema = z.object({
   /** Only tasks assigned to this founder / person (exact assignee, not "relevant to"). */
   assigneeUserId: optionalUuid,
   assigneePersonId: optionalUuid,
+  /** A status, "open" (not done / cancelled), "overdue" (open and past due) or "any". */
   status: z.preprocess(
     blankToNull,
-    z.enum([...TASK_STATUS_VALUES, "open", "any"]).nullable().optional(),
+    z.enum([...TASK_STATUS_VALUES, "open", "overdue", "any"]).nullable().optional(),
   ),
   priority: z.preprocess(blankToNull, z.enum(TASK_PRIORITY_VALUES).nullable().optional()),
+  /** Title only (REST API). */
   q: optionalText(200),
+  /** Title, assignee or company name (the list's search box). */
+  search: optionalText(200),
+  quick: z.array(z.enum(TASK_QUICK_FILTERS)).max(TASK_QUICK_FILTERS.length).optional(),
+  /** Due date range (inclusive). */
+  dueFrom: optionalDate,
+  dueTo: optionalDate,
+  sort: z.preprocess(blankToNull, z.enum(TASK_SORTS).nullable().optional()),
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 export type TaskFilters = z.input<typeof taskFiltersSchema>;
