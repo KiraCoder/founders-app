@@ -17,6 +17,7 @@ import { assertStaffBotAccess, assertValidId } from "./access";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { changeTaskDeadline, getTask } from "./tasks";
+import { personStatusText } from "./tasks-rules";
 
 /**
  * Task comments (founders in the app, persons through the bot), a person's deadline requests and
@@ -192,7 +193,7 @@ export async function getTaskStaffTrail(ctx: ServiceContext, taskId: string): Pr
     const v = (r.e.newValue ?? {}) as { reply?: string; proposedDueDate?: string };
     const what =
       r.e.kind === "status_changed"
-        ? `Marked ${String(r.e.newValue)}`
+        ? personStatusText(r.e.newValue)
         : v.reply === "accepted"
           ? "Accepted"
           : v.reply === "help"

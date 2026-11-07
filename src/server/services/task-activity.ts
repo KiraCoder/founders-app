@@ -10,7 +10,7 @@ import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { readStaffDefaults } from "./staff";
 import { getTask } from "./tasks";
-import { CLOSED_STATUSES } from "./tasks-rules";
+import { CLOSED_STATUSES, personStatusText } from "./tasks-rules";
 
 /**
  * The task list as a control center and the task page's timeline (0032): what was last sent to
@@ -43,7 +43,7 @@ const KIND_TEXT: Record<string, string> = {
 
 export function replyText(v: unknown, kind: string): string {
   const r = (v ?? {}) as { reply?: string; proposedDueDate?: string; item?: string };
-  if (kind === "status_changed") return `Marked ${String(v)}`;
+  if (kind === "status_changed") return personStatusText(v);
   switch (r.reply) {
     case "accepted":
       return "Accepted";
@@ -160,7 +160,18 @@ export interface TimelineEntry {
   tone?: "ok" | "warn" | "risk" | "info";
 }
 
-const STATUS_WORD: Record<string, string> = { todo: "To do", in_progress: "In progress", waiting: "Waiting", done: "Done", cancelled: "Cancelled" };
+const STATUS_WORD: Record<string, string> = {
+  backlog: "Backlog",
+  todo: "Todo",
+  in_progress: "In Progress",
+  in_review: "In Review",
+  done: "Done",
+  cancelled: "Canceled",
+  // Before 0034.
+  waiting: "Waiting",
+};
+const PRIORITY_WORD: Record<string, string> = { none: "No priority", urgent: "Urgent", high: "High", medium: "Medium", low: "Low", normal: "Normal" };
+const CHECKLIST_WORD: Record<string, string> = { added: "added", edited: "edited", removed: "removed", ticked: "ticked", unticked: "unticked", moved: "moved", promoted: "promoted to a task" };
 
 /**
  * Everything that happened to the task, oldest first: created, status / deadline / assignee
@@ -191,6 +202,18 @@ export async function getTaskTimeline(ctx: ServiceContext, taskId: string): Prom
       )
       .orderBy(asc(o.createdAt)),
   ]);
+  // Names of the assignees the history mentions (founders and people).
+  const userIds = new Set<string>();
+  const personIds = new Set<string>();
+  for (const r of events) {
+    if (r.e.kind !== "assignee_changed" || typeof r.e.newValue !== "string") continue;
+    (r.e.field === "assigneeUserId" ? userIds : personIds).add(r.e.newValue);
+  }
+  const [userNames, personNames] = await Promise.all([
+    userIds.size ? ctx.db.select({ id: users.id, n: users.shortName }).from(users).where(inArray(users.id, [...userIds])) : Promise.resolve([]),
+    personIds.size ? ctx.db.select({ id: people.id, n: people.fullName, s: people.shortName }).from(people).where(inArray(people.id, [...personIds])) : Promise.resolve([]),
+  ]);
+  const nameOf = new Map<string, string>([...userNames.map((u) => [u.id, u.n] as const), ...personNames.map((p) => [p.id, p.s || p.n] as const)]);
   const out: TimelineEntry[] = [];
   let reminder = 0;
   for (const s of sent) {
@@ -234,13 +257,31 @@ export async function getTaskTimeline(ctx: ServiceContext, taskId: string): Prom
         out.push({ at: e.createdAt, icon: "📅", what: `Deadline: ${e.oldValue ?? "none"} → ${e.newValue ?? "none"}`, who });
         break;
       case "assignee_changed":
-        if (e.newValue) out.push({ at: e.createdAt, icon: "👤", what: "Assignee changed", who });
+        if (e.newValue) out.push({ at: e.createdAt, icon: "👤", what: `Assigned to ${nameOf.get(String(e.newValue)) ?? "someone"}`, who });
+        else if (!events.some((x) => x.e.kind === "assignee_changed" && x.e.createdAt.getTime() === e.createdAt.getTime() && x.e.newValue)) {
+          out.push({ at: e.createdAt, icon: "👤", what: "Unassigned", who });
+        }
         break;
       case "updated": {
+        const v = e.newValue;
         if (e.field === "checklist") {
-          const v = (e.newValue ?? {}) as { action?: string; item?: string };
-          out.push({ at: e.createdAt, icon: "☑️", what: `Checklist: ${v.action ?? "changed"} “${v.item ?? ""}”`, who });
-        } else if (e.field === "title") out.push({ at: e.createdAt, icon: "✎", what: "Title changed", who });
+          const c = (v ?? {}) as { action?: string; item?: string; key?: string };
+          out.push({ at: e.createdAt, icon: "☑️", what: `Sub-task ${CHECKLIST_WORD[c.action ?? ""] ?? c.action ?? "changed"}: “${c.item ?? ""}”${c.key ? ` → ${c.key}` : ""}`, who });
+        } else if (e.field === "title") out.push({ at: e.createdAt, icon: "✎", what: `Title → “${String(v ?? "")}”`, who });
+        else if (e.field === "notes") out.push({ at: e.createdAt, icon: "✎", what: v ? "Description changed" : "Description cleared", who });
+        else if (e.field === "priority") out.push({ at: e.createdAt, icon: "⚑", what: `Priority: ${PRIORITY_WORD[String(e.oldValue)] ?? e.oldValue} → ${PRIORITY_WORD[String(v)] ?? v}`, who });
+        else if (e.field === "estimate") out.push({ at: e.createdAt, icon: "▲", what: v ? `Estimate: ${v} point${v === 1 ? "" : "s"}` : "Estimate cleared", who });
+        else if (e.field === "labels") {
+          const before = Array.isArray(e.oldValue) ? (e.oldValue as string[]) : [];
+          const after = Array.isArray(v) ? (v as string[]) : [];
+          const added = after.filter((x) => !before.includes(x));
+          const removed = before.filter((x) => !after.includes(x));
+          const bits = [added.length ? `added ${added.join(", ")}` : null, removed.length ? `removed ${removed.join(", ")}` : null].filter(Boolean);
+          out.push({ at: e.createdAt, icon: "🏷", what: `Labels: ${bits.join("; ") || "changed"}`, who });
+        } else if (e.field === "needsReview") out.push({ at: e.createdAt, icon: "👀", what: v ? "Needs review: on" : "Needs review: off", who });
+        else if (e.field === "companyId") out.push({ at: e.createdAt, icon: "🏢", what: "Company changed (new key)", who });
+        else if (e.field === "projectId") out.push({ at: e.createdAt, icon: "📁", what: v ? "Project changed" : "Removed from the project", who });
+        else if (e.field === "visibility") out.push({ at: e.createdAt, icon: "🔒", what: v === "private" ? "Made personal" : "Shared with both founders", who });
         break;
       }
     }

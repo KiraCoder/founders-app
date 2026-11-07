@@ -940,3 +940,57 @@ describe("0026 ingest log keeps its rows when a key (or its user) is deleted", (
     ]);
   });
 });
+
+describe("0034 tasks like Linear on existing data", () => {
+  it("maps statuses and priorities, keeps the rows, numbers tasks per company / per founder and sets prefixes", async () => {
+    const { client, db } = await newPglite();
+    await migrate(db, { migrationsFolder: migrationsUpTo("0034") });
+    const KIWI = "33333333-3333-4333-8333-333333333333";
+    const STYLE = "66666666-6666-4666-8666-666666666666";
+    const BRAND = "77777777-7777-4777-8777-777777777777";
+    await client.exec(`
+      insert into users (id, email, name, short_name) values
+        ('${NURAALY}', 'n@x', 'Nuraaly', 'Nuraaly'), ('${TALANT}', 't@x', 'Talant', 'Talant');
+      insert into companies (id, slug, name, sort) values
+        ('${KIWI}', 'kiwi-go', 'Kiwi Go', 1), ('${BRAND}', 'alura-brand', 'Alura Brand', 2), ('${STYLE}', 'alura-style', 'Alura Style', 3);
+      insert into tasks (title, owner_user_id, visibility, company_id, status, priority, created_at) values
+        ('k1', '${NURAALY}', 'shared', '${KIWI}', 'todo', 'normal', '2026-01-01'),
+        ('k2', '${NURAALY}', 'shared', '${KIWI}', 'waiting', 'urgent', '2026-01-02'),
+        ('k3', '${TALANT}', 'shared', '${KIWI}', 'in_progress', 'high', '2026-01-03'),
+        ('k4', '${TALANT}', 'shared', '${KIWI}', 'cancelled', 'low', '2026-01-04'),
+        ('s1', '${TALANT}', 'shared', '${STYLE}', 'done', 'normal', '2026-01-05'),
+        ('p1', '${NURAALY}', 'private', null, 'todo', 'normal', '2026-01-06'),
+        ('p2', '${NURAALY}', 'private', null, 'todo', 'normal', '2026-01-07'),
+        ('p3', '${TALANT}', 'private', null, 'todo', 'normal', '2026-01-08');
+    `);
+    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    const rows = (
+      await client.query<{ title: string; status: string; priority: string; number: number; needs_review: boolean; started_at: string | null }>(
+        "select title, status, priority, number, needs_review, started_at from tasks order by title",
+      )
+    ).rows;
+    const by = Object.fromEntries(rows.map((r) => [r.title, r]));
+    expect(rows).toHaveLength(8);
+    expect([by.k1!.status, by.k2!.status, by.k3!.status, by.k4!.status, by.s1!.status]).toEqual(["todo", "in_review", "in_progress", "cancelled", "done"]);
+    expect([by.k1!.priority, by.k2!.priority, by.k3!.priority, by.k4!.priority]).toEqual(["medium", "urgent", "high", "low"]);
+    expect([by.k1!.number, by.k2!.number, by.k3!.number, by.k4!.number, by.s1!.number]).toEqual([1, 2, 3, 4, 1]);
+    expect([by.p1!.number, by.p2!.number, by.p3!.number]).toEqual([1, 2, 1]);
+    expect(by.k3!.started_at).not.toBeNull();
+    expect(rows.every((r) => r.needs_review)).toBe(true);
+    const prefixes = (await client.query<{ slug: string; task_prefix: string }>("select slug, task_prefix from companies order by sort")).rows;
+    expect(prefixes.map((p) => p.task_prefix)).toEqual(["KIW", "ALU", "ALS"]);
+    // New tasks continue each scope's numbering (the trigger + counters); old enums are gone.
+    await client.exec(`insert into tasks (title, owner_user_id, visibility, company_id) values ('k5', '${NURAALY}', 'shared', '${KIWI}')`);
+    await client.exec(`insert into tasks (title, owner_user_id, visibility) values ('p4', '${NURAALY}', 'private')`);
+    const fresh = (await client.query<{ title: string; number: number; status: string; priority: string }>("select title, number, status, priority from tasks where title in ('k5', 'p4') order by title")).rows;
+    expect(fresh).toEqual([
+      { title: "k5", number: 5, status: "todo", priority: "none" },
+      { title: "p4", number: 3, status: "todo", priority: "none" },
+    ]);
+    await expect(client.exec(`update tasks set status = 'waiting' where title = 'k1'`)).rejects.toThrow();
+    // Moving a task to another company gives it that company's next number.
+    await client.exec(`update tasks set company_id = '${STYLE}' where title = 'k1'`);
+    expect((await client.query<{ number: number }>("select number from tasks where title = 'k1'")).rows[0]!.number).toBe(2);
+    expect((await client.query<{ n: number }>("select count(*)::int as n from task_labels")).rows[0]!.n).toBe(5);
+  });
+});

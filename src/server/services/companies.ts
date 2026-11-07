@@ -34,6 +34,7 @@ import { SLUG_MAX, SLUG_RE, slugifyCompanyName } from "@/components/companies/sl
 import { taskCountsByCompany } from "./tasks";
 
 export { slugifyCompanyName };
+import { prefixFromSlug, taskPrefixSchema } from "@/lib/task-keys";
 
 export interface CompanyCard extends Company {
   openTasks: number;
@@ -217,6 +218,8 @@ export const companyCreateSchema = z
     color: colorSchema.default(DEFAULT_COMPANY_COLOR),
     legalName: optionalText(200),
     description: optionalText(2000),
+    /** Task key prefix ("UPS"); empty or missing: 3 letters of the slug (0034). */
+    taskPrefix: z.preprocess((v) => (typeof v === "string" && v.trim() === "" ? undefined : v), taskPrefixSchema.optional()),
   })
   .strict();
 export type CompanyCreateInput = z.input<typeof companyCreateSchema>;
@@ -229,9 +232,14 @@ export const companyUpdateSchema = z
     color: colorSchema.optional(),
     legalName: optionalText(200).optional(),
     description: optionalText(2000).optional(),
+    taskPrefix: taskPrefixSchema.optional(),
   })
   .strict();
 export type CompanyUpdateInput = z.input<typeof companyUpdateSchema>;
+
+function prefixTaken(prefix: string): never {
+  throw new ServiceError("conflict", `Task prefix ${prefix} is already used by another company`, { taskPrefix: ["Already used by another company"] });
+}
 
 function slugTaken(): never {
   throw new ServiceError("conflict", "This address (slug) is already used by another company", {
@@ -384,11 +392,15 @@ export async function createCompany(ctx: ServiceContext, input: CompanyCreateInp
   if (data.slug && (await slugExists(ctx.db, data.slug))) slugTaken();
   const slug = data.slug ?? (await freeSlug(ctx.db, slugifyCompanyName(data.name)));
   const [agg] = await ctx.db.select({ top: max(companies.sort) }).from(companies);
+  const prefixes = (await ctx.db.select({ p: companies.taskPrefix }).from(companies)).flatMap((r) => (r.p ? [r.p] : []));
+  if (data.taskPrefix && prefixes.includes(data.taskPrefix)) prefixTaken(data.taskPrefix);
+  const taskPrefix = data.taskPrefix ?? prefixFromSlug(slug, prefixes);
   try {
     const [row] = await ctx.db
       .insert(companies)
       .values({
         slug,
+        taskPrefix,
         name: data.name,
         kind: data.kind,
         color: data.color,
@@ -420,6 +432,11 @@ export async function updateCompany(ctx: ServiceContext, id: string, input: Comp
   if (data.color !== undefined) patch.color = data.color;
   if (data.legalName !== undefined) patch.legalName = data.legalName;
   if (data.description !== undefined) patch.description = data.description;
+  if (data.taskPrefix !== undefined && data.taskPrefix !== current.taskPrefix) {
+    const [other] = await ctx.db.select({ id: companies.id }).from(companies).where(and(eq(companies.taskPrefix, data.taskPrefix), ne(companies.id, current.id)));
+    if (other) prefixTaken(data.taskPrefix);
+    patch.taskPrefix = data.taskPrefix;
+  }
   try {
     const [row] = await ctx.db.update(companies).set(patch).where(eq(companies.id, current.id)).returning();
     companiesChanged();

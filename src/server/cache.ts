@@ -27,6 +27,8 @@ export const CACHE_TAGS = {
   projects: "projects",
   /** The bot's global chase defaults (Settings → Team on Telegram). */
   staffSettings: "staff-settings",
+  /** Task labels (pickers; Settings → Labels). */
+  labels: "labels",
   /** Every org chart (department pickers across charts). */
   org: "org",
   /** One chart's structure. */

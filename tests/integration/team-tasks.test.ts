@@ -31,7 +31,7 @@ beforeAll(async () => {
   await mk("n1", n, { title: "N secret todo", visibility: "private", dueDate: "2026-10-30" });
   await mk("n2", n, { title: "N secret self", visibility: "private", assigneeUserId: t.userIds.nuraaly });
   await mk("n3", n, { title: "Elmurat overdue akt", visibility: "shared", companyId: kiwi, assigneePersonId: t.personIds.elmurat, dueDate: "2026-11-01" });
-  await mk("n4", n, { title: "Elmurat waiting", visibility: "shared", companyId: kiwi, assigneePersonId: t.personIds.elmurat, dueDate: "2026-11-02", status: "waiting" });
+  await mk("n4", n, { title: "Elmurat waiting", visibility: "shared", companyId: kiwi, assigneePersonId: t.personIds.elmurat, dueDate: "2026-11-02", status: "in_review" });
   await mk("n5", n, { title: "Edil later", visibility: "shared", companyId: job, assigneePersonId: t.personIds.edil, dueDate: "2026-11-10" });
   await mk("n6", n, { title: "Nobody has it", visibility: "shared", companyId: kiwi });
   await mk("n7", n, { title: "Elmurat done recent", visibility: "shared", companyId: job, assigneePersonId: t.personIds.elmurat });
@@ -66,7 +66,7 @@ describe("team view: grouping and counts", () => {
       "unassigned",
     ]);
     const elmurat = group(b, `person:${t.personIds.elmurat}`)!;
-    expect(elmurat.counts).toEqual({ open: 2, overdue: 1, dueToday: 1, waiting: 1, doneRecent: 1 });
+    expect(elmurat.counts).toEqual({ open: 2, overdue: 1, dueToday: 1, inReview: 1, points: 0, overEstimate: 0, doneRecent: 1 });
     expect(elmurat.tasks.map((x) => x.title)).toEqual(["Elmurat overdue akt", "Elmurat waiting"]);
     expect(elmurat.personId).toBe(t.personIds.elmurat);
     expect(elmurat.name).toBe("Elmurat");
@@ -138,7 +138,7 @@ describe("team view: filters and the Unassigned group", () => {
   });
 
   it("status filter and overdue only; counts stay the same", async () => {
-    const waiting = await getTeamTasks(t.ctx("talant"), { status: "waiting" });
+    const waiting = await getTeamTasks(t.ctx("talant"), { status: "in_review" });
     expect(titles(waiting, `person:${t.personIds.elmurat}`)).toEqual(["Elmurat waiting"]);
     expect(group(waiting, `person:${t.personIds.elmurat}`)!.counts.open).toBe(2);
 

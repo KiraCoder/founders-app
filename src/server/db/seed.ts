@@ -9,6 +9,7 @@
 import bcrypt from "bcryptjs";
 import { and, eq, isNull, like } from "drizzle-orm";
 import { addDays, todayInTimeZone } from "@/lib/dates";
+import { prefixFromSlug } from "@/lib/task-keys";
 import { metricSeedFor, seedAggregation } from "@/lib/kpis";
 import { ORG_SEED } from "@/lib/org";
 import { isPayLikeMetric } from "@/server/ai/narrative";
@@ -217,6 +218,12 @@ async function seedInTransaction(db: Db, hash: string, options: SeedOptions): Pr
       })
       .returning({ id: companies.id });
     companyIds[c.slug] = row!.id;
+    // Task key prefix (0034): kept when set (founders may have changed it), else from the slug.
+    const prefixes = await db.select({ id: companies.id, p: companies.taskPrefix }).from(companies);
+    if (!prefixes.find((x) => x.id === row!.id)?.p) {
+      const taken = prefixes.flatMap((x) => (x.p ? [x.p] : []));
+      await db.update(companies).set({ taskPrefix: prefixFromSlug(c.slug, taken) }).where(eq(companies.id, row!.id));
+    }
     for (const u of units ?? []) {
       await db
         .insert(companyUnits)
@@ -433,6 +440,7 @@ async function seedSamples(db: Db, ids: SeedResult, options: SeedOptions) {
       visibility: "shared",
       assigneeUserId: u.nuraaly,
       status: "in_progress",
+      estimate: 5,
       priority: "high",
       dueDate: addDays(today, -3), // overdue on purpose
     },
@@ -444,7 +452,7 @@ async function seedSamples(db: Db, ids: SeedResult, options: SeedOptions) {
       visibility: "shared",
       assigneePersonId: p.edil,
       status: "todo",
-      priority: "normal",
+      priority: "medium",
       dueDate: addDays(today, 4),
     },
     {
@@ -453,8 +461,8 @@ async function seedSamples(db: Db, ids: SeedResult, options: SeedOptions) {
       ownerUserId: u.nuraaly,
       visibility: "shared",
       assigneePersonId: p.edil,
-      status: "waiting",
-      priority: "normal",
+      status: "in_review",
+      priority: "medium",
       dueDate: today,
     },
     {
@@ -478,7 +486,7 @@ async function seedSamples(db: Db, ids: SeedResult, options: SeedOptions) {
       visibility: "shared",
       assigneeUserId: u.talant,
       status: "done",
-      priority: "normal",
+      priority: "medium",
       dueDate: addDays(today, -1),
       completedAt: new Date(),
     },
@@ -487,7 +495,7 @@ async function seedSamples(db: Db, ids: SeedResult, options: SeedOptions) {
       ownerUserId: u.nuraaly,
       visibility: "private",
       status: "todo",
-      priority: "normal",
+      priority: "medium",
       dueDate: today,
     },
     {

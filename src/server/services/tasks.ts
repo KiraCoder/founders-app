@@ -4,6 +4,7 @@ import {
   asc,
   desc,
   eq,
+  gt,
   gte,
   ilike,
   inArray,
@@ -26,7 +27,8 @@ import {
   type TaskFilters,
   type TaskUpdateInput,
 } from "@/lib/schemas";
-import type { IsoDate } from "@/lib/dates";
+import { addDays, type IsoDate } from "@/lib/dates";
+import { parseTaskKey, PERSONAL_PREFIX, prefixFromSlug, taskKey } from "@/lib/task-keys";
 import {
   companies,
   orgDepartments,
@@ -35,6 +37,7 @@ import {
   projects,
   taskComments,
   taskEvents,
+  taskLabelLinks,
   tasks,
   users,
   type Task,
@@ -46,21 +49,31 @@ import {
 import { assertCompanyAccess, assertValidId, visibleEventsWhere, visibleTasksWhere } from "./access";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
-import { CLOSED_STATUSES, isOverdue, nextCompletedAt, thisWeekRange } from "./tasks-rules";
+import { overEstimateIds } from "./estimates";
+import { ACTIVE_STATUSES, CLOSED_STATUSES, isOverdue, nextCompletedAt, nextStartedAt, thisWeekRange } from "./tasks-rules";
 import { assertTaskDepartment } from "./org";
 import { parseTaskOverride } from "@/lib/staff-schemas";
 import { queueStaffTaskUpdate } from "./task-staff-updates";
+import { labelNames, labelsForTasks, replaceTaskLabels, validLabelIds, type LabelView } from "./task-labels";
 
 /** A task row enriched for display / API output. */
 export interface TaskView {
   id: string;
+  /** "UPS-1583" (company prefix) or "ME-12" (a personal todo without a company). */
+  key: string;
+  number: number;
   title: string;
   notes: string | null;
   visibility: TaskVisibility;
   status: TaskStatus;
   priority: TaskPriority;
+  /** Estimate points (1, 2, 3, 5, 8, 13), 1 point = 1 working hour. */
+  estimate: number | null;
+  /** Staff «Готово» → In Review (true) or Done. */
+  needsReview: boolean;
   dueDate: IsoDate | null;
   completedAt: Date | null;
+  startedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
   ownerUserId: string;
@@ -73,13 +86,17 @@ export interface TaskView {
     | { kind: "user"; id: string; name: string }
     | { kind: "person"; id: string; name: string }
     | null;
+  labels: LabelView[];
+  parentTaskId: string | null;
   isOverdue: boolean;
+  /** In Progress longer than the estimate (working hours of the assignee's window). */
+  overEstimate: boolean;
 }
 
 const owner = alias(users, "owner");
 const assigneeUser = alias(users, "assignee_user");
 
-const priorityRank = sql<number>`case ${tasks.priority} when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end`;
+const priorityRank = sql<number>`case ${tasks.priority} when 'urgent' then 0 when 'high' then 1 when 'medium' then 2 when 'low' then 3 else 4 end`;
 const closedRank = sql<number>`case when ${tasks.status} in ('done','cancelled') then 1 else 0 end`;
 
 function baseSelect(ctx: ServiceContext) {
@@ -93,6 +110,7 @@ function baseSelect(ctx: ServiceContext) {
         name: companies.name,
         color: companies.color,
       },
+      companyPrefix: companies.taskPrefix,
       project: { id: projects.id, name: projects.name },
       orgDepartment: { id: orgDepartments.id, number: orgDepartments.number, name: orgDepartments.name },
       assigneeUserName: assigneeUser.shortName,
@@ -109,17 +127,28 @@ function baseSelect(ctx: ServiceContext) {
 
 type Row = Awaited<ReturnType<ReturnType<typeof baseSelect>["execute"]>>[number];
 
-function toView(row: Row, todayIso: IsoDate): TaskView {
+/** The key prefix of a row: the company's (or derived from its slug), else ME. */
+function prefixOf(row: Pick<Row, "company" | "companyPrefix">): string {
+  if (!row.company?.id) return PERSONAL_PREFIX;
+  return row.companyPrefix ?? prefixFromSlug(row.company.slug);
+}
+
+function toView(row: Row, todayIso: IsoDate, extra: { labels?: LabelView[]; overEstimate?: boolean } = {}): TaskView {
   const t = row.task;
   return {
     id: t.id,
+    key: taskKey(prefixOf(row), t.number),
+    number: t.number,
     title: t.title,
     notes: t.notes,
     visibility: t.visibility,
     status: t.status,
     priority: t.priority,
+    estimate: t.estimate,
+    needsReview: t.needsReview,
     dueDate: t.dueDate,
     completedAt: t.completedAt,
+    startedAt: t.startedAt,
     createdAt: t.createdAt,
     updatedAt: t.updatedAt,
     ownerUserId: t.ownerUserId,
@@ -132,8 +161,22 @@ function toView(row: Row, todayIso: IsoDate): TaskView {
       : t.assigneePersonId
         ? { kind: "person", id: t.assigneePersonId, name: row.assigneePersonName ?? "?" }
         : null,
+    labels: extra.labels ?? [],
+    parentTaskId: t.parentTaskId,
     isOverdue: isOverdue(t, todayIso),
+    overEstimate: extra.overEstimate ?? false,
   };
+}
+
+/** Rows → views with their labels and the over-estimate flag (two small reads for the whole list). */
+async function toViews(ctx: ServiceContext, rows: Row[]): Promise<TaskView[]> {
+  if (!rows.length) return [];
+  const todayIso = today(ctx);
+  const [labels, over] = await Promise.all([
+    labelsForTasks(ctx.db, rows.map((r) => r.task.id)),
+    overEstimateIds(ctx.db, ctx.timeZone, ctx.now, rows.map((r) => r.task)),
+  ]);
+  return rows.map((r) => toView(r, todayIso, { labels: labels.get(r.task.id) ?? [], overEstimate: over.has(r.task.id) }));
 }
 
 function escapeLike(s: string): string {
@@ -149,12 +192,30 @@ function relevantToMe(ctx: ServiceContext): SQL {
 }
 
 const openWhere = () => notInArray(tasks.status, [...CLOSED_STATUSES]);
+const activeWhere = () => inArray(tasks.status, [...ACTIVE_STATUSES]);
+
+/** A key typed in a search box ("UPS-12", "me-3") or a bare number ("12"). */
+function keySearchWhere(ctx: ServiceContext, text: string): SQL | undefined {
+  const key = parseTaskKey(text);
+  if (key) {
+    if (key.prefix === PERSONAL_PREFIX) return and(isNull(tasks.companyId), eq(tasks.ownerUserId, ctx.user.id), eq(tasks.number, key.number));
+    return and(eq(companies.taskPrefix, key.prefix), eq(tasks.number, key.number));
+  }
+  if (/^\d{1,7}$/.test(text.trim())) return eq(tasks.number, Number(text.trim()));
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Queries
 // ---------------------------------------------------------------------------
 
 type ParsedTaskFilters = ReturnType<typeof taskFiltersSchema.parse>;
+
+function assigneeRefWhere(ref: string): SQL | undefined {
+  if (ref === "unassigned") return and(isNull(tasks.assigneeUserId), isNull(tasks.assigneePersonId));
+  const [kind, id] = ref.split(":") as ["user" | "person", string];
+  return kind === "user" ? eq(tasks.assigneeUserId, id) : and(isNull(tasks.assigneeUserId), eq(tasks.assigneePersonId, id));
+}
 
 /** Every condition of a task list except its status (the status tabs count across statuses). */
 function taskListWhere(ctx: ServiceContext, f: ParsedTaskFilters, todayIso: IsoDate): (SQL | undefined)[] {
@@ -189,10 +250,41 @@ function taskListWhere(ctx: ServiceContext, f: ParsedTaskFilters, todayIso: IsoD
   // A person's task (the view shows a founder assignee first when both are set).
   if (f.assigneePersonId) where.push(isNull(tasks.assigneeUserId), eq(tasks.assigneePersonId, f.assigneePersonId));
   if (f.priority) where.push(eq(tasks.priority, f.priority));
-  if (f.q) where.push(ilike(tasks.title, `%${escapeLike(f.q)}%`));
+  // The Filter menu: any of the values of one property, every property.
+  if (f.statuses?.length) where.push(inArray(tasks.status, f.statuses));
+  if (f.priorities?.length) where.push(inArray(tasks.priority, f.priorities));
+  if (f.assignees?.length) where.push(or(...f.assignees.map(assigneeRefWhere)));
+  if (f.companyIds?.length) where.push(inArray(tasks.companyId, f.companyIds));
+  if (f.projectIds?.length) where.push(inArray(tasks.projectId, f.projectIds));
+  if (f.labelIds?.length) {
+    where.push(sql`exists (select 1 from ${taskLabelLinks} where ${taskLabelLinks.taskId} = ${tasks.id} and ${inArray(taskLabelLinks.labelId, f.labelIds)})`);
+  }
+  if (f.estimates?.length) {
+    const points = f.estimates.filter((n) => n > 0);
+    where.push(or(points.length ? inArray(tasks.estimate, points) : undefined, f.estimates.includes(0) ? isNull(tasks.estimate) : undefined));
+  }
+  if (f.due?.length) {
+    const week = addDays(todayIso, 7);
+    const parts = f.due.map((d) =>
+      d === "overdue"
+        ? and(openWhere(), lt(tasks.dueDate, todayIso))
+        : d === "today"
+          ? eq(tasks.dueDate, todayIso)
+          : d === "week"
+            ? and(gte(tasks.dueDate, todayIso), lte(tasks.dueDate, week))
+            : d === "later"
+              ? gt(tasks.dueDate, week)
+              : isNull(tasks.dueDate),
+    );
+    where.push(or(...parts));
+  }
+  if (f.overEstimate) where.push(eq(tasks.status, "in_progress"), isNotNull(tasks.estimate), isNotNull(tasks.startedAt));
+  if (f.q) where.push(or(ilike(tasks.title, `%${escapeLike(f.q)}%`), keySearchWhere(ctx, f.q)));
   if (f.search) {
     const like = `%${escapeLike(f.search)}%`;
-    where.push(or(ilike(tasks.title, like), ilike(people.fullName, like), ilike(assigneeUser.shortName, like), ilike(companies.name, like)));
+    where.push(
+      or(ilike(tasks.title, like), ilike(people.fullName, like), ilike(assigneeUser.shortName, like), ilike(companies.name, like), keySearchWhere(ctx, f.search)),
+    );
   }
   if (f.dueFrom) where.push(gte(tasks.dueDate, f.dueFrom));
   if (f.dueTo) where.push(lte(tasks.dueDate, f.dueTo));
@@ -211,36 +303,50 @@ function taskListWhere(ctx: ServiceContext, f: ParsedTaskFilters, todayIso: IsoD
 
 function statusWhere(status: ParsedTaskFilters["status"], todayIso: IsoDate): SQL | undefined {
   if (status === "open") return openWhere();
+  if (status === "active") return activeWhere();
   if (status === "overdue") return and(openWhere(), lt(tasks.dueDate, todayIso));
   if (status && status !== "any") return eq(tasks.status, status);
   return undefined;
+}
+
+function orderFor(sort: ParsedTaskFilters["sort"]) {
+  switch (sort) {
+    case "newest":
+    case "created":
+      return [desc(tasks.createdAt)];
+    case "updated":
+      return [desc(tasks.updatedAt), desc(tasks.createdAt)];
+    case "title":
+      return [asc(sql`lower(${tasks.title})`), desc(tasks.createdAt)];
+    case "priority":
+      return [asc(priorityRank), sql`${tasks.dueDate} asc nulls last`, desc(tasks.updatedAt)];
+    default:
+      return [asc(closedRank), sql`${tasks.dueDate} asc nulls last`, asc(priorityRank), desc(tasks.createdAt)];
+  }
 }
 
 export async function listTasks(ctx: ServiceContext, rawFilters: TaskFilters = {}): Promise<TaskView[]> {
   const f = taskFiltersSchema.parse(rawFilters);
   const todayIso = today(ctx);
   const where = [...taskListWhere(ctx, f, todayIso), statusWhere(f.status, todayIso)];
-  const order =
-    f.sort === "newest"
-      ? [desc(tasks.createdAt)]
-      : f.sort === "title"
-        ? [asc(sql`lower(${tasks.title})`), desc(tasks.createdAt)]
-        : [asc(closedRank), sql`${tasks.dueDate} asc nulls last`, asc(priorityRank), desc(tasks.createdAt)];
   const rows = await baseSelect(ctx)
     .where(and(...where))
-    .orderBy(...order)
+    .orderBy(...orderFor(f.sort))
     .limit(f.limit ?? 200);
-  return rows.map((r) => toView(r, todayIso));
+  const views = await toViews(ctx, rows);
+  return f.overEstimate ? views.filter((t) => t.overEstimate) : views;
 }
 
 export interface TaskStatusCounts {
   open: number;
+  active: number;
+  backlog: number;
   overdue: number;
   done: number;
   any: number;
 }
 
-/** The status tabs' counts for a list (same filters, every status), in one query. */
+/** The view chips' counts for a list (same filters, every status), in one query. */
 export async function countTasksByStatus(ctx: ServiceContext, rawFilters: TaskFilters = {}): Promise<TaskStatusCounts> {
   const f = taskFiltersSchema.parse(rawFilters);
   const todayIso = today(ctx);
@@ -248,6 +354,8 @@ export async function countTasksByStatus(ctx: ServiceContext, rawFilters: TaskFi
   const [row] = await ctx.db
     .select({
       open: sql<number>`count(*) filter (where ${open})`.mapWith(Number),
+      active: sql<number>`count(*) filter (where ${tasks.status} in ('todo', 'in_progress', 'in_review'))`.mapWith(Number),
+      backlog: sql<number>`count(*) filter (where ${tasks.status} = 'backlog')`.mapWith(Number),
       overdue: sql<number>`count(*) filter (where ${open} and ${tasks.dueDate} < ${todayIso})`.mapWith(Number),
       done: sql<number>`count(*) filter (where ${tasks.status} = 'done')`.mapWith(Number),
       any: sql<number>`count(*)`.mapWith(Number),
@@ -257,28 +365,35 @@ export async function countTasksByStatus(ctx: ServiceContext, rawFilters: TaskFi
     .leftJoin(assigneeUser, eq(assigneeUser.id, tasks.assigneeUserId))
     .leftJoin(people, eq(people.id, tasks.assigneePersonId))
     .where(and(...taskListWhere(ctx, f, todayIso)));
-  return row ?? { open: 0, overdue: 0, done: 0, any: 0 };
+  return row ?? { open: 0, active: 0, backlog: 0, overdue: 0, done: 0, any: 0 };
 }
 
-/** Returns the task or throws not_found (also for private tasks of the other founder). */
 /**
- * One visible task. Deduped per render (React `cache`): the task page and the services it calls
- * (comments, deadline requests, timeline, checklist) all check access through it. Server actions
- * and API routes run outside a render, so a write followed by a read always sees the new row.
+ * One visible task (not_found also for private tasks of the other founder). Deduped per render
+ * (React `cache`): the task page and the services it calls (comments, deadline requests,
+ * timeline, checklist) all check access through it. Server actions and API routes run outside a
+ * render, so a write followed by a read always sees the new row.
  */
 export const getTask = cache(async (ctx: ServiceContext, id: string): Promise<TaskView> => {
   assertValidId(id, "Task");
   const [row] = await baseSelect(ctx).where(and(eq(tasks.id, id), visibleTasksWhere(ctx)));
   if (!row) throw new ServiceError("not_found", "Task not found");
-  return toView(row, today(ctx));
+  return (await toViews(ctx, [row]))[0]!;
 });
+
+/** A visible task by its key ("UPS-12"), or null. */
+export async function findTaskByKey(ctx: ServiceContext, key: string): Promise<TaskView | null> {
+  const where = parseTaskKey(key) ? keySearchWhere(ctx, key) : undefined;
+  if (!where) return null;
+  const [row] = await baseSelect(ctx).where(and(where, visibleTasksWhere(ctx))).limit(1);
+  return row ? (await toViews(ctx, [row]))[0]! : null;
+}
 
 /**
  * Visible tasks (access rule + archived companies hidden, like listTasks) matching extra
  * conditions, in list order. Read-only building block for other views (services/team-tasks.ts).
  */
 export async function queryVisibleTasks(ctx: ServiceContext, extra: (SQL | undefined)[], limit = 1000): Promise<TaskView[]> {
-  const todayIso = today(ctx);
   const rows = await baseSelect(ctx)
     .where(
       and(
@@ -289,7 +404,7 @@ export async function queryVisibleTasks(ctx: ServiceContext, extra: (SQL | undef
     )
     .orderBy(asc(closedRank), sql`${tasks.dueDate} asc nulls last`, asc(priorityRank), desc(tasks.createdAt))
     .limit(Math.min(Math.max(limit, 1), 5000));
-  return rows.map((r) => toView(r, todayIso));
+  return toViews(ctx, rows);
 }
 
 export interface TodaySummary {
@@ -298,37 +413,48 @@ export interface TodaySummary {
   dueToday: TaskView[];
   thisWeek: TaskView[];
   personal: TaskView[];
+  /** In Review and mine to approve (I created it, or it is assigned to me). */
+  review: TaskView[];
 }
 
+/**
+ * Today (and the founder planner): planned work only — Todo, In Progress, In Review. Backlog is
+ * not planned yet, so it is never on Today and never chased.
+ */
 export async function getTodaySummary(ctx: ServiceContext): Promise<TodaySummary> {
   const todayIso = today(ctx);
   const week = thisWeekRange(todayIso);
   const personalWhere = and(eq(tasks.ownerUserId, ctx.user.id), eq(tasks.visibility, "private"))!;
+  const reviewWhere = and(eq(tasks.status, "in_review"), or(eq(tasks.ownerUserId, ctx.user.id), eq(tasks.assigneeUserId, ctx.user.id)))!;
 
-  // ONE query for the four lists (queries are serial on one connection): every open task that
-  // is relevant to me and due up to the end of the week, plus my open personal todos (always
-  // visible: they are my own). Split below in JS; the shared ORDER BY keeps each list's order.
+  // ONE query for the lists (queries are serial on one connection): every active task that is
+  // relevant to me and due up to the end of the week, my active personal todos (always visible:
+  // they are my own) and what waits for my review. Split below in JS; the shared ORDER BY keeps
+  // each list's order.
   const rows = await baseSelect(ctx)
-    .where(and(visibleTasksWhere(ctx), openWhere(), or(and(relevantToMe(ctx), lte(tasks.dueDate, week.to)), personalWhere)))
+    .where(and(visibleTasksWhere(ctx), activeWhere(), or(and(relevantToMe(ctx), lte(tasks.dueDate, week.to)), personalWhere, reviewWhere)))
     .orderBy(sql`${tasks.dueDate} asc nulls last`, asc(priorityRank), desc(tasks.createdAt));
+  const views = await toViews(ctx, rows);
 
   const overdue: TaskView[] = [];
   const dueToday: TaskView[] = [];
   const thisWeek: TaskView[] = [];
   const personal: TaskView[] = [];
-  for (const r of rows) {
-    const t = r.task;
-    const view = toView(r, todayIso);
-    const relevant = t.assigneeUserId === ctx.user.id || (t.assigneeUserId === null && t.ownerUserId === ctx.user.id);
-    const due = t.dueDate;
+  const review: TaskView[] = [];
+  for (const view of views) {
+    // Same rule as relevantToMe: assigned to me, or mine and not assigned to another founder.
+    const founderAssignee = view.assignee?.kind === "user" ? view.assignee.id : null;
+    const relevant = founderAssignee === ctx.user.id || (founderAssignee === null && view.ownerUserId === ctx.user.id);
+    const due = view.dueDate;
     if (relevant && due !== null) {
       if (due < todayIso) overdue.push(view);
       else if (due === todayIso) dueToday.push(view);
       else if (due >= week.from && due <= week.to) thisWeek.push(view);
     }
-    if (t.ownerUserId === ctx.user.id && t.visibility === "private" && personal.length < 50) personal.push(view);
+    if (view.ownerUserId === ctx.user.id && view.visibility === "private" && personal.length < 50) personal.push(view);
+    if (view.status === "in_review" && (view.ownerUserId === ctx.user.id || (view.assignee?.kind === "user" && view.assignee.id === ctx.user.id))) review.push(view);
   }
-  return { today: todayIso, overdue, dueToday, thisWeek, personal };
+  return { today: todayIso, overdue, dueToday, thisWeek, personal, review };
 }
 
 export async function listTaskEvents(ctx: ServiceContext, taskId: string): Promise<TaskEvent[]> {
@@ -478,6 +604,8 @@ export async function createTask(ctx: ServiceContext, input: TaskCreateInput): P
     orgDepartmentId: data.orgDepartmentId ?? null,
   };
   const companyId = await validateRelations(ctx, rel);
+  const labelIds = data.labelIds ? await validLabelIds(ctx.db, data.labelIds) : [];
+  if (data.parentTaskId) await getTask(ctx, data.parentTaskId);
 
   const id = await ctx.db.transaction(async (tx) => {
     const [row] = await tx
@@ -488,16 +616,21 @@ export async function createTask(ctx: ServiceContext, input: TaskCreateInput): P
         visibility: data.visibility,
         status: data.status,
         priority: data.priority,
+        estimate: data.estimate ?? null,
+        needsReview: data.needsReview ?? true,
         dueDate: data.dueDate ?? null,
         companyId,
         projectId: rel.projectId,
         assigneeUserId: rel.assigneeUserId,
         assigneePersonId: rel.assigneePersonId,
         orgDepartmentId: rel.orgDepartmentId ?? null,
+        parentTaskId: data.parentTaskId ?? null,
         ownerUserId: ctx.user.id,
         completedAt: data.status === "done" ? ctx.now : null,
+        startedAt: data.status === "in_progress" ? ctx.now : null,
       })
       .returning({ id: tasks.id });
+    if (labelIds.length) await replaceTaskLabels(tx as never, row!.id, labelIds);
     await tx.insert(taskEvents).values({
       taskId: row!.id,
       companyId,
@@ -505,7 +638,7 @@ export async function createTask(ctx: ServiceContext, input: TaskCreateInput): P
       visibility: data.visibility,
       ownerUserId: ctx.user.id,
       kind: "created",
-      newValue: { title: data.title, dueDate: data.dueDate ?? null, status: data.status },
+      newValue: { title: data.title, dueDate: data.dueDate ?? null, status: data.status, priority: data.priority, estimate: data.estimate ?? null },
     });
     return row!.id;
   });
@@ -523,6 +656,8 @@ const TRACKED_FIELDS = [
   "orgDepartmentId",
   "status",
   "priority",
+  "estimate",
+  "needsReview",
   "dueDate",
 ] as const;
 
@@ -544,7 +679,7 @@ export async function updateTaskDetailed(
   input: TaskUpdateInput,
   opts: { notifyStaff?: boolean } = {},
 ): Promise<{ task: TaskView; staffNotice: { notified: boolean; personName: string | null } }> {
-  const patch = taskUpdateSchema.parse(input);
+  const { labelIds: wantedLabels, ...patch } = taskUpdateSchema.parse(input);
   const current = await loadRawVisibleTask(ctx, id);
 
   if (patch.visibility && patch.visibility !== current.visibility && current.ownerUserId !== ctx.user.id) {
@@ -582,29 +717,49 @@ export async function updateTaskDetailed(
   });
   next.companyId = companyId;
   next.completedAt = nextCompletedAt(current, next.status, ctx.now);
+  next.startedAt = nextStartedAt(current, next.status, ctx.now);
+  const restarted = (next.startedAt?.getTime() ?? null) !== (current.startedAt?.getTime() ?? null) || next.estimate !== current.estimate;
 
   const changed = TRACKED_FIELDS.filter((f) => (current[f] ?? null) !== (next[f] ?? null));
-  if (changed.length === 0) return { task: await getTask(ctx, id), staffNotice: { notified: false, personName: null } };
+  let labelChange: { before: string[]; after: string[] } | null = null;
+  if (wantedLabels !== undefined) {
+    const currentLabels = (await labelsForTasks(ctx.db, [id])).get(id)?.map((l) => l.id) ?? [];
+    const ids = await validLabelIds(ctx.db, wantedLabels, currentLabels);
+    const same = ids.length === currentLabels.length && ids.every((x) => currentLabels.includes(x));
+    if (!same) labelChange = { before: currentLabels, after: ids };
+  }
+  if (changed.length === 0 && !labelChange) return { task: await getTask(ctx, id), staffNotice: { notified: false, personName: null } };
 
+  const names = labelChange ? await labelNames(ctx.db, [...labelChange.before, ...labelChange.after]) : new Map<string, string>();
   await ctx.db.transaction(async (tx) => {
-    await tx
-      .update(tasks)
-      .set({
-        title: next.title,
-        notes: next.notes,
-        companyId: next.companyId,
-        projectId: next.projectId,
-        visibility: next.visibility,
-        assigneeUserId: next.assigneeUserId,
-        assigneePersonId: next.assigneePersonId,
-        orgDepartmentId: next.orgDepartmentId,
-        status: next.status,
-        priority: next.priority,
-        dueDate: next.dueDate,
-        completedAt: next.completedAt,
-        updatedAt: ctx.now,
-      })
-      .where(eq(tasks.id, id));
+    if (changed.length) {
+      await tx
+        .update(tasks)
+        .set({
+          title: next.title,
+          notes: next.notes,
+          companyId: next.companyId,
+          projectId: next.projectId,
+          visibility: next.visibility,
+          assigneeUserId: next.assigneeUserId,
+          assigneePersonId: next.assigneePersonId,
+          orgDepartmentId: next.orgDepartmentId,
+          status: next.status,
+          priority: next.priority,
+          estimate: next.estimate,
+          needsReview: next.needsReview,
+          dueDate: next.dueDate,
+          completedAt: next.completedAt,
+          startedAt: next.startedAt,
+          // A new In Progress stint (or a new estimate) may be nudged once again.
+          ...(restarted ? { overEstimateNotifiedAt: null } : {}),
+          updatedAt: ctx.now,
+        })
+        .where(eq(tasks.id, id));
+    } else {
+      await tx.update(tasks).set({ updatedAt: ctx.now }).where(eq(tasks.id, id));
+    }
+    if (labelChange) await replaceTaskLabels(tx as never, id, labelChange.after);
 
     // The audit log follows the task: when it becomes private (or shared), so does its history.
     if (next.visibility !== current.visibility) {
@@ -630,7 +785,11 @@ export async function updateTaskDetailed(
               : "updated";
       events.push({ ...base, kind, field, oldValue: current[field] ?? null, newValue: next[field] ?? null });
     }
-    await tx.insert(taskEvents).values(events);
+    if (labelChange) {
+      const n = (ids: string[]) => ids.map((x) => names.get(x) ?? "?");
+      events.push({ ...base, kind: "updated", field: "labels", oldValue: n(labelChange.before), newValue: n(labelChange.after) });
+    }
+    if (events.length) await tx.insert(taskEvents).values(events);
   });
   const cardChanged =
     CARD_FIELDS.some((f) => (changed as readonly string[]).includes(f)) || (changed.includes("notes") && parseTaskOverride(current.staffChase).shareNotes === true);
@@ -649,6 +808,43 @@ export async function changeTaskStatus(ctx: ServiceContext, id: string, status: 
 /** A deadline approved from a person's request: they already get a line about it, no extra card. */
 export async function changeTaskDeadline(ctx: ServiceContext, id: string, dueDate: IsoDate | null) {
   return (await updateTaskDetailed(ctx, id, { dueDate }, { notifyStaff: false })).task;
+}
+
+export interface BulkResult {
+  updated: number;
+  failed: { id: string; error: string }[];
+}
+
+/**
+ * The same change for several tasks (the list's bulk bar). Each task is updated on its own
+ * (access, relations and history per task); a refused task is reported, the others are saved.
+ * `addLabelIds` / `removeLabelIds` change the label sets instead of replacing them.
+ */
+export async function bulkUpdateTasks(
+  ctx: ServiceContext,
+  ids: readonly string[],
+  patch: TaskUpdateInput | Record<string, never>,
+  labels: { add?: string[]; remove?: string[] } = {},
+): Promise<BulkResult> {
+  const unique = [...new Set(ids)].slice(0, 500);
+  const out: BulkResult = { updated: 0, failed: [] };
+  const current = labels.add?.length || labels.remove?.length ? await labelsForTasks(ctx.db, unique) : new Map<string, LabelView[]>();
+  for (const id of unique) {
+    try {
+      const p: TaskUpdateInput = { ...(patch as TaskUpdateInput) };
+      if (labels.add?.length || labels.remove?.length) {
+        const have = (current.get(id) ?? []).map((l) => l.id);
+        p.labelIds = [...new Set([...have, ...(labels.add ?? [])])].filter((x) => !(labels.remove ?? []).includes(x));
+      }
+      if (Object.keys(p).length === 0) continue;
+      await updateTaskDetailed(ctx, id, p);
+      out.updated++;
+    } catch (err) {
+      out.failed.push({ id, error: err instanceof ServiceError ? err.message : "Could not save" });
+      if (!(err instanceof ServiceError)) console.error("[tasks] bulk update failed", err);
+    }
+  }
+  return out;
 }
 
 export async function deleteTask(ctx: ServiceContext, id: string): Promise<void> {
@@ -698,4 +894,42 @@ export async function taskCountsByCompany(
     .where(and(visibleTasksWhere(ctx), companyIds ? inArray(tasks.companyId, companyIds) : undefined))
     .groupBy(tasks.companyId);
   return new Map(rows.filter((r) => r.companyId).map((r) => [r.companyId!, { open: r.open, overdue: r.overdue }]));
+}
+
+/** People and founders with open visible tasks, and how many (the list's person chips). */
+export async function openTaskAssignees(ctx: ServiceContext): Promise<{ kind: "user" | "person"; id: string; name: string; count: number }[]> {
+  const rows = await ctx.db
+    .select({
+      userId: tasks.assigneeUserId,
+      personId: tasks.assigneePersonId,
+      userName: assigneeUser.shortName,
+      personName: people.fullName,
+      personShort: people.shortName,
+      n: sql<number>`count(*)`.mapWith(Number),
+    })
+    .from(tasks)
+    .leftJoin(assigneeUser, eq(assigneeUser.id, tasks.assigneeUserId))
+    .leftJoin(people, eq(people.id, tasks.assigneePersonId))
+    .where(
+      and(
+        visibleTasksWhere(ctx),
+        openWhere(),
+        or(isNotNull(tasks.assigneeUserId), isNotNull(tasks.assigneePersonId)),
+        sql`(${tasks.companyId} is null or ${tasks.companyId} in (select ${companies.id} from ${companies} where ${companies.archivedAt} is null))`,
+      ),
+    )
+    .groupBy(tasks.assigneeUserId, tasks.assigneePersonId, assigneeUser.shortName, people.fullName, people.shortName);
+  return rows
+    .map((r) =>
+      r.userId
+        ? { kind: "user" as const, id: r.userId, name: r.userName ?? "?", count: r.n }
+        : { kind: "person" as const, id: r.personId!, name: r.personShort || r.personName || "?", count: r.n },
+    )
+    .sort((a, b) => (a.kind === b.kind ? b.count - a.count || a.name.localeCompare(b.name) : a.kind === "user" ? -1 : 1));
+}
+
+/** Tasks promoted from this task's sub-tasks (tasks.parent_task_id), visible ones only. */
+export async function listChildTasks(ctx: ServiceContext, parentId: string): Promise<TaskView[]> {
+  await getTask(ctx, parentId);
+  return queryVisibleTasks(ctx, [eq(tasks.parentTaskId, parentId)], 200);
 }

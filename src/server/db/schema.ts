@@ -54,14 +54,18 @@ export const projectStatusEnum = pgEnum("project_status", [
   "cancelled",
 ]);
 export const taskVisibilityEnum = pgEnum("task_visibility", ["private", "shared"]);
-export const taskStatusEnum = pgEnum("task_status", [
-  "todo",
-  "in_progress",
-  "waiting",
-  "done",
-  "cancelled",
-]);
-export const taskPriorityEnum = pgEnum("task_priority", ["urgent", "high", "normal", "low"]);
+/**
+ * Task statuses (0034, Linear's set): Backlog, Todo, In Progress, In Review, Done, Canceled.
+ * Text + check constraint (was the task_status enum). "cancelled" is the stored spelling.
+ */
+export const TASK_STATUSES = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled"] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+/** Task priorities (0034, Linear's set). "none" = No priority (the default). */
+export const TASK_PRIORITIES = ["none", "urgent", "high", "medium", "low"] as const;
+export type TaskPriority = (typeof TASK_PRIORITIES)[number];
+/** Estimate points (Fibonacci). One point = one working hour. */
+export const TASK_ESTIMATES = [1, 2, 3, 5, 8, 13] as const;
+export type TaskEstimate = (typeof TASK_ESTIMATES)[number];
 export const taskEventKindEnum = pgEnum("task_event_kind", [
   "created",
   "updated",
@@ -149,11 +153,19 @@ export const companies = pgTable("companies", {
   description: text("description"),
   /** Hex color used for the company dot/tag in the UI. */
   color: text("color").notNull().default("#1E6B49"),
+  /**
+   * Prefix of the company's task keys ("UPS" → UPS-1583), editable in Settings → Companies
+   * (0034). Null = derived from the slug (src/lib/task-keys.ts).
+   */
+  taskPrefix: text("task_prefix"),
   sort: integer("sort").notNull().default(100),
   archivedAt: timestamp("archived_at", { withTimezone: true }),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
-});
+}, (t) => [
+  uniqueIndex("companies_task_prefix_uq").on(t.taskPrefix),
+  check("companies_task_prefix_ck", sql`${t.taskPrefix} is null or ${t.taskPrefix} ~ '^[A-Z][A-Z0-9]{1,5}$'`),
+]);
 
 /** Sub-units of a company tracked separately (e.g. Alura Style factories ХБК and Ош Район). */
 export const companyUnits = pgTable(
@@ -359,8 +371,24 @@ export const tasks = pgTable(
      * (enforced in the service layer). Departments are archived, never deleted.
      */
     orgDepartmentId: uuid("org_department_id").references((): AnyPgColumn => orgDepartments.id, { onDelete: "set null" }),
-    status: taskStatusEnum("status").notNull().default("todo"),
-    priority: taskPriorityEnum("priority").notNull().default("normal"),
+    status: text("status").$type<TaskStatus>().notNull().default("todo"),
+    priority: text("priority").$type<TaskPriority>().notNull().default("none"),
+    /**
+     * The task's number inside its key scope (the company, or the owner's personal todos): the
+     * key is <prefix>-<number> (UPS-1583, ME-12). Filled by the tasks_assign_number trigger from
+     * task_key_counters (concurrency-safe), also when the company changes (0034).
+     */
+    number: integer("number").notNull().default(0),
+    /** Estimate points, Fibonacci 1, 2, 3, 5, 8, 13 (1 point = 1 working hour). */
+    estimate: integer("estimate"),
+    /** Staff «Готово» moves the task to In Review (a founder approves → Done) instead of Done. */
+    needsReview: boolean("needs_review").notNull().default(true),
+    /** When the task last entered In Progress (cleared when it goes back to Backlog / Todo). */
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    /** The one "over estimate" nudge of the current In Progress stint was sent. */
+    overEstimateNotifiedAt: timestamp("over_estimate_notified_at", { withTimezone: true }),
+    /** A sub-task promoted to a full task keeps a link to the task it came from. */
+    parentTaskId: uuid("parent_task_id").references((): AnyPgColumn => tasks.id, { onDelete: "set null" }),
     /** Calendar date in APP_TIMEZONE (Asia/Bishkek). */
     dueDate: date("due_date", { mode: "string" }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -376,11 +404,61 @@ export const tasks = pgTable(
     index("tasks_assignee_user_idx").on(t.assigneeUserId),
     index("tasks_due_idx").on(t.dueDate),
     index("tasks_org_department_idx").on(t.orgDepartmentId),
+    index("tasks_status_idx").on(t.status),
+    index("tasks_parent_idx").on(t.parentTaskId),
+    uniqueIndex("tasks_key_uq").on(sql`(coalesce(${t.companyId}::text, 'user:' || ${t.ownerUserId}::text))`, t.number),
     check(
       "tasks_single_assignee",
       sql`${t.assigneeUserId} is null or ${t.assigneePersonId} is null`,
     ),
+    check("tasks_status_ck", sql`${t.status} in ('backlog', 'todo', 'in_progress', 'in_review', 'done', 'cancelled')`),
+    check("tasks_priority_ck", sql`${t.priority} in ('none', 'urgent', 'high', 'medium', 'low')`),
+    check("tasks_estimate_ck", sql`${t.estimate} is null or ${t.estimate} in (1, 2, 3, 5, 8, 13)`),
   ],
+);
+
+/** Last number given per key scope ("company:<id>" / "user:<id>"), see tasks.number (0034). */
+export const taskKeyCounters = pgTable("task_key_counters", {
+  scope: text("scope").primaryKey(),
+  lastNumber: integer("last_number").notNull().default(0),
+});
+
+/** Task labels (0034): name + color, shared by both founders, archived instead of deleted when used. */
+export const taskLabels = pgTable(
+  "task_labels",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    /** Hex color of the label's dot. */
+    color: text("color").notNull().default("#6B7280"),
+    sort: integer("sort").notNull().default(100),
+    seedKey: text("seed_key").unique(),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex("task_labels_name_uq").on(sql`lower(${t.name})`),
+    check("task_labels_name_ck", sql`length(${t.name}) between 1 and 40`),
+    check("task_labels_color_ck", sql`${t.color} ~ '^#[0-9A-Fa-f]{6}$'`),
+  ],
+);
+export type TaskLabel = typeof taskLabels.$inferSelect;
+
+/** Labels of a task (many-to-many). */
+export const taskLabelLinks = pgTable(
+  "task_label_links",
+  {
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    labelId: uuid("label_id")
+      .notNull()
+      .references(() => taskLabels.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.taskId, t.labelId] }), index("task_label_links_label_idx").on(t.labelId)],
 );
 
 /** Audit trail for tasks. Deadline changes are always recorded here. */
@@ -1709,12 +1787,8 @@ export type TaskComment = typeof taskComments.$inferSelect;
 export type TaskDeadlineRequest = typeof taskDeadlineRequests.$inferSelect;
 export type NotificationPriority = (typeof notificationPriorityEnum.enumValues)[number];
 
-export const TASK_STATUSES = taskStatusEnum.enumValues;
-export const TASK_PRIORITIES = taskPriorityEnum.enumValues;
 export const TASK_VISIBILITIES = taskVisibilityEnum.enumValues;
 export const PROJECT_STATUSES = projectStatusEnum.enumValues;
-export type TaskStatus = (typeof TASK_STATUSES)[number];
-export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 export type TaskVisibility = (typeof TASK_VISIBILITIES)[number];
 export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 

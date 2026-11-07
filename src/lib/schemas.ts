@@ -5,8 +5,14 @@
 import { z } from "zod";
 import { isIsoDate, isTimeInWindow } from "./dates";
 
-export const TASK_STATUS_VALUES = ["todo", "in_progress", "waiting", "done", "cancelled"] as const;
-export const TASK_PRIORITY_VALUES = ["urgent", "high", "normal", "low"] as const;
+/** Linear's statuses (0034). "cancelled" is the stored spelling of Canceled. */
+export const TASK_STATUS_VALUES = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled"] as const;
+export type TaskStatusValue = (typeof TASK_STATUS_VALUES)[number];
+/** Linear's priorities (0034); "none" = No priority. */
+export const TASK_PRIORITY_VALUES = ["none", "urgent", "high", "medium", "low"] as const;
+export type TaskPriorityValue = (typeof TASK_PRIORITY_VALUES)[number];
+/** Estimate points (Fibonacci; 1 point = 1 working hour). */
+export const TASK_ESTIMATE_VALUES = [1, 2, 3, 5, 8, 13] as const;
 export const TASK_VISIBILITY_VALUES = ["private", "shared"] as const;
 export const PROJECT_STATUS_VALUES = ["planned", "active", "on_hold", "done", "cancelled"] as const;
 /**
@@ -20,10 +26,17 @@ export type TaskView = (typeof TASK_VIEWS)[number];
 /** Quick filters of the task list (toggle chips; several combine with AND). */
 export const TASK_QUICK_FILTERS = ["personal", "assigned", "overdue", "week", "waiting", "comments"] as const;
 export type TaskQuickFilter = (typeof TASK_QUICK_FILTERS)[number];
-export const TASK_SORTS = ["due", "newest", "title"] as const;
+export const TASK_SORTS = ["due", "newest", "title", "priority", "updated", "created"] as const;
 export type TaskSort = (typeof TASK_SORTS)[number];
+/** Due filter of the list's Filter menu. */
+export const TASK_DUE_FILTERS = ["overdue", "today", "week", "later", "none"] as const;
+export type TaskDueFilter = (typeof TASK_DUE_FILTERS)[number];
 
 const blankToNull = (v: unknown) => (typeof v === "string" && v.trim() === "" ? null : v);
+
+/** Old names still accepted from API callers, old links and the assistant ("waiting", "normal"). */
+const legacyStatus = (v: unknown) => (v === "waiting" ? "in_review" : v === "canceled" ? "cancelled" : v);
+const legacyPriority = (v: unknown) => (v === "normal" ? "medium" : v === "no_priority" || v === "no priority" ? "none" : v);
 
 const optionalUuid = z.preprocess(blankToNull, z.uuid().nullable().optional());
 const optionalText = (max: number) =>
@@ -32,6 +45,19 @@ export const isoDateSchema = z
   .string()
   .refine(isIsoDate, { message: "Use a valid date (YYYY-MM-DD)" });
 const optionalDate = z.preprocess(blankToNull, isoDateSchema.nullable().optional());
+
+export const taskStatusSchema = z.preprocess(legacyStatus, z.enum(TASK_STATUS_VALUES));
+export const taskPrioritySchema = z.preprocess(legacyPriority, z.enum(TASK_PRIORITY_VALUES));
+/** "" / null / "none" = no estimate; else 1, 2, 3, 5, 8 or 13 (form posts send strings). */
+export const taskEstimateSchema = z.preprocess(
+  (v) => (v === "" || v === "none" || v === null ? null : typeof v === "string" ? Number(v) : v),
+  z
+    .number()
+    .refine((n) => (TASK_ESTIMATE_VALUES as readonly number[]).includes(n), { message: "Estimate is 1, 2, 3, 5, 8 or 13 points" })
+    .nullable(),
+);
+/** Checkbox / JSON boolean. */
+const boolish = z.preprocess((v) => (v === "on" || v === "true" || v === "1" ? true : v === "" || v === "false" || v === "0" ? false : v), z.boolean());
 
 const taskFields = {
   title: z.string().trim().min(1, "Title is required").max(300),
@@ -43,9 +69,14 @@ const taskFields = {
   assigneePersonId: optionalUuid,
   /** Optional department of the company's org chart (must be of the task's company). */
   orgDepartmentId: optionalUuid,
-  status: z.enum(TASK_STATUS_VALUES),
-  priority: z.enum(TASK_PRIORITY_VALUES),
+  status: taskStatusSchema,
+  priority: taskPrioritySchema,
   dueDate: optionalDate,
+  estimate: taskEstimateSchema.optional(),
+  /** Staff «Готово» → In Review (default) or straight to Done. */
+  needsReview: boolish.optional(),
+  /** The task's labels (replaces the set). */
+  labelIds: z.array(z.uuid()).max(20).optional(),
 };
 
 export const taskCreateSchema = z
@@ -53,7 +84,9 @@ export const taskCreateSchema = z
     ...taskFields,
     visibility: taskFields.visibility.default("shared"),
     status: taskFields.status.default("todo"),
-    priority: taskFields.priority.default("normal"),
+    priority: taskFields.priority.default("none"),
+    /** A sub-task promoted to a full task (services/task-checklist.ts). */
+    parentTaskId: optionalUuid,
   })
   .strict();
 export type TaskCreateInput = z.input<typeof taskCreateSchema>;
@@ -65,6 +98,14 @@ export const taskUpdateSchema = z
   .refine((v) => Object.keys(v).length > 0, { message: "Nothing to update" });
 export type TaskUpdateInput = z.input<typeof taskUpdateSchema>;
 
+/** A list param: an array, or a comma list (URL / form). Bad entries are dropped by the caller's enum. */
+const listOf = <T extends z.ZodType>(item: T, max = 50) =>
+  z.preprocess(
+    (v) => (typeof v === "string" ? v.split(",").map((s) => s.trim()).filter(Boolean) : Array.isArray(v) ? v : v == null ? undefined : [v]),
+    z.array(item).max(max).optional(),
+  );
+const assigneeRef = z.union([z.literal("unassigned"), z.string().regex(/^(user|person):[0-9a-f-]{36}$/i)]);
+
 export const taskFiltersSchema = z.object({
   view: z.preprocess(blankToNull, z.enum(TASK_VIEWS).nullable().optional()),
   companyId: optionalUuid,
@@ -72,24 +113,38 @@ export const taskFiltersSchema = z.object({
   /** Only tasks assigned to this founder / person (exact assignee, not "relevant to"). */
   assigneeUserId: optionalUuid,
   assigneePersonId: optionalUuid,
-  /** A status, "open" (not done / cancelled), "overdue" (open and past due) or "any". */
+  /** A status, "open" (not done / cancelled), "active" (Todo, In Progress, In Review), "overdue" (open and past due) or "any". */
   status: z.preprocess(
-    blankToNull,
-    z.enum([...TASK_STATUS_VALUES, "open", "overdue", "any"]).nullable().optional(),
+    (v) => legacyStatus(blankToNull(v)),
+    z.enum([...TASK_STATUS_VALUES, "open", "active", "overdue", "any"]).nullable().optional(),
   ),
-  priority: z.preprocess(blankToNull, z.enum(TASK_PRIORITY_VALUES).nullable().optional()),
+  priority: z.preprocess((v) => legacyPriority(blankToNull(v)), z.enum(TASK_PRIORITY_VALUES).nullable().optional()),
+  /** The list's Filter menu (several values of one property = any of them; properties AND). */
+  statuses: listOf(z.preprocess(legacyStatus, z.enum(TASK_STATUS_VALUES))),
+  priorities: listOf(z.preprocess(legacyPriority, z.enum(TASK_PRIORITY_VALUES))),
+  /** "user:<id>", "person:<id>" or "unassigned". */
+  assignees: listOf(assigneeRef),
+  companyIds: listOf(z.uuid()),
+  projectIds: listOf(z.uuid()),
+  labelIds: listOf(z.uuid()),
+  /** Estimate points; 0 = no estimate. */
+  estimates: listOf(z.coerce.number().int().refine((n) => n === 0 || (TASK_ESTIMATE_VALUES as readonly number[]).includes(n))),
+  due: listOf(z.enum(TASK_DUE_FILTERS)),
+  /** Only tasks in progress longer than their estimate. */
+  overEstimate: z.preprocess((v) => v === true || v === "1" || v === "true", z.boolean()).optional(),
   /** Title only (REST API). */
   q: optionalText(200),
-  /** Title, assignee or company name (the list's search box). */
+  /** Title, key (UPS-12), assignee or company name (the list's search box). */
   search: optionalText(200),
   quick: z.array(z.enum(TASK_QUICK_FILTERS)).max(TASK_QUICK_FILTERS.length).optional(),
   /** Due date range (inclusive). */
   dueFrom: optionalDate,
   dueTo: optionalDate,
   sort: z.preprocess(blankToNull, z.enum(TASK_SORTS).nullable().optional()),
-  limit: z.coerce.number().int().min(1).max(500).optional(),
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
 });
 export type TaskFilters = z.input<typeof taskFiltersSchema>;
+
 
 export const projectCreateSchema = z
   .object({

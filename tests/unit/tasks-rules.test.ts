@@ -7,7 +7,7 @@ const at = (iso: string) => todayInTimeZone(new Date(iso), "Asia/Bishkek");
 describe("isOverdue", () => {
   it("is overdue when open and due before today", () => {
     expect(isOverdue({ status: "todo", dueDate: "2026-11-01" }, "2026-11-02")).toBe(true);
-    expect(isOverdue({ status: "waiting", dueDate: "2026-10-01" }, "2026-11-02")).toBe(true);
+    expect(isOverdue({ status: "in_review", dueDate: "2026-10-01" }, "2026-11-02")).toBe(true);
   });
   it("is not overdue on the due date itself", () => {
     expect(isOverdue({ status: "todo", dueDate: "2026-11-02" }, "2026-11-02")).toBe(false);

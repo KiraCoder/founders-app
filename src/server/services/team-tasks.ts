@@ -6,7 +6,7 @@ import { people, personCompanies, companies, tasks, telegramLinkCodes, telegramL
 import { assertTeamTasksAccess, assertValidId, inAccessibleCompany, visiblePeopleWhere } from "./access";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
-import { CLOSED_STATUSES } from "./tasks-rules";
+import { ACTIVE_STATUSES, CLOSED_STATUSES } from "./tasks-rules";
 import { queryVisibleTasks, type TaskView } from "./tasks";
 
 /**
@@ -24,7 +24,7 @@ export const TEAM_TASKS_LIMIT = 3000;
 
 const blankToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 
-export const TEAM_STATUS_FILTERS = ["open", "any", ...TASK_STATUS_VALUES] as const;
+export const TEAM_STATUS_FILTERS = ["open", "active", "any", ...TASK_STATUS_VALUES] as const;
 export type TeamStatusFilter = (typeof TEAM_STATUS_FILTERS)[number];
 
 export const teamTaskFiltersSchema = z.object({
@@ -48,7 +48,12 @@ export interface TeamCounts {
   open: number;
   overdue: number;
   dueToday: number;
-  waiting: number;
+  /** In Review (waiting for a founder to approve). */
+  inReview: number;
+  /** Estimate points of the open tasks (1 point = 1 working hour). */
+  points: number;
+  /** In Progress longer than the estimate. */
+  overEstimate: number;
   doneRecent: number;
 }
 
@@ -78,7 +83,7 @@ export interface TeamBoard {
   limit: number;
 }
 
-const emptyCounts = (): TeamCounts => ({ open: 0, overdue: 0, dueToday: 0, waiting: 0, doneRecent: 0 });
+const emptyCounts = (): TeamCounts => ({ open: 0, overdue: 0, dueToday: 0, inReview: 0, points: 0, overEstimate: 0, doneRecent: 0 });
 
 function groupKeyOf(t: TaskView): string {
   if (t.assignee) return `${t.assignee.kind}:${t.assignee.id}`;
@@ -103,6 +108,7 @@ function assigneeWhere(assignee: string | undefined): SQL | undefined {
 function statusMatches(t: TaskView, status: TeamStatusFilter): boolean {
   if (status === "any") return true;
   if (status === "open") return !CLOSED_STATUSES.includes(t.status);
+  if (status === "active") return ACTIVE_STATUSES.includes(t.status);
   return t.status === status;
 }
 
@@ -175,7 +181,7 @@ async function loadBoard(
   const recentDone = and(eq(tasks.status, "done"), gte(tasks.completedAt, since));
   // Rows for the counts (open + done this week) plus whatever the status filter shows.
   const scope =
-    f.status === "any" ? undefined : or(open, recentDone, f.status === "open" ? undefined : eq(tasks.status, f.status));
+    f.status === "any" ? undefined : or(open, recentDone, f.status === "open" || f.status === "active" ? undefined : eq(tasks.status, f.status));
 
   const limit = opts.limit ?? TEAM_TASKS_LIMIT;
   // One more than the limit tells whether anything was left out.
@@ -219,7 +225,9 @@ async function loadBoard(
       g.counts.open++;
       if (t.isOverdue) g.counts.overdue++;
       if (t.dueDate === todayIso) g.counts.dueToday++;
-      if (t.status === "waiting") g.counts.waiting++;
+      if (t.status === "in_review") g.counts.inReview++;
+      g.counts.points += t.estimate ?? 0;
+      if (t.overEstimate) g.counts.overEstimate++;
     } else if (isRecentDone) g.counts.doneRecent++;
 
     const shown = statusMatches(t, f.status) || (opts.keepRecentDone && isRecentDone);

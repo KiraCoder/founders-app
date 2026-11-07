@@ -6,7 +6,7 @@ import { assertValidId } from "./access";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { queueStaffTaskUpdate } from "./task-staff-updates";
-import { getTask } from "./tasks";
+import { createTask, getTask, type TaskView } from "./tasks";
 
 /**
  * A task's checklist (subtasks, 0032). Everything goes through `getTask`, so it follows the task's
@@ -208,4 +208,30 @@ export function parseChecklistField(raw: unknown): { title: string; details: str
     .map((v) => ({ title: v.title, details: v.details ?? null }));
   if (items.length > MAX_CHECKLIST_ITEMS) throw new ServiceError("validation", `At most ${MAX_CHECKLIST_ITEMS} items per task`, { checklist: ["Too many items"] });
   return items;
+}
+
+/**
+ * Promotes a sub-task (checklist item) to a full task (0034): a new task with the item's title
+ * and details, in the same company / project / visibility, assigned like its parent, and linked
+ * to it (tasks.parent_task_id). The item leaves the checklist (logged on the parent). A ticked
+ * item becomes a Done task.
+ */
+export async function promoteChecklistItem(ctx: ServiceContext, itemId: string): Promise<TaskView> {
+  const item = await loadItem(ctx, itemId);
+  const parent = await getTask(ctx, item.taskId);
+  const created = await createTask(ctx, {
+    title: item.title,
+    notes: item.details ?? null,
+    visibility: parent.visibility,
+    companyId: parent.company?.id ?? null,
+    projectId: parent.project?.id ?? null,
+    assigneeUserId: parent.assignee?.kind === "user" ? parent.assignee.id : null,
+    assigneePersonId: parent.assignee?.kind === "person" ? parent.assignee.id : null,
+    status: item.doneAt ? "done" : parent.status === "backlog" ? "backlog" : "todo",
+    priority: parent.priority,
+    parentTaskId: parent.id,
+  });
+  await ctx.db.delete(taskChecklistItems).where(eq(taskChecklistItems.id, item.id));
+  await logChecklist(ctx, parent.id, { action: "promoted", item: item.title, taskId: created.id, key: created.key });
+  return created;
 }

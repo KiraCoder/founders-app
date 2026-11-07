@@ -7,6 +7,7 @@ import { orgDepartmentOptionsByCompany } from "./org";
 import { listProjectOptions } from "./projects";
 import type { PersonChaseSettings } from "@/lib/task-chase";
 import { personChaseSettings } from "./task-activity";
+import { listLabels } from "./task-labels";
 
 /** Everything the task form needs for its pickers (serializable for client components). */
 export interface TaskFormOptions {
@@ -17,6 +18,8 @@ export interface TaskFormOptions {
   peopleByCompany: Record<string, { id: string; name: string }[]>;
   /** Org chart departments per company ("21 Отдел владельца"); companies without a chart have none. */
   departmentsByCompany: Record<string, { id: string; label: string }[]>;
+  /** Labels to offer (not archived). */
+  labels: { id: string; name: string; color: string }[];
   /** Each person's own chase settings, for the form's live chase summary (founders only; else empty). */
   personChase?: Record<string, PersonChaseSettings>;
 }
@@ -27,12 +30,13 @@ export interface TaskFormOptions {
  * warm page pays no query for it; staff read the database directly.
  */
 export async function getTaskFormOptions(ctx: ServiceContext): Promise<TaskFormOptions> {
-  const [companies, projects, founders, peopleByCompany, departmentsByCompany] = await Promise.all([
+  const [companies, projects, founders, peopleByCompany, departmentsByCompany, labels] = await Promise.all([
     listCompanies(ctx),
     listProjectOptions(ctx),
     listFounders(ctx),
     assignablePeopleByCompany(ctx),
     orgDepartmentOptionsByCompany(ctx),
+    ctx.user.role === "founder" ? sharedCache(["tasks:labels"], [CACHE_TAGS.labels], () => listLabels(ctx)) : listLabels(ctx),
   ]);
   const personIds = [...new Set(Object.values(peopleByCompany).flat().map((p) => p.id))].sort();
   const loadChase = () => personChaseSettings(ctx, personIds, { reachability: false });
@@ -43,6 +47,7 @@ export async function getTaskFormOptions(ctx: ServiceContext): Promise<TaskFormO
     founders: founders.map((f) => ({ id: f.id, shortName: f.shortName })),
     peopleByCompany,
     departmentsByCompany,
+    labels: labels.map((l) => ({ id: l.id, name: l.name, color: l.color })),
     personChase:
       ctx.user.role === "founder" && personIds.length
         ? await sharedCache(["tasks:person-chase", ...personIds], [CACHE_TAGS.people, CACHE_TAGS.staffSettings], loadChase)

@@ -65,8 +65,8 @@ describe("My tasks and the filter bar", () => {
     expect(ids(await listTasks(n, { view: "company", search: "jobut", status: "any" }))).toEqual(expect.arrayContaining([late.id, soon.id, done.id])); // the company
     expect(ids(await listTasks(n, { ...base, status: "any", dueFrom: "2026-11-01", dueTo: "2026-11-05" })).sort()).toEqual([soon.id, done.id].sort());
     expect((await listTasks(n, { ...base, status: "any", sort: "title" })).map((x) => x.title)).toEqual(["QF done", "QF late", "QF soon"]);
-    expect(await countTasksByStatus(n, base)).toEqual({ open: 2, overdue: 1, done: 1, any: 3 });
-    expect(await countTasksByStatus(n, { ...base, quick: ["waiting"] })).toEqual({ open: 1, overdue: 0, done: 0, any: 1 });
+    expect(await countTasksByStatus(n, base)).toMatchObject({ open: 2, overdue: 1, done: 1, any: 3 });
+    expect(await countTasksByStatus(n, { ...base, quick: ["waiting"] })).toMatchObject({ open: 1, overdue: 0, done: 0, any: 1 });
   });
 
   it("the URL params are validated (bad values are dropped) and the person filter knows each person's companies", async () => {
