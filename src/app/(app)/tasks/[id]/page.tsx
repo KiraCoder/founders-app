@@ -8,8 +8,7 @@ import { TaskChasePanel } from "@/components/tasks/TaskChasePanel";
 import { TaskChecklist } from "@/components/tasks/TaskChecklist";
 import { ActivityLine, DueChip } from "@/components/tasks/TaskListClient";
 import { toTaskItem, type TaskActivityItem } from "@/components/tasks/types";
-import { BackLink } from "@/components/tasks/ui/BackLink";
-import { ToastScope } from "@/components/tasks/ui/Toast";
+import { BackLink } from "@/components/ui/BackLink";
 import { CompanyDot, InitialsAvatar, Section, Tag } from "@/components/ui";
 import { getPageContext } from "@/server/context";
 import { canManageStaffBot } from "@/server/services/access";
@@ -57,8 +56,8 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
   const L = labelsFor(task);
 
   return (
-    <ToastScope>
-      <BackLink href={back} context="tasks" />
+    <>
+      <BackLink href={back} ariaLabel="Back to tasks" className="mb-3" />
       <header className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           <p className="eyebrow">
@@ -271,7 +270,7 @@ export default async function TaskPage({ params }: { params: Promise<{ id: strin
           </ul>
         </Section>
       )}
-    </ToastScope>
+    </>
   );
 }
 

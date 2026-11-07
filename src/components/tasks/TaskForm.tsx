@@ -10,8 +10,8 @@ import { ChaseControl } from "./ChaseControl";
 import { PRIORITY_OPTIONS, STATUS_OPTIONS } from "./labels";
 import { DraftChecklist, type DraftItem } from "./TaskChecklist";
 import type { TaskItem } from "./types";
-import { ConfirmDialog } from "./ui/ConfirmDialog";
-import { useToast } from "./ui/Toast";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { toast } from "@/components/ui/Toast";
 
 export interface TaskFormDefaults {
   visibility?: "private" | "shared";
@@ -55,7 +55,6 @@ export function TaskForm({
   chase?: ChaseFormValue;
 }) {
   const isEdit = Boolean(task);
-  const toast = useToast();
   const [state, action, pending] = useActionState<TaskActionResult, FormData>(saveTaskAction, {});
   const formRef = useRef<HTMLFormElement>(null);
   const confirmedRef = useRef(false);
@@ -108,7 +107,7 @@ export function TaskForm({
       }
       onDone?.();
     } else if (state.error) {
-      toast(`Couldn't save: ${state.error}`, "risk");
+      toast(`Couldn't save: ${state.error}`, { tone: "risk" });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.nonce, state.error]);

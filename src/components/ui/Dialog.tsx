@@ -12,6 +12,7 @@
  * - The content is mounted only while open, so a form inside starts fresh every time.
  * - Accessible name = `title` (getByRole("dialog", { name: title })). On phones it fills the width
  *   and scrolls inside; `footer` stays at the bottom.
+ * - `role="alertdialog"` for a question that needs an answer (ConfirmDialog uses it).
  */
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { IconButton } from "./IconButton";
@@ -26,23 +27,30 @@ export interface DialogProps {
   size?: "sm" | "md" | "lg";
   /** Accessible name when `title` is not plain text. */
   ariaLabel?: string;
+  role?: "dialog" | "alertdialog";
 }
 
 const WIDTH = { sm: "min(420px, calc(100vw - 32px))", md: "min(560px, calc(100vw - 32px))", lg: "min(760px, calc(100vw - 32px))" };
 
-export function Dialog({ open, onClose, title, description, children, footer, size = "md", ariaLabel }: DialogProps) {
+export function Dialog({ open, onClose, title, description, children, footer, size = "md", ariaLabel, role = "dialog" }: DialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const descId = useId();
   useEffect(() => {
     const d = ref.current;
     if (!d) return;
-    if (open && !d.open) d.showModal();
+    if (open && !d.open) {
+      // showModal is missing in very old browsers / some test DOMs: fall back to a plain open dialog.
+      if (typeof d.showModal === "function") d.showModal();
+      else d.setAttribute("open", "");
+    }
     if (!open && d.open) d.close();
   }, [open]);
   return (
     <dialog
       ref={ref}
+      role={role}
+      aria-modal="true"
       aria-labelledby={ariaLabel ? undefined : titleId}
       aria-label={ariaLabel}
       aria-describedby={description ? descId : undefined}

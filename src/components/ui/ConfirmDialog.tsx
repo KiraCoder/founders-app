@@ -11,6 +11,8 @@
  *   />
  *
  * Buttons: Cancel, the optional `secondary` choice, then the confirm button (focused first).
+ * The message can also be given as children. Role `alertdialog`
+ * (getByRole("alertdialog", { name: title })). `busy` disables the choices ("Working…").
  */
 import type { ReactNode } from "react";
 import { Dialog } from "./Dialog";
@@ -18,7 +20,8 @@ import { Dialog } from "./Dialog";
 export interface ConfirmDialogProps {
   open: boolean;
   title: string;
-  message: ReactNode;
+  message?: ReactNode;
+  children?: ReactNode;
   confirmLabel: string;
   cancelLabel?: string;
   tone?: "primary" | "danger";
@@ -28,16 +31,17 @@ export interface ConfirmDialogProps {
   busy?: boolean;
 }
 
-export function ConfirmDialog({ open, title, message, confirmLabel, cancelLabel = "Cancel", tone = "primary", onConfirm, onCancel, secondary, busy }: ConfirmDialogProps) {
+export function ConfirmDialog({ open, title, message, children, confirmLabel, cancelLabel = "Cancel", tone = "primary", onConfirm, onCancel, secondary, busy }: ConfirmDialogProps) {
   return (
     <Dialog
       open={open}
       onClose={onCancel}
       title={title}
       size="sm"
+      role="alertdialog"
       footer={
         <>
-          <button type="button" className="btn" onClick={onCancel}>
+          <button type="button" className="btn" onClick={onCancel} disabled={busy}>
             {cancelLabel}
           </button>
           {secondary && (
@@ -46,12 +50,12 @@ export function ConfirmDialog({ open, title, message, confirmLabel, cancelLabel 
             </button>
           )}
           <button type="button" autoFocus className={`btn ${tone === "danger" ? "btn-danger" : "btn-primary"}`} onClick={onConfirm} disabled={busy}>
-            {confirmLabel}
+            {busy ? "Working…" : confirmLabel}
           </button>
         </>
       }
     >
-      <div className="text-[14px] leading-relaxed">{message}</div>
+      <div className="space-y-2 text-[14px] leading-relaxed">{message ?? children}</div>
     </Dialog>
   );
 }

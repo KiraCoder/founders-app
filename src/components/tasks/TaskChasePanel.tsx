@@ -4,7 +4,7 @@ import { useActionState, useEffect, useState } from "react";
 import { saveChaseAction, type TaskActionResult } from "@/app/(app)/tasks/actions";
 import type { ChaseFormValue, PersonChaseSettings } from "@/lib/task-chase";
 import { ChaseControl } from "./ChaseControl";
-import { useToast } from "./ui/Toast";
+import { toast } from "@/components/ui/Toast";
 
 /** The task page's "Reminders" card: the explicit chase choice, saved on its own. */
 export function TaskChasePanel({
@@ -26,12 +26,11 @@ export function TaskChasePanel({
   unreachable: string | null;
   hasNotes: boolean;
 }) {
-  const toast = useToast();
   const [v, setV] = useState(value);
   const [state, action, pending] = useActionState<TaskActionResult, FormData>(saveChaseAction, {});
   useEffect(() => {
     if (state.ok) toast(state.message ?? "Saved");
-    else if (state.error) toast(`Couldn't save: ${state.error}`, "risk");
+    else if (state.error) toast(`Couldn't save: ${state.error}`, { tone: "risk" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.nonce, state.error]);
   const dirty = JSON.stringify(v) !== JSON.stringify(value);

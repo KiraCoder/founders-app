@@ -113,7 +113,7 @@ test("routine for a linked person (dialog, checklist builder) → Run now → Ru
   await editForm.getByLabel("New item").fill("Alura Brand");
   await editForm.getByRole("button", { name: "+ Add item" }).click();
   await editForm.getByRole("button", { name: "Save routine" }).click();
-  const confirm = page.getByRole("dialog", { name: "Today's run is already done" });
+  const confirm = page.getByRole("alertdialog", { name: "Today's run is already done" });
   await expect(confirm).toBeVisible();
   await confirm.getByRole("button", { name: "Save from the next run" }).click();
   await expect(page.getByRole("status").filter({ hasText: "applies from the next run" })).toBeVisible();

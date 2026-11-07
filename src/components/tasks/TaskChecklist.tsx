@@ -8,9 +8,9 @@ import {
   updateChecklistItemAction,
   type TaskActionResult,
 } from "@/app/(app)/tasks/actions";
-import { ConfirmDialog } from "./ui/ConfirmDialog";
-import { IconButton } from "./ui/IconButton";
-import { useToast } from "./ui/Toast";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { IconButton } from "@/components/ui/IconButton";
+import { toast } from "@/components/ui/Toast";
 
 export interface ChecklistItemData {
   id: string;
@@ -96,7 +96,6 @@ export function TaskChecklist({
   readOnly?: boolean;
   timeZone: string;
 }) {
-  const toast = useToast();
   const [state, addAction, adding] = useActionState<TaskActionResult, FormData>(addChecklistItemAction, {});
   const addForm = useRef<HTMLFormElement>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -114,7 +113,7 @@ export function TaskChecklist({
     if (state.ok) {
       addForm.current?.reset();
       toast(state.message ?? "Saved");
-    } else if (state.error) toast(state.error, "risk");
+    } else if (state.error) toast(state.error, { tone: "risk" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.nonce, state.error]);
 
@@ -126,7 +125,7 @@ export function TaskChecklist({
     start(async () => {
       const r = await fn();
       if (r.ok) toast(r.message ?? "Saved");
-      else toast(r.error ?? "Something went wrong", "risk");
+      else toast(r.error ?? "Something went wrong", { tone: "risk" });
     });
 
   return (
@@ -171,16 +170,13 @@ export function TaskChecklist({
             )}
             {!readOnly && editing !== item.id && (
               <div className="flex shrink-0 gap-0.5">
-                <IconButton label={`Edit “${item.title}”`} onClick={() => setEditing(item.id)}>
-                  ✎
-                </IconButton>
+                <IconButton icon="edit" label={`Edit “${item.title}”`} onClick={() => setEditing(item.id)} />
                 <IconButton
+                  icon="trash"
                   label={`Remove “${item.title}”`}
-                  tone="risk"
+                  tone="danger"
                   onClick={() => setAsk({ what: `remove “${item.title}”`, go: () => act(() => removeChecklistItemAction(item.id)) })}
-                >
-                  🗑
-                </IconButton>
+                />
               </div>
             )}
           </li>
@@ -230,7 +226,6 @@ export function TaskChecklist({
 }
 
 function EditItem({ item, onDone, guard }: { item: ChecklistItemData; onDone: () => void; guard: (go: () => void) => void }) {
-  const toast = useToast();
   const [state, action, pending] = useActionState<TaskActionResult, FormData>(updateChecklistItemAction, {});
   const [, start] = useTransition();
   const fid = useId();
@@ -238,7 +233,7 @@ function EditItem({ item, onDone, guard }: { item: ChecklistItemData; onDone: ()
     if (state.ok) {
       toast(state.message ?? "Saved");
       onDone();
-    } else if (state.error) toast(state.error, "risk");
+    } else if (state.error) toast(state.error, { tone: "risk" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.nonce, state.error]);
   return (
@@ -288,9 +283,7 @@ export function DraftChecklist({ items, onChange }: { items: DraftItem[]; onChan
                 <p>{i.title}</p>
                 {i.details && <p className="text-[12px] text-muted">{i.details}</p>}
               </div>
-              <IconButton label={`Remove “${i.title}”`} tone="risk" onClick={() => onChange(items.filter((_, k) => k !== n))}>
-                ✕
-              </IconButton>
+              <IconButton icon="close" label={`Remove “${i.title}”`} tone="danger" onClick={() => onChange(items.filter((_, k) => k !== n))} />
             </li>
           ))}
         </ul>

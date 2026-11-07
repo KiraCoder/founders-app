@@ -8,7 +8,8 @@
  *   <Toaster />                                  // once, in the app layout
  *
  * Toasts stack bottom-right (bottom-centre on phones, above the tab bar), each is a live region
- * (role="status", or role="alert" for "risk") and goes away after `ms` (default 5 s) or on ×.
+ * (role="status", or role="alert" for "risk") and goes away after `ms` (default 5 s, 8 s for
+ * "risk") or on ×.
  * Works through a window event, so no provider is needed.
  */
 import { useEffect, useState } from "react";
@@ -25,7 +26,8 @@ let seq = 0;
 
 export function toast(message: string, opts: { tone?: ToastTone; ms?: number } = {}): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(EVENT, { detail: { message, tone: opts.tone ?? "ok", ms: opts.ms ?? 5000 } }));
+  const tone = opts.tone ?? "ok";
+  window.dispatchEvent(new CustomEvent(EVENT, { detail: { message, tone, ms: opts.ms ?? (tone === "risk" ? 8000 : 5000) } }));
 }
 
 const TONE: Record<ToastTone, string> = {
@@ -59,6 +61,7 @@ export function Toaster() {
       {items.map((t) => (
         <div
           key={t.id}
+          data-testid="toast"
           role={t.tone === "risk" ? "alert" : "status"}
           className={`pointer-events-auto flex max-w-[420px] items-start gap-2 rounded-[var(--radius-card)] border px-3 py-2 text-[13px] shadow-[var(--shadow)] ${TONE[t.tone]}`}
         >

@@ -12,10 +12,10 @@ import {
 import type { TaskFormOptions } from "@/server/services/options";
 import { TaskForm } from "./TaskForm";
 import type { TaskActivityItem, TaskItem } from "./types";
-import { ConfirmDialog } from "./ui/ConfirmDialog";
-import { Dialog } from "./ui/Dialog";
-import { IconButton, IconLink } from "./ui/IconButton";
-import { useToast } from "./ui/Toast";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { Dialog } from "@/components/ui/Dialog";
+import { IconButton } from "@/components/ui/IconButton";
+import { toast } from "@/components/ui/Toast";
 
 type Ask = { kind: "archive" | "chase" | "delete" };
 
@@ -41,7 +41,6 @@ export function TaskActions({
   /** Where to go after "Delete" (the task page leaves itself). */
   afterDelete?: string;
 }) {
-  const toast = useToast();
   const router = useRouter();
   const [pending, start] = useTransition();
   const [editing, setEditing] = useState(false);
@@ -56,51 +55,37 @@ export function TaskActions({
       if (r.ok) {
         toast(r.message ?? "Done");
         after?.();
-      } else toast(r.error ?? "Something went wrong", "risk");
+      } else toast(r.error ?? "Something went wrong", { tone: "risk" });
     });
 
   return (
     <div className={`flex shrink-0 flex-wrap items-center justify-end gap-0.5 ${pending ? "opacity-60" : ""}`} data-testid="task-actions">
       <IconButton
+        icon="check"
         label={task.status === "done" ? "Reopen" : "Mark done"}
         tone="ok"
         pressed={task.status === "done"}
         disabled={pending || task.status === "cancelled"}
         onClick={() => act(() => setStatusAction(task.id, task.status === "done" ? "todo" : "done"))}
-      >
-        ✓
-      </IconButton>
-      <IconButton label="Edit" onClick={() => setEditing(true)} disabled={pending}>
-        ✎
-      </IconButton>
-      {showOpen && (
-        <IconLink label="Open" href={`/tasks/${task.id}`}>
-          ↗
-        </IconLink>
-      )}
+      />
+      <IconButton icon="edit" label="Edit" onClick={() => setEditing(true)} disabled={pending} />
+      {showOpen && <IconButton icon="external" label="Open" href={`/tasks/${task.id}`} />}
       {person && canChase && (
         <>
-          <IconButton label={`Chase ${person.name} now`} disabled={pending || closed} onClick={() => setAsk({ kind: "chase" })}>
-            🔔
-          </IconButton>
+          <IconButton icon="bell" label={`Chase ${person.name} now`} disabled={pending || closed} onClick={() => setAsk({ kind: "chase" })} />
           <IconButton
+            icon={paused ? "play" : "pause"}
             label={paused ? "Resume chasing" : "Pause chasing"}
             pressed={paused}
             disabled={pending || closed}
             onClick={() => act(() => pauseChasingAction(task.id, !paused))}
-          >
-            {paused ? "▶" : "⏸"}
-          </IconButton>
+          />
         </>
       )}
       {task.status === "cancelled" ? (
-        <IconButton label="Restore" disabled={pending} onClick={() => act(() => setStatusAction(task.id, "todo"))}>
-          ↺
-        </IconButton>
+        <IconButton icon="restore" label="Restore" disabled={pending} onClick={() => act(() => setStatusAction(task.id, "todo"))} />
       ) : (
-        <IconButton label="Archive" tone="risk" disabled={pending} onClick={() => setAsk({ kind: "archive" })}>
-          🗄
-        </IconButton>
+        <IconButton icon="archive" label="Archive" tone="danger" disabled={pending} onClick={() => setAsk({ kind: "archive" })} />
       )}
 
       <Dialog open={editing} onClose={() => setEditing(false)} title="Edit task" description={task.title} size="lg">
@@ -126,7 +111,7 @@ export function TaskActions({
         title="Archive this task?"
         confirmLabel="Archive"
         tone="danger"
-        pending={pending}
+        busy={pending}
         onCancel={() => setAsk(null)}
         onConfirm={() => act(() => setStatusAction(task.id, "cancelled"), () => setAsk(null))}
       >
@@ -139,7 +124,7 @@ export function TaskActions({
         open={ask?.kind === "chase"}
         title={`Remind ${person?.name ?? ""} now?`}
         confirmLabel="Send reminder"
-        pending={pending}
+        busy={pending}
         onCancel={() => setAsk(null)}
         onConfirm={() => act(() => chaseNowAction(task.id), () => setAsk(null))}
       >
@@ -152,7 +137,7 @@ export function TaskActions({
         title="Delete this task for good?"
         confirmLabel="Yes, delete"
         tone="danger"
-        pending={pending}
+        busy={pending}
         onCancel={() => setAsk(null)}
         onConfirm={() =>
           act(

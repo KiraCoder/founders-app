@@ -8,7 +8,6 @@ import type { TaskFormOptions } from "@/server/services/options";
 import { PRIORITY_TONE, STATUS_TONE, priorityLabel, statusLabel } from "./labels";
 import { TaskActions } from "./TaskActions";
 import type { TaskActivityItem, TaskItem } from "./types";
-import { ToastScope } from "./ui/Toast";
 
 export function TaskListClient({
   tasks,
@@ -33,22 +32,20 @@ export function TaskListClient({
     return <div className="card px-4 py-6 text-center text-[13px] text-muted">{empty}</div>;
   }
   return (
-    <ToastScope>
-      <ul className="card divide-y divide-line" aria-label="Tasks">
-        {tasks.map((t) => (
-          <TaskRow
-            key={t.id}
-            task={t}
-            today={today}
-            options={options}
-            showCompany={showCompany}
-            activity={activity[t.id]}
-            canChase={canChase}
-            timeZone={timeZone}
-          />
-        ))}
-      </ul>
-    </ToastScope>
+    <ul className="card divide-y divide-line" aria-label="Tasks">
+      {tasks.map((t) => (
+        <TaskRow
+          key={t.id}
+          task={t}
+          today={today}
+          options={options}
+          showCompany={showCompany}
+          activity={activity[t.id]}
+          canChase={canChase}
+          timeZone={timeZone}
+        />
+      ))}
+    </ul>
   );
 }
 
