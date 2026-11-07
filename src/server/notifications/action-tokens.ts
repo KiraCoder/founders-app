@@ -20,6 +20,13 @@ import {
 } from "./types";
 
 export const ACTION_TOKEN_TTL_DAYS = 7;
+
+/** Server-side data kept with a token: the button's payload, plus the checklist item key (routines). */
+function tokenPayload(a: MessageAction): Record<string, unknown> | null {
+  const item = (a as { item?: string }).item;
+  if (!a.payload && !item) return null;
+  return { ...(a.payload ?? {}), ...(item ? { item } : {}) };
+}
 const PREFIX = "a:";
 
 /**
@@ -46,7 +53,7 @@ export async function mintActionTokens(
       deadlineRequestId: a.requestId ?? null,
       routineRunId: a.runId ?? null,
       action: a.action,
-      payload: a.payload ?? ((a as { item?: string }).item ? { item: (a as { item?: string }).item } : null),
+      payload: tokenPayload(a),
       outboxId: opts.outboxId,
       expiresAt,
     };
@@ -61,12 +68,16 @@ export interface ConsumedRoutineAction {
   runId: string;
   action: RoutineAction;
   item: string | null;
+  /** routine_pick: what the pick is for. */
+  pickKind: "comment" | "partly" | "cant" | null;
 }
 
 function routineOf(row: { routineRunId: string | null; action: string; payload: Record<string, unknown> | null }): ConsumedRoutineAction | null {
   if (!row.routineRunId || !(ROUTINE_ACTIONS as readonly string[]).includes(row.action)) return null;
   const item = typeof row.payload?.item === "string" ? row.payload.item : null;
-  return { kind: "routine", runId: row.routineRunId, action: row.action as RoutineAction, item };
+  const k = row.payload?.kind;
+  const pickKind = k === "comment" || k === "partly" || k === "cant" ? k : null;
+  return { kind: "routine", runId: row.routineRunId, action: row.action as RoutineAction, item, pickKind };
 }
 
 export type ConsumedAction =

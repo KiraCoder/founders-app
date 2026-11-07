@@ -3,6 +3,7 @@
  * Founder-facing text stays English (messages.ts). Plain text only; renderers escape it.
  */
 import { daysBetween, type IsoDate } from "@/lib/dates";
+import { itemStateOf, openItems, RUN_ITEM_KEY, runProgress, type ChecklistItem, type ItemState, type ItemStates } from "@/lib/routines";
 import { renderedLineLength, renderTelegramTitleLength } from "./render-telegram";
 import { SUMMARY_TEXT_BUDGET } from "./messages";
 import { taskRef, type MessageAction, type MessageLine, type NeutralMessage, type StaffAction } from "./types";
@@ -237,7 +238,7 @@ export const RU = {
 } as const;
 
 // ---------------------------------------------------------------------------
-// Routines (0029)
+// Routines (0029, redesigned in 0031): one message per ask / reminder, EDITED in place on each tick
 // ---------------------------------------------------------------------------
 
 /** What a routine message needs (no DB): the routine and today's run state. */
@@ -246,47 +247,149 @@ export interface RoutineMessageInput {
   title: string;
   description: string;
   confirmation: "button" | "checklist" | "number";
-  items: readonly { key: string; label: string }[];
+  items: readonly ChecklistItem[];
   itemsDone: readonly string[];
+  itemStates?: ItemStates | null;
+  /** The run's status ("done" → the final «Готово, спасибо!» state; partly / missed → closed). */
+  status?: string;
+  companyName?: string | null;
+  /** "Remind until" (HH:MM): «⏰ до 19:00». */
+  until?: string | null;
 }
 
-/** Labels of checklist items not ticked yet. */
-export function remainingItems(r: Pick<RoutineMessageInput, "items" | "itemsDone">) {
-  const done = new Set(r.itemsDone);
-  return r.items.filter((i) => !done.has(i.key));
+/** Why the message is sent: the ask, a reminder, or "the founder changed the checklist". */
+export type RoutineMessageMode = "ask" | "reminder" | "updated";
+
+/** Checklist items not resolved yet (not done / partly / can't). */
+export function remainingItems(r: Pick<RoutineMessageInput, "items" | "itemsDone" | "itemStates">) {
+  return openItems({ items: r.items, itemsDone: r.itemsDone, itemStates: r.itemStates ?? {} });
+}
+
+export const ROUTINE_STATE_EMOJI: Record<ItemState | "open", string> = { done: "✅", partly: "🟡", cant: "❌", open: "⬜" };
+
+export const ROUTINE_BUTTONS = {
+  allDone: "✅ Всё готово",
+  done: "✅ Готово",
+  comment: "💬 Комментарий",
+  partly: "🟡 Частично",
+  cant: "❌ Не могу",
+  back: "← Назад",
+  wholeRun: "Ко всей рутине",
+  allLeft: "Все оставшиеся",
+} as const;
+
+const shortLabel = (s: string, n = 28) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const quoted = (c: string | null | undefined) => (c ? ` — «${c.length > 120 ? `${c.slice(0, 119)}…` : c}»` : "");
+
+function routineHeader(r: RoutineMessageInput, mode: RoutineMessageMode): string {
+  if (r.status === "done") return `✅ ${r.title}`;
+  if (r.status === "partly" || r.status === "missed") return `🔒 ${r.title}`;
+  if (mode === "reminder") return `⏰ Напоминание: ${r.title}`;
+  if (mode === "updated") return `🔄 Рутина обновлена: ${r.title}`;
+  return `📋 Рутина: ${r.title}`;
+}
+
+/** The body lines (meta, description, progress, the checklist with states), shared by every variant. */
+function routineBody(r: RoutineMessageInput, mode: RoutineMessageMode): MessageLine[] {
+  const run = { items: r.items, itemsDone: r.itemsDone, itemStates: r.itemStates ?? {}, status: r.status };
+  const lines: MessageLine[] = [];
+  const closed = r.status === "done" || r.status === "partly" || r.status === "missed";
+  const meta = [r.companyName ? `🏢 ${r.companyName}` : null, !closed && r.until ? `⏰ сегодня до ${r.until}` : null].filter(Boolean);
+  if (meta.length) lines.push({ text: meta.join(" · "), style: "text" });
+  if (r.description) lines.push({ text: r.description, style: "text" });
+  if (mode === "updated" && !closed) lines.push({ text: "Основатель изменил список — вот актуальный.", style: "muted" });
+  const { done, total } = runProgress(run);
+  if (r.confirmation === "checklist" && r.items.length) {
+    lines.push({ text: `Прогресс: ${done}/${total}`, style: "heading" });
+    for (const i of r.items) {
+      const st = itemStateOf(run, i.key);
+      const rec = r.itemStates?.[i.key];
+      lines.push({ text: `${ROUTINE_STATE_EMOJI[st]} ${i.label}${st === "open" ? "" : quoted(rec?.comment)}`, style: "text" });
+      if (i.details && st === "open") lines.push({ text: `    ${i.details}`, style: "muted" });
+    }
+  } else {
+    const st = itemStateOf(run, RUN_ITEM_KEY);
+    const rec = r.itemStates?.[RUN_ITEM_KEY];
+    if (r.status === "done" || st !== "open") {
+      lines.push({ text: `${ROUTINE_STATE_EMOJI[r.status === "done" ? "done" : st]} ${st === "partly" ? "Частично" : st === "cant" ? "Не получилось" : "Сделано"}${quoted(rec?.comment)}`, style: "text" });
+    }
+  }
+  if (r.status === "done") {
+    lines.push({ text: `Готово, спасибо! ${done}/${total} ✅`, style: "heading" });
+  } else if (closed) {
+    lines.push({ text: `На сегодня закрыто: ${done}/${total}. Основатели видят комментарии.`, style: "muted" });
+  } else if (r.confirmation === "checklist" && r.items.length) {
+    const left = remainingItems(r).length;
+    if (mode === "reminder") lines.push({ text: `Осталось: ${left} из ${total}.`, style: "muted" });
+    lines.push({ text: "Нажмите на пункт, когда сделаете. «Частично» и «Не могу» — с комментарием.", style: "muted" });
+  } else {
+    lines.push({ text: "Нажмите «✅ Готово», когда сделаете. «Частично» и «Не могу» — с комментарием.", style: "muted" });
+  }
+  return lines;
 }
 
 /**
- * The ask (`reminder` = false) or a reminder about today's run. A checklist shows ONLY the items not
- * ticked yet, one «✓ item» button each (two per row), plus «✓ Всё сделано» when more than one is left.
- * A button routine has one «Готово».
+ * The ask, a reminder or the "updated" message about today's run (and the same text when the bot
+ * edits it after a tick): header with emoji + title, company and "until", «Прогресс: 3/5», the whole
+ * checklist with ✅ done / 🟡 partly / ❌ can't / ⬜ open (details in italics under open items).
+ * Buttons: «✓ item» per open item, «✅ Всё готово» (two or more open) or «✅ Готово», then
+ * «💬 Комментарий» «🟡 Частично» «❌ Не могу». A done run shows «Готово, спасибо! 5/5 ✅», no buttons.
+ * `mode` may be a boolean (true = reminder) for older callers.
  */
-export function buildRoutineMessageRu(r: RoutineMessageInput, reminder: boolean): NeutralMessage {
-  const lines: MessageLine[] = [];
-  if (r.description) lines.push({ text: r.description, style: "text" });
-  if (r.confirmation === "checklist") {
+export function buildRoutineMessageRu(r: RoutineMessageInput, mode: RoutineMessageMode | boolean = "ask"): NeutralMessage {
+  const m: RoutineMessageMode = mode === true ? "reminder" : mode === false ? "ask" : mode;
+  const title = routineHeader(r, m);
+  const lines = routineBody(r, m);
+  const closed = r.status === "done" || r.status === "partly" || r.status === "missed";
+  if (closed) return { title, lines, actions: [] };
+  const actions: MessageAction[] = [];
+  if (r.confirmation === "checklist" && r.items.length) {
     const left = remainingItems(r);
-    lines.push({
-      text: reminder && r.itemsDone.length ? `Осталось отметить (${left.length} из ${r.items.length}):` : "Отметьте, что сделано:",
-      style: "muted",
-    });
-    for (const i of left) lines.push({ text: i.label, style: "item" });
-    const actions: MessageAction[] = left.map((i, n) => ({
-      action: "routine_tick" as const,
-      runId: r.runId,
-      item: i.key,
-      label: `✓ ${i.label}`,
-      row: Math.floor(n / 2),
-    }));
-    if (left.length > 1) actions.push({ action: "routine_done", runId: r.runId, label: "✓ Всё сделано", row: 100 });
-    return { title: `${reminder ? "Напоминание" : "Рутина"}: ${r.title}`, lines, actions };
+    left.forEach((i, n) => actions.push({ action: "routine_tick", runId: r.runId, item: i.key, label: `✓ ${shortLabel(i.label)}`, row: Math.floor(n / 2) }));
+    if (left.length > 1) actions.push({ action: "routine_done", runId: r.runId, label: ROUTINE_BUTTONS.allDone, row: 100 });
+  } else {
+    actions.push({ action: "routine_done", runId: r.runId, label: ROUTINE_BUTTONS.done, row: 100 });
   }
-  lines.push({ text: "Нажмите «Готово», когда сделаете.", style: "muted" });
-  return {
-    title: `${reminder ? "Напоминание" : "Рутина"}: ${r.title}`,
-    lines,
-    actions: [{ action: "routine_done", runId: r.runId, label: "Готово" }],
-  };
+  actions.push(
+    { action: "routine_comment", runId: r.runId, label: ROUTINE_BUTTONS.comment, row: 101 },
+    { action: "routine_partly", runId: r.runId, label: ROUTINE_BUTTONS.partly, row: 101 },
+    { action: "routine_cant", runId: r.runId, label: ROUTINE_BUTTONS.cant, row: 101 },
+  );
+  return { title, lines, actions };
+}
+
+export type RoutineCommentKind = "comment" | "partly" | "cant";
+
+/**
+ * «Какой пункт?»: the same message with a pick of the item a comment / «Частично» / «Не могу» is
+ * about (open items for partly / can't; every item for a comment), the whole run, and «← Назад».
+ */
+export function buildRoutinePickRu(r: RoutineMessageInput, kind: RoutineCommentKind): NeutralMessage {
+  const base = buildRoutineMessageRu(r, "ask");
+  const choices = kind === "comment" ? r.items : remainingItems(r);
+  const ask = kind === "comment" ? "К какому пункту комментарий?" : kind === "partly" ? "Какой пункт сделан частично?" : "Какой пункт не получается?";
+  const actions: MessageAction[] = choices.map((i, n) => ({
+    action: "routine_pick" as const,
+    runId: r.runId,
+    item: i.key,
+    label: `→ ${shortLabel(i.label)}`,
+    row: Math.floor(n / 2),
+    payload: { kind },
+  }));
+  actions.push(
+    { action: "routine_pick", runId: r.runId, item: "_all", label: kind === "comment" ? ROUTINE_BUTTONS.wholeRun : ROUTINE_BUTTONS.allLeft, row: 100, payload: { kind } },
+    { action: "routine_back", runId: r.runId, label: ROUTINE_BUTTONS.back, row: 100 },
+  );
+  return { title: base.title, lines: [...base.lines, { text: ask, style: "heading" }], actions };
+}
+
+/** The prompt sent after «Комментарий» / «Частично» / «Не могу» (or a tick of a "needs a comment" item). */
+export function routineCommentPrompt(kind: RoutineCommentKind | "done", itemLabel: string | null): NeutralMessage {
+  const about = itemLabel ? ` — пункт «${itemLabel}»` : "";
+  if (kind === "partly") return { title: "🟡 Частично", lines: [{ text: `Что сделано, а что нет${about}? Напишите одним сообщением.`, style: "text" }] };
+  if (kind === "cant") return { title: "❌ Не могу", lines: [{ text: `Почему не получается${about}? Напишите одним сообщением — основатели увидят.`, style: "text" }] };
+  if (kind === "done") return { title: "💬 Нужен комментарий", lines: [{ text: `Отмечено ✓ Напишите комментарий${about} одним сообщением.`, style: "text" }] };
+  return { title: "💬 Комментарий", lines: [{ text: `Напишите комментарий${about} одним сообщением.`, style: "text" }] };
 }
 
 export const RU_ROUTINE = {
@@ -296,4 +399,9 @@ export const RU_ROUTINE = {
   already: "Уже отмечено.",
   closed: "Эта рутина на сегодня уже закрыта.",
   notYours: "Эта рутина вам недоступна.",
+  pick: "Выберите пункт",
+  writeComment: "Напишите комментарий одним сообщением",
+  commentSaved: "Комментарий сохранён ✓ Основатели увидят.",
+  partlySaved: "Отмечено «частично» ✓ Комментарий передан основателям.",
+  cantSaved: "Понятно. Передал основателям ✓",
 } as const;

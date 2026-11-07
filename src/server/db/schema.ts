@@ -33,6 +33,7 @@ import {
   uuid,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
+import type { AwaitingComment, ChecklistItem, ItemStates } from "../../lib/routines";
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
@@ -678,16 +679,21 @@ export const routines = pgTable(
     scheduleKind: text("schedule_kind").notNull().default("weekly"),
     days: integer("days").array(),
     monthDay: integer("month_day"),
-    /** Local time of the ask, "HH:MM". */
+    /** Local time of the (first) ask, "HH:MM". */
     time: text("time").notNull(),
+    /** Every ask time of the day, sorted ("10:00", "16:00"); null on older rows = just `time` (0031). */
+    times: text("times").array(),
+    /** Optional first / last day (inclusive, local); after `endsOn` the planner marks it "ended" (0031). */
+    startsOn: date("starts_on", { mode: "string" }),
+    endsOn: date("ends_on", { mode: "string" }),
     timezone: text("timezone").notNull().default("Asia/Bishkek"),
     /** "button" | "checklist" | "number" (later). */
     confirmation: text("confirmation").notNull().default("button"),
-    /** Checklist items [{ key, label }] (keys stay stable when labels are edited). */
-    items: jsonb("items").$type<{ key: string; label: string }[]>().notNull().default([]),
+    /** Checklist items [{ key, label, details?, needsComment? }] (keys stay stable when labels are edited). */
+    items: jsonb("items").$type<ChecklistItem[]>().notNull().default([]),
     /** Chase override (src/lib/routines.ts RoutineChaseOverride); null = the person's / global defaults. */
     chase: jsonb("chase").$type<Record<string, unknown>>(),
-    /** "active" | "paused" | "archived" */
+    /** "active" | "paused" | "ended" (past ends_on) | "archived" */
     status: text("status").notNull().default("active"),
     /** Seeded examples ("elmurat-1c"): created once, only if absent. */
     seedKey: text("seed_key").unique(),
@@ -702,7 +708,7 @@ export const routines = pgTable(
     check("routines_one_assignee", sql`(${t.assigneePersonId} is null) <> (${t.assigneeUserId} is null)`),
     check("routines_schedule_kind_ck", sql`${t.scheduleKind} in ('weekly', 'monthly')`),
     check("routines_confirmation_ck", sql`${t.confirmation} in ('button', 'checklist', 'number')`),
-    check("routines_status_ck", sql`${t.status} in ('active', 'paused', 'archived')`),
+    check("routines_status_ck", sql`${t.status} in ('active', 'paused', 'ended', 'archived')`),
     check("routines_month_day_ck", sql`${t.monthDay} is null or ${t.monthDay} between 1 and 31`),
   ],
 );
@@ -718,10 +724,14 @@ export const routineRuns = pgTable(
     runDate: date("run_date", { mode: "string" }).notNull(),
     /** "open" | "escalated" | "done" | "partly" | "missed" */
     status: text("status").notNull().default("open"),
-    /** The checklist as it was when the run opened. */
-    items: jsonb("items").$type<{ key: string; label: string }[]>().notNull().default([]),
-    /** Keys of the ticked items. */
+    /** The checklist of this run (as it opened; edits of the routine while it is open update it). */
+    items: jsonb("items").$type<ChecklistItem[]>().notNull().default([]),
+    /** Keys of the items ticked done (kept in sync with item_states). */
     itemsDone: jsonb("items_done").$type<string[]>().notNull().default([]),
+    /** Per item key (or "_run"): done / partly / can't, when, by whom, comment (0031). */
+    itemStates: jsonb("item_states").$type<ItemStates>().notNull().default({}),
+    /** The assignee pressed «Комментарий» / «Частично» / «Не могу»: their next text is the comment (0031). */
+    awaitingComment: jsonb("awaiting_comment").$type<AwaitingComment | null>(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     doneAt: timestamp("done_at", { withTimezone: true }),
     lastChasedAt: timestamp("last_chased_at", { withTimezone: true }),
@@ -737,8 +747,40 @@ export const routineRuns = pgTable(
   ],
 );
 
+/**
+ * Comments on routine runs (0031): from the assignee in the bot («💬 Комментарий», and the
+ * comment «Частично» / «Не могу» require), or a note when an item flagged "needs a comment" was
+ * ticked. Founders read them on the routine page.
+ */
+export const routineComments = pgTable(
+  "routine_comments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    routineId: uuid("routine_id")
+      .notNull()
+      .references(() => routines.id, { onDelete: "cascade" }),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => routineRuns.id, { onDelete: "cascade" }),
+    /** The checklist item key, or null for the whole run. */
+    itemKey: text("item_key"),
+    /** "comment" | "done" | "partly" | "cant" (what the comment came with). */
+    kind: text("kind").notNull().default("comment"),
+    authorPersonId: uuid("author_person_id").references(() => people.id, { onDelete: "set null" }),
+    authorUserId: uuid("author_user_id").references(() => users.id, { onDelete: "set null" }),
+    text: text("text").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("routine_comments_run_idx").on(t.runId),
+    index("routine_comments_routine_idx").on(t.routineId, t.createdAt),
+    check("routine_comments_kind_ck", sql`${t.kind} in ('comment', 'done', 'partly', 'cant')`),
+  ],
+);
+
 export type Routine = typeof routines.$inferSelect;
 export type RoutineRun = typeof routineRuns.$inferSelect;
+export type RoutineComment = typeof routineComments.$inferSelect;
 
 /** "Snooze 1 day": no reminders/chases for this task to this user until `snoozedUntil`. */
 export const reminderSnoozes = pgTable(

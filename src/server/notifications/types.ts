@@ -113,8 +113,13 @@ export const STAFF_ACTIONS = [
 ] as const;
 export type StaffAction = (typeof STAFF_ACTIONS)[number];
 
-/** Routine buttons: tick one checklist item (`item` = its key) or the whole run ("Готово" / "✓ Всё сделано"). */
-export const ROUTINE_ACTIONS = ["routine_tick", "routine_done"] as const;
+/**
+ * Routine buttons: tick one checklist item (`item` = its key) or the whole run («✅ Готово» /
+ * «✅ Всё готово»); «💬 Комментарий» / «🟡 Частично» / «❌ Не могу» (routine_comment / _partly /
+ * _cant: on a checklist they first offer a pick of the item, routine_pick with payload.kind; the
+ * next text message is the comment); routine_back closes the pick.
+ */
+export const ROUTINE_ACTIONS = ["routine_tick", "routine_done", "routine_comment", "routine_partly", "routine_cant", "routine_pick", "routine_back"] as const;
 export type RoutineAction = (typeof ROUTINE_ACTIONS)[number];
 
 /** A founder's one tap on a person's "Перенести срок" request. */
@@ -149,13 +154,14 @@ export type MessageAction =
       label: string;
       action: RoutineAction;
       runId: string;
-      /** Checklist item key (routine_tick). */
+      /** Checklist item key (routine_tick, routine_pick; "_all" = the whole run). */
       item?: string;
       taskId?: undefined;
       askId?: undefined;
       requestId?: undefined;
       row?: number;
-      payload?: undefined;
+      /** routine_pick: { kind: "comment" | "partly" | "cant" }. */
+      payload?: Record<string, unknown>;
     };
 // `row`: buttons with the same row number share one keyboard row (the grouped overdue push puts
 // each task's buttons on its own row). Without it, buttons go two per row.

@@ -20,6 +20,7 @@ import { fitTelegram } from "./render-telegram";
 import { processPersonItem } from "./staff-dispatcher";
 import { loadRoutineForMessage, markRoutineMessageSent } from "./routine-planner";
 import { loadStaffDefaults } from "@/server/services/staff";
+import { routineMessageInput } from "@/server/services/routines";
 import { taskDeadlineRequests } from "@/server/db/schema";
 import {
   aiRequestRef,
@@ -334,17 +335,7 @@ async function buildFor(ctx: ServiceContext, item: OutboxItem): Promise<Built> {
     if ("skip" in loaded) return { skip: loaded.skip };
     const { routine, run } = loaded;
     return {
-      message: buildRoutineMessage(
-        {
-          runId: run.id,
-          title: routine.title,
-          description: routine.description,
-          confirmation: routine.confirmation as "button" | "checklist",
-          items: run.items,
-          itemsDone: run.itemsDone,
-        },
-        loaded.reminder,
-      ),
+      message: buildRoutineMessage(await routineMessageInput(ctx.db, routine, run), loaded.reminder),
     };
   }
   if (kind === REPORT_KIND) {

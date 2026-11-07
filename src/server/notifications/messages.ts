@@ -3,6 +3,7 @@
  * Everything here is plain text; renderers escape it.
  */
 import { daysBetween, formatDueDate, isoWeekday, type IsoDate } from "@/lib/dates";
+import { itemStateOf, openItems, runProgress, type ChecklistItem, type ItemStates } from "@/lib/routines";
 import type { TaskView, TodaySummary } from "@/server/services/tasks";
 import { renderedLineLength, renderTelegramTitleLength, TELEGRAM_MAX_TEXT } from "./render-telegram";
 import {
@@ -358,28 +359,52 @@ export function buildNotLinked(): NeutralMessage {
   };
 }
 
-/** A founder's own routine (English): the ask or a reminder, only the items not ticked yet. */
+/**
+ * A founder's own routine (English): the ask or a reminder, with the whole checklist and its state
+ * (✅ / 🟡 / ❌ / ⬜), «Progress 2/3», one «✓ item» button per open item; the same text is edited
+ * in place after each tick ("Done, thanks! 3/3 ✅" at the end).
+ */
 export function buildRoutineMessage(
   r: {
     runId: string;
     title: string;
     description: string;
     confirmation: "button" | "checklist" | "number";
-    items: readonly { key: string; label: string }[];
+    items: readonly ChecklistItem[];
     itemsDone: readonly string[];
+    itemStates?: ItemStates | null;
+    status?: string;
+    companyName?: string | null;
   },
   reminder: boolean,
 ): NeutralMessage {
-  const done = new Set(r.itemsDone);
-  const left = r.items.filter((i) => !done.has(i.key));
-  const lines: MessageLine[] = r.description ? [{ text: r.description, style: "text" }] : [];
-  const title = `${reminder ? "Reminder" : "Routine"}: ${r.title}`;
+  const run = { items: r.items, itemsDone: r.itemsDone, itemStates: r.itemStates ?? {}, status: r.status };
+  const left = openItems(run);
+  const lines: MessageLine[] = [];
+  if (r.companyName) lines.push({ text: `🏢 ${r.companyName}`, style: "text" });
+  if (r.description) lines.push({ text: r.description, style: "text" });
+  const doneRun = r.status === "done";
+  const title = doneRun ? `✅ ${r.title}` : `${reminder ? "Reminder" : "Routine"}: ${r.title}`;
+  const { done, total } = runProgress(run);
   if (r.confirmation === "checklist") {
-    lines.push({ text: reminder && done.size ? `Still to tick (${left.length} of ${r.items.length}):` : "Tick what is done:", style: "muted" });
-    for (const i of left) lines.push({ text: i.label, style: "item" });
+    lines.push({ text: `Progress ${done}/${total}`, style: "heading" });
+    const emoji = { done: "✅", partly: "🟡", cant: "❌", open: "⬜" } as const;
+    for (const i of r.items) {
+      lines.push({ text: `${emoji[itemStateOf(run, i.key)]} ${i.label}`, style: "text" });
+      if (i.details && itemStateOf(run, i.key) === "open") lines.push({ text: `    ${i.details}`, style: "muted" });
+    }
+    if (doneRun) {
+      lines.push({ text: `Done, thanks! ${done}/${total} ✅`, style: "heading" });
+      return { title, lines, actions: [] };
+    }
+    lines.push({ text: "Tap an item when it is done.", style: "muted" });
     const actions: MessageAction[] = left.map((i, n) => ({ action: "routine_tick" as const, runId: r.runId, item: i.key, label: `✓ ${i.label}`, row: Math.floor(n / 2) }));
     if (left.length > 1) actions.push({ action: "routine_done", runId: r.runId, label: "✓ All done", row: 100 });
     return { title, lines, actions };
+  }
+  if (doneRun) {
+    lines.push({ text: "Done, thanks! ✅", style: "heading" });
+    return { title, lines, actions: [] };
   }
   lines.push({ text: "Press Done when it is done.", style: "muted" });
   return { title, lines, actions: [{ action: "routine_done", runId: r.runId, label: "Done" }] };

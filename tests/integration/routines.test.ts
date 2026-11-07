@@ -133,6 +133,8 @@ const oneC = (over: Record<string, unknown> = {}) =>
     chase: { chaseEveryMinutes: "120", chaseUntil: "19:00", escalateAt: "19:00" },
     ...over,
   });
+/** The run-level buttons under every open routine message. */
+const EXTRA = ["💬 Комментарий", "🟡 Частично", "❌ Не могу"];
 const runs = (routineId: string) => t.handle.db.select().from(routineRuns).where(eq(routineRuns.routineId, routineId));
 const cbFor = (s: Sent, label: string) => {
   const a = s.message.actions!.find((x) => x.label === label)!;
@@ -166,8 +168,8 @@ describe("runs, checklist and chasing", () => {
     expect(to(await tick(local(MON, "14:50")), elmurat)).toHaveLength(0);
     expect(await runs(r.id)).toHaveLength(0);
     const ask = to(await tick(local(MON, "15:00")), elmurat);
-    expect(ask.map((s) => s.message.title)).toEqual(["Рутина: 1C записи"]);
-    expect(ask[0]!.message.actions!.map((a) => a.label)).toEqual(["✓ Kiwi Go", "✓ Jobutify", "✓ Alura Brand", "✓ Всё сделано"]);
+    expect(ask.map((s) => s.message.title)).toEqual(["📋 Рутина: 1C записи"]);
+    expect(ask[0]!.message.actions!.map((a) => a.label)).toEqual(["✓ Kiwi Go", "✓ Jobutify", "✓ Alura Brand", "✅ Всё готово", ...EXTRA]);
     // Idempotent: the same tick again changes nothing.
     expect(to(await tick(local(MON, "15:10")), elmurat)).toHaveLength(0);
     expect(await runs(r.id)).toHaveLength(1);
@@ -188,12 +190,15 @@ describe("runs, checklist and chasing", () => {
 
     // 17:00 reminder: only the two unticked items.
     const re = to(await tick(local(MON, "17:00")), elmurat)[0]!;
-    expect(re.message.title).toBe("Напоминание: 1C записи");
-    expect(re.message.actions!.map((a) => a.label)).toEqual(["✓ Jobutify", "✓ Alura Brand", "✓ Всё сделано"]);
+    expect(re.message.title).toBe("⏰ Напоминание: 1C записи");
+    expect(re.message.actions!.map((a) => a.label)).toEqual(["✓ Jobutify", "✓ Alura Brand", "✅ Всё готово", ...EXTRA]);
     // /routines shows the same.
     const cmd = await handleTelegramUpdate(t.handle.db, msgUpdate(ELMURAT_CHAT, "/routines"), local(MON, "17:05"));
-    expect(textOf(cmd)).toContain("Alura Brand");
-    expect(textOf(cmd)).not.toContain("Kiwi Go");
+    // The whole checklist with its state; buttons only for what is open.
+    expect(textOf(cmd)).toContain("⬜ Alura Brand");
+    expect(textOf(cmd)).toContain("✅ Kiwi Go");
+    expect(textOf(cmd)).toContain("Прогресс: 1/3");
+    expect(JSON.stringify(cmd)).not.toContain("✓ Kiwi Go");
     await handleTelegramUpdate(t.handle.db, press(ELMURAT_CHAT, cbFor(re, "✓ Jobutify")), local(MON, "17:10"));
     const last = await handleTelegramUpdate(t.handle.db, press(ELMURAT_CHAT, cbFor(re, "✓ Alura Brand")), local(MON, "17:11"));
     expect(last[0]!.params.text).toBe("Рутина выполнена ✓ Спасибо!");
@@ -255,7 +260,7 @@ describe("runs, checklist and chasing", () => {
     expect(to(await tick(local(TUE, "15:00")), elmurat)).toHaveLength(0);
     expect(await runs(r.id)).toHaveLength(0);
     const ask = to(await tick(local(MON, "15:00")), elmurat);
-    expect(ask[0]!.message.actions!.map((a) => a.label)).toEqual(["Готово"]);
+    expect(ask[0]!.message.actions!.map((a) => a.label)).toEqual(["✅ Готово", ...EXTRA]);
     // 16:00 reminder falls in quiet hours: held until 16:30.
     expect(to(await tick(local(MON, "16:00")), elmurat)).toHaveLength(0);
     expect(to(await tick(local(MON, "16:30")), elmurat)).toHaveLength(1);
@@ -266,7 +271,7 @@ describe("runs, checklist and chasing", () => {
     expect(at1710.sent.some((s) => s.message.title === "Routine not done")).toBe(true);
     // Готово still closes it (late).
     const tok = to(at17, elmurat)[0]!;
-    await handleTelegramUpdate(t.handle.db, press(ELMURAT_CHAT, cbFor(tok, "Готово")), local(MON, "17:20"));
+    await handleTelegramUpdate(t.handle.db, press(ELMURAT_CHAT, cbFor(tok, "✅ Готово")), local(MON, "17:20"));
     const hist = await listRoutineRuns(t.ctx("nuraaly", local(MON, "18:00")), r.id);
     expect(hist[0]!.outcome).toBe("late");
   });
@@ -296,10 +301,10 @@ describe("runs, checklist and chasing", () => {
     await runRoutineNow(t.ctx("nuraaly", local(MON, "16:00")), r.id);
     const reg = recorder();
     await dispatch(t.handle.db, local(MON, "16:00"), { registry: reg.registry, timeZone: TZ });
-    expect(to(reg, elmurat).map((s) => s.message.title)).toEqual(["Рутина: 1C записи"]);
+    expect(to(reg, elmurat).map((s) => s.message.title)).toEqual(["📋 Рутина: 1C записи"]);
     // The planner's 15:00 slot for this run is the same slot: not asked twice.
     expect(to(await tick(local(MON, "16:05")), elmurat)).toHaveLength(0);
-    expect(to(await tick(local(MON, "17:00")), elmurat).map((s) => s.message.title)).toEqual(["Напоминание: 1C записи"]);
+    expect(to(await tick(local(MON, "17:00")), elmurat).map((s) => s.message.title)).toEqual(["⏰ Напоминание: 1C записи"]);
   });
 });
 
