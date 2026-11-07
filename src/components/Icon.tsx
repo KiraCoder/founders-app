@@ -18,6 +18,19 @@ const PATHS = {
   bell: "M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0",
   folder: "M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5v9A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5v-11Z",
   copy: "M8 4v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7.242a2 2 0 0 0-.602-1.43L16.08 2.57A2 2 0 0 0 14.65 2H10a2 2 0 0 0-2 2Zm-4 4h2v12h10v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8Z",
+  play: "M7 4.5v15l12-7.5-12-7.5Z",
+  pause: "M8 5v14M16 5v14",
+  rerun: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
+  edit: "M4 20h4L19 9l-4-4L4 16v4ZM13.5 6.5l4 4",
+  archive: "M3.5 4.5h17v4h-17zM5 8.5V19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8.5M10 12.5h4",
+  restore: "M3 12a9 9 0 1 0 3-6.7M3 4v5h5",
+  comment: "M4 5h16v11H9l-5 4V5Z",
+  external: "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
+  arrowLeft: "M19 12H5M11 6l-6 6 6 6",
+  chevronUp: "M6 15l6-6 6 6",
+  chevronDown: "M6 9l6 6 6-6",
+  trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",
+  grip: "M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01",
 } as const;
 
 export type IconName = keyof typeof PATHS;

@@ -4,6 +4,7 @@ import { BottomTabs } from "@/components/shell/BottomTabs";
 import { MobileCompanyBar } from "@/components/shell/MobileCompanyBar";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
+import { Toaster } from "@/components/ui/Toast";
 import { COMPANY_COOKIE, type NavCompany } from "@/components/shell/company-nav";
 import { getPageContext } from "@/server/context";
 import { devToolsEnabled } from "@/server/notifications/config";
@@ -31,6 +32,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         <main className="mx-auto w-full max-w-[1120px] flex-1 px-4 pb-24 pt-5 md:px-8 md:pb-10 md:pt-7">{children}</main>
       </div>
       <BottomTabs />
+      <Toaster />
     </div>
   );
 }
