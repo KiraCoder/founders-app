@@ -24,6 +24,8 @@ import {
   type PeriodValue,
 } from "@/lib/metrics";
 import { defaultRegistry, type ConnectorRegistry } from "@/server/connectors/registry";
+import { cache } from "react";
+import { CACHE_TAGS, invalidate, sharedCache } from "@/server/cache";
 import type { Db } from "@/server/db/connect";
 import {
   companies,
@@ -159,9 +161,25 @@ async function loadDefinitions(ctx: ServiceContext, extra?: ReturnType<typeof eq
   }));
 }
 
+/**
+ * Every visible metric definition. Definitions change only through the seed (and company
+ * archive / rename), so they are read per request and, for founders (identical for both),
+ * through the shared cache (tags `metrics`, `companies`).
+ */
+const allDefinitions = cache(async (ctx: ServiceContext): Promise<MetricView[]> => {
+  if (ctx.user.role !== "founder") return loadDefinitions(ctx);
+  return sharedCache(["metrics:definitions"], [CACHE_TAGS.metrics, CACHE_TAGS.companies], () => loadDefinitions(ctx));
+});
+
+/** A write to metric definitions (none in the services today; the seed runs outside requests). */
+export function metricDefinitionsChanged(): void {
+  invalidate(CACHE_TAGS.metrics);
+}
+
 export async function listMetricDefinitions(ctx: ServiceContext, companyId?: string): Promise<MetricView[]> {
   if (companyId) await assertCompanyAccess(ctx, companyId);
-  return loadDefinitions(ctx, companyId ? eq(metricDefinitions.companyId, companyId) : undefined);
+  const all = await allDefinitions(ctx);
+  return companyId ? all.filter((d) => d.companyId === companyId) : all;
 }
 
 export async function getMetric(ctx: ServiceContext, metricId: string): Promise<MetricView> {
@@ -650,7 +668,7 @@ export interface CompanyFreshness {
 }
 
 async function freshnessOfAll(ctx: ServiceContext): Promise<{ def: MetricView; freshness: Freshness; hasData: boolean }[]> {
-  const defs = await loadDefinitions(ctx);
+  const defs = await allDefinitions(ctx);
   const t = today(ctx);
   const inputs = await freshnessInputs(ctx.db, defs.map((d) => d.id), t);
   return defs.map((def) => ({ def, freshness: freshnessOf(def, inputs.get(def.id), t), hasData: inputs.has(def.id) }));

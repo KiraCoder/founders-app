@@ -1,13 +1,33 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { hireAction, runNowAction, tuneAction, type AiActionState } from "@/app/(app)/ai-roles/actions";
 import { CompanyDot } from "@/components/ui";
 import type { RoleEngine } from "@/lib/ai-role-config";
-import { HireWizard, type WizardCompany, type WizardSettings, type WizardTarget } from "./HireWizard";
-import { RoleEditor, type CopySource, type EditorMetric, type EditorTarget } from "./RoleEditor";
+import type { WizardCompany, WizardSettings, WizardTarget } from "./HireWizard";
+import type { CopySource, EditorMetric, EditorTarget } from "./RoleEditor";
+
+// The role editor and the hire wizard are big dialogs opened on a click: their own chunks,
+// fetched when the founder points at (or focuses) the board, so they open without a wait.
+const loadRoleEditor = () => import("./RoleEditor").then((m) => m.RoleEditor);
+const loadHireWizard = () => import("./HireWizard").then((m) => m.HireWizard);
+const dialogLoading = () => (
+  <div className="fixed inset-0 z-50 grid place-items-center bg-black/20" aria-busy="true">
+    <div className="card px-4 py-3 text-[13px] text-muted">Opening…</div>
+  </div>
+);
+const RoleEditor = dynamic(loadRoleEditor, { ssr: false, loading: dialogLoading });
+const HireWizard = dynamic(loadHireWizard, { ssr: false, loading: dialogLoading });
+let prefetched = false;
+function prefetchDialogs() {
+  if (prefetched) return;
+  prefetched = true;
+  void loadRoleEditor();
+  void loadHireWizard();
+}
 
 export interface BoardTemplate {
   key: string;
@@ -230,7 +250,7 @@ export function AiRolesBoard({
   const builtIn = templates.filter((t) => !t.custom);
   const custom = templates.filter((t) => t.custom);
   return (
-    <>
+    <div onPointerOver={prefetchDialogs} onFocusCapture={prefetchDialogs}>
       <section className="mb-6">
         <div className="mb-2 flex items-center gap-2">
           <h2 className="eyebrow">Hired</h2>
@@ -334,6 +354,6 @@ export function AiRolesBoard({
       {target && (
         <HireWizard key={`${target.templateKey}:${target.hireId ?? target.companyId ?? ""}`} target={target} companies={companies[target.templateKey] ?? []} founders={founders} onClose={() => setTarget(null)} />
       )}
-    </>
+    </div>
   );
 }

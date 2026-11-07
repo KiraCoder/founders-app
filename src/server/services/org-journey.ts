@@ -58,9 +58,9 @@ export interface OrgJourneyView {
   template: { key: JourneyTemplateKey; label: string; steps: readonly string[] } | null;
 }
 
-export async function getOrgJourney(ctx: ServiceContext, companyId: string): Promise<OrgJourneyView> {
+export async function getOrgJourney(ctx: ServiceContext, companyId: string, known: { slug?: string } = {}): Promise<OrgJourneyView> {
   await assertOrgRead(ctx, companyId);
-  const [company] = await ctx.db.select({ slug: companies.slug }).from(companies).where(eq(companies.id, companyId));
+  const [company] = known.slug ? [{ slug: known.slug }] : await ctx.db.select({ slug: companies.slug }).from(companies).where(eq(companies.id, companyId));
   if (!company) throw new ServiceError("not_found", "Company not found");
   const ids = await liveJourneyIds(ctx.db, companyId);
   const rows = ids.length ? await ctx.db.select().from(orgJourneySteps).where(and(eq(orgJourneySteps.companyId, companyId), isNull(orgJourneySteps.archivedAt))) : [];

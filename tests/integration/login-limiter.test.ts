@@ -72,5 +72,9 @@ describe("login rate limit", () => {
     expect(clientIpFromHeaders(new Headers({ "x-forwarded-for": "203.0.113.5, 10.0.0.1" }))).toBe("203.0.113.5");
     expect(clientIpFromHeaders(new Headers({ "x-real-ip": "198.51.100.7" }))).toBe("198.51.100.7");
     expect(clientIpFromHeaders(new Headers())).toBeNull();
+    // Vercel's own headers win over a (spoofable) x-forwarded-for.
+    expect(clientIpFromHeaders(new Headers({ "x-forwarded-for": "6.6.6.6", "x-real-ip": "198.51.100.7" }))).toBe("198.51.100.7");
+    expect(clientIpFromHeaders(new Headers({ "x-forwarded-for": "6.6.6.6", "x-vercel-forwarded-for": "203.0.113.9, 10.0.0.1" }))).toBe("203.0.113.9");
+    expect(clientIpFromHeaders(new Headers({ "x-real-ip": " ", "x-forwarded-for": "203.0.113.5" }))).toBe("203.0.113.5");
   });
 });

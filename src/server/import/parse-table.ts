@@ -6,8 +6,10 @@
  * No "server-only" so tests can import it directly; it has no secrets or DB access.
  */
 import { createHash } from "node:crypto";
-import ExcelJS from "exceljs";
-import JSZip from "jszip";
+// exceljs and jszip are loaded on first use (only an .xlsx upload needs them): together they
+// cost ~200 ms of module loading on every cold start of a page that imports this file.
+import type ExcelJS from "exceljs";
+import type JSZip from "jszip";
 import Papa from "papaparse";
 
 export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
@@ -156,9 +158,10 @@ const tooLarge = () =>
  * unpacked is kept; the spreadsheet parser runs only after this passes.
  */
 export async function assertSafeXlsx(bytes: Uint8Array): Promise<void> {
+  const { default: JSZipLib } = await import("jszip");
   let zip: JSZip;
   try {
-    zip = await JSZip.loadAsync(bytes);
+    zip = await JSZipLib.loadAsync(bytes);
   } catch {
     throw new ImportFileError("This .xlsx file could not be read. Save it again from Excel and retry.");
   }
@@ -246,7 +249,8 @@ export async function parseTableFile(bytes: Uint8Array, filename: string): Promi
     // xlsx files are zip archives: check the signature before handing them to the parser.
     if (!(bytes[0] === 0x50 && bytes[1] === 0x4b)) throw new ImportFileError("This is not a valid .xlsx file.");
     await assertSafeXlsx(bytes);
-    const wb = new ExcelJS.Workbook();
+    const { default: ExcelJSLib } = await import("exceljs");
+    const wb = new ExcelJSLib.Workbook();
     try {
       await wb.xlsx.load(Buffer.from(bytes) as unknown as ArrayBuffer);
     } catch {

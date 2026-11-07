@@ -9,16 +9,15 @@
 import bcrypt from "bcryptjs";
 import { and, eq, isNull, like } from "drizzle-orm";
 import { addDays, todayInTimeZone } from "@/lib/dates";
-import { ROLE_TEMPLATES } from "@/lib/ai-roles";
 import { metricSeedFor, seedAggregation } from "@/lib/kpis";
 import { ORG_SEED } from "@/lib/org";
 import { isPayLikeMetric } from "@/server/ai/narrative";
 import { defaultAskPersonId } from "./ask-person";
 import { createChartFromTemplate } from "./org-charts";
+import { syncAiTemplates } from "./ai-templates";
 import { ensureExampleRoutine } from "./example-routines";
 import type { Db } from "./connect";
 import {
-  aiRoleTemplates,
   companies,
   companyUnits,
   intercompanyFlows,
@@ -33,6 +32,9 @@ import {
   tasks,
   users,
 } from "./schema";
+
+/** Kept here for existing callers; lives in ./ai-templates (no seed dependencies). */
+export { syncAiTemplates };
 
 export const FOUNDERS = [
   {
@@ -498,30 +500,6 @@ async function seedSamples(db: Db, ids: SeedResult, options: SeedOptions) {
       dueDate: addDays(today, 3),
     },
   ]);
-}
-
-/**
- * Copies the AI role catalogue (src/lib/ai-roles.ts) into `ai_role_templates`: new roles
- * are added and existing ones updated to match the code. Idempotent; also called by the
- * hire service so a hire never fails on a database that was not re-seeded.
- */
-export async function syncAiTemplates(db: Db): Promise<void> {
-  for (const t of ROLE_TEMPLATES) {
-    const values = {
-      key: t.key,
-      name: t.name,
-      description: t.description,
-      status: t.status,
-      responsibilities: t.responsibilities,
-      requiredData: { byCompanyType: t.requiredData as Record<string, string[]>, optionalUploads: t.optionalUploads },
-      defaultSchedule: t.defaultSchedule,
-      reportSections: t.reportSections,
-      sort: t.sort,
-    };
-    const { key: _key, ...rest } = values;
-    void _key;
-    await db.insert(aiRoleTemplates).values(values).onConflictDoUpdate({ target: aiRoleTemplates.key, set: { ...rest, updatedAt: new Date() } });
-  }
 }
 
 /**

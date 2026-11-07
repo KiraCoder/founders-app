@@ -89,9 +89,11 @@ export function postgresClientOptions(_databaseUrl: string): {
     // Two founders do not need parallel connections; postgres-js queues the rest.
     max: 1,
     connect_timeout: 15,
-    // Close idle sockets quickly: a serverless instance that was frozen between requests can
-    // otherwise wake up holding a dead connection and hang the next query.
-    idle_timeout: 20,
+    // Close a socket after 3 idle minutes. Long enough that the next click of a founder who is
+    // reading a page reuses the warm connection (a new TLS + pooler handshake to Supabase costs
+    // ~100-300 ms from fra1), short enough that a serverless instance frozen between requests
+    // rarely wakes up holding a dead one; max_lifetime still recycles every socket after 10 min.
+    idle_timeout: 180,
     max_lifetime: 60 * 10,
     // "relation already exists, skipping" and similar notices are noise in build logs.
     onnotice: () => {},

@@ -3,7 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { composeRequests, orchestrateTick } from "@/server/ai/orchestrator";
 import type { LlmGenerateInput, LlmProvider } from "@/server/ai/provider";
 import { aiRoleConfigs, aiRoleHires, aiRoleSettingsLog, metricDefinitions } from "@/server/db/schema";
-import { createCustomRole, listHireVersions, listRoleVersions, revertHire, revertRole, updateRoleConfig } from "@/server/services/ai-role-editor";
+import { createCustomRole, listHireVersions, listRoleVersions, revertHire, revertRole, settingsVersionsFor, updateRoleConfig } from "@/server/services/ai-role-editor";
 import { collectAiRequests, getHire, getRun, hireRole, listRoles, rerunReport, runHireNow, updateHire } from "@/server/services/ai-roles";
 import type { ServiceContext } from "@/server/services/context";
 import { saveMetricGrid } from "@/server/services/metrics";
@@ -117,6 +117,15 @@ describe("custom role: create → hire → run → report (same pipeline)", () =
     expect(back.checks.change_prev!.enabled).toBe(true);
     expect(back.settings.checks).toBeUndefined();
     expect((await listHireVersions(t.ctx("talant"), hireId)).map((x) => [x.action, x.revertedTo])).toEqual([["revert", 1], ["edit", null], ["create", null]]);
+  });
+
+  it("settingsVersionsFor: one read gives the same histories as the per-role / per-hire lists", async () => {
+    const roles = await listRoles(t.ctx("nuraaly"));
+    const batch = await settingsVersionsFor(t.ctx("nuraaly"), { roles, hireIds: [hireId] });
+    for (const r of roles) expect(batch.roles.get(r.key)).toEqual(await listRoleVersions(t.ctx("nuraaly"), r.key));
+    expect(batch.hires.get(hireId)).toEqual(await listHireVersions(t.ctx("nuraaly"), hireId));
+    expect(batch.hires.get(hireId)!.length).toBe(3);
+    expect(await settingsVersionsFor(t.ctx("nuraaly"), { roles: [], hireIds: [] })).toEqual({ roles: new Map(), hires: new Map() });
   });
 
   it("data requests: one grouped line per role and founder (same anti-spam pipeline)", async () => {

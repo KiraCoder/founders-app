@@ -1,8 +1,9 @@
 import Link from "next/link";
+import { Suspense } from "react";
 import { OrgWorkspace } from "@/components/org/OrgWorkspace";
 import { CompanyDot, PageHeader } from "@/components/ui";
 import { getPageContext } from "@/server/context";
-import { getCompanyBySlug, listCompanies } from "@/server/services/companies";
+import { getCompanyWithUnits, listCompanies } from "@/server/services/companies";
 
 export const metadata = { title: "Org structure" };
 
@@ -24,7 +25,7 @@ export default async function OrgStructurePage({ searchParams }: Props) {
     );
   }
   const slug = companies.some((c) => c.slug === q.company) ? q.company! : companies.some((c) => c.slug === DEFAULT_COMPANY) ? DEFAULT_COMPANY : companies[0]!.slug;
-  const company = await getCompanyBySlug(ctx, slug);
+  const company = await getCompanyWithUnits(ctx, slug);
   const unit = company.units.find((u) => u.slug === q.unit) ?? null;
   const showArchived = q.archived === "1";
   const hrefFor = ({ unit: u, archived }: { unit?: string | null; archived?: boolean }) => {
@@ -54,7 +55,10 @@ export default async function OrgStructurePage({ searchParams }: Props) {
           </Link>
         ))}
       </nav>
-      <OrgWorkspace ctx={ctx} company={company} unit={unit} showArchived={showArchived} hrefFor={hrefFor} />
+      {/* Header and company switcher first; the board (chart, people, numbers, expert findings) streams in. */}
+      <Suspense key={`${slug}:${unit?.id ?? ""}:${showArchived ? 1 : 0}`} fallback={<div className="card h-64 bg-sunk" aria-busy="true" data-testid="org-loading" />}>
+        <OrgWorkspace ctx={ctx} company={company} unit={unit} showArchived={showArchived} hrefFor={hrefFor} />
+      </Suspense>
     </>
   );
 }

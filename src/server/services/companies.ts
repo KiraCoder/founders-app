@@ -1,7 +1,9 @@
 import "server-only";
 import { and, asc, count, eq, inArray, isNull, max, ne, sql, type SQL } from "drizzle-orm";
 import type { AnyPgColumn, PgTable } from "drizzle-orm/pg-core";
+import { cache } from "react";
 import { z } from "zod";
+import { CACHE_TAGS, invalidate, sharedCache } from "@/server/cache";
 import type { Db } from "@/server/db/connect";
 import {
   clientProjects,
@@ -69,13 +71,29 @@ export function inActiveCompany(ctx: ServiceContext, companyIdColumn: AnyPgColum
 // Reads
 // ---------------------------------------------------------------------------
 
-/** Active (non-archived) companies the user can access, in sidebar order. */
-export async function listCompanies(ctx: ServiceContext): Promise<Company[]> {
+/** Straight from the database (write paths: never a cached copy). */
+async function queryCompanies(ctx: ServiceContext): Promise<Company[]> {
   return ctx.db
     .select()
     .from(companies)
     .where(and(activeCompaniesWhere(), accessibleCompaniesWhere(ctx)))
     .orderBy(asc(companies.sort), asc(companies.name));
+}
+
+/**
+ * Active (non-archived) companies the user can access, in sidebar order. Read by the layout and
+ * most pages, so it is cached twice: per request (same `ctx` → one read for layout + page) and,
+ * for founders (who all see every company), across requests under the `companies` tag (dropped
+ * by every write below).
+ */
+export const listCompanies = cache(async (ctx: ServiceContext): Promise<Company[]> => {
+  if (ctx.user.role !== "founder") return queryCompanies(ctx);
+  return sharedCache(["companies:active"], [CACHE_TAGS.companies], () => queryCompanies(ctx));
+});
+
+/** Every write to `companies` (and company units) calls this. */
+export function companiesChanged(): void {
+  invalidate(CACHE_TAGS.companies);
 }
 
 export async function listCompanyCards(ctx: ServiceContext): Promise<CompanyCard[]> {
@@ -101,20 +119,31 @@ export async function listCompanyCards(ctx: ServiceContext): Promise<CompanyCard
   }));
 }
 
-export async function getCompanyBySlug(
-  ctx: ServiceContext,
-  slug: string,
-): Promise<CompanyCard & { units: CompanyUnit[] }> {
+/** Live units of a company (shared between founders: cached under `companies`). */
+async function unitsOf(ctx: ServiceContext, companyId: string): Promise<CompanyUnit[]> {
+  const load = () =>
+    ctx.db
+      .select()
+      .from(companyUnits)
+      .where(and(eq(companyUnits.companyId, companyId), isNull(companyUnits.archivedAt)))
+      .orderBy(asc(companyUnits.sort));
+  return ctx.user.role === "founder" ? sharedCache(["companies:units", companyId], [CACHE_TAGS.companies], load) : load();
+}
+
+/** A company page's company with its counts and units. Once per request (page + generateMetadata). */
+export const getCompanyBySlug = cache(async (ctx: ServiceContext, slug: string): Promise<CompanyCard & { units: CompanyUnit[] }> => {
   const cards = await listCompanyCards(ctx);
   const company = cards.find((c) => c.slug === slug);
   if (!company) throw new ServiceError("not_found", "Company not found");
-  const units = await ctx.db
-    .select()
-    .from(companyUnits)
-    .where(and(eq(companyUnits.companyId, company.id), isNull(companyUnits.archivedAt)))
-    .orderBy(asc(companyUnits.sort));
-  return { ...company, units };
-}
+  return { ...company, units: await unitsOf(ctx, company.id) };
+});
+
+/** A company with its units, without the task / project counts (the org page). */
+export const getCompanyWithUnits = cache(async (ctx: ServiceContext, slug: string): Promise<Company & { units: CompanyUnit[] }> => {
+  const company = (await listCompanies(ctx)).find((c) => c.slug === slug);
+  if (!company) throw new ServiceError("not_found", "Company not found");
+  return { ...company, units: await unitsOf(ctx, company.id) };
+});
 
 // ---------------------------------------------------------------------------
 // Management (Settings → Companies; founders only)
@@ -370,6 +399,7 @@ export async function createCompany(ctx: ServiceContext, input: CompanyCreateInp
         updatedAt: ctx.now,
       })
       .returning();
+    companiesChanged();
     return row!;
   } catch (err) {
     if (isUniqueViolation(err)) slugTaken();
@@ -392,6 +422,7 @@ export async function updateCompany(ctx: ServiceContext, id: string, input: Comp
   if (data.description !== undefined) patch.description = data.description;
   try {
     const [row] = await ctx.db.update(companies).set(patch).where(eq(companies.id, current.id)).returning();
+    companiesChanged();
     return row!;
   } catch (err) {
     if (isUniqueViolation(err)) slugTaken();
@@ -409,6 +440,7 @@ export async function archiveCompany(ctx: ServiceContext, id: string): Promise<C
     .set({ archivedAt: ctx.now, updatedAt: ctx.now })
     .where(eq(companies.id, current.id))
     .returning();
+  companiesChanged();
   return row!;
 }
 
@@ -423,6 +455,7 @@ export async function restoreCompany(ctx: ServiceContext, id: string): Promise<C
     .set({ archivedAt: null, sort: (agg?.top ?? 0) + 10, updatedAt: ctx.now })
     .where(eq(companies.id, current.id))
     .returning();
+  companiesChanged();
   return row!;
 }
 
@@ -441,6 +474,7 @@ export async function deleteCompany(ctx: ServiceContext, id: string): Promise<vo
     await ctx.db.transaction(async (tx) => {
       await tx.delete(companies).where(eq(companies.id, current.id));
     });
+    companiesChanged();
   } catch (err) {
     // Something else (AI roles, ...) still points at it: the database refuses.
     if (isFkViolation(err)) {
@@ -457,6 +491,7 @@ async function writeOrder(db: Db, ids: string[], now: Date): Promise<void> {
       await tx.update(companies).set({ sort: (i + 1) * 10, updatedAt: now }).where(eq(companies.id, id));
     }
   });
+  companiesChanged();
 }
 
 /**
@@ -467,14 +502,14 @@ export async function reorderCompanies(ctx: ServiceContext, ids: string[]): Prom
   assertFounder(ctx);
   const parsed = z.array(z.uuid()).max(500).safeParse(ids);
   if (!parsed.success) throw new ServiceError("validation", "Invalid order");
-  const active = await listCompanies(ctx);
+  const active = await queryCompanies(ctx);
   const activeIds = new Set(active.map((c) => c.id));
   const given = new Set(parsed.data);
   if (given.size !== parsed.data.length || given.size !== activeIds.size || ![...given].every((id) => activeIds.has(id))) {
     throw new ServiceError("conflict", "The company list changed meanwhile. Reload the page and try again.");
   }
   await writeOrder(ctx.db, parsed.data, ctx.now);
-  return listCompanies(ctx);
+  return queryCompanies(ctx);
 }
 
 /** One step up or down in the sidebar order (active companies only). */
@@ -483,10 +518,10 @@ export async function moveCompany(ctx: ServiceContext, id: string, direction: "u
   if (direction !== "up" && direction !== "down") throw new ServiceError("validation", "Invalid direction");
   const current = await getCompanyRow(ctx.db, id);
   if (current.archivedAt) throw new ServiceError("validation", "Restore the company before moving it");
-  const order = (await listCompanies(ctx)).map((c) => c.id);
+  const order = (await queryCompanies(ctx)).map((c) => c.id);
   const i = order.indexOf(current.id);
   const j = direction === "up" ? i - 1 : i + 1;
   if (i >= 0 && j >= 0 && j < order.length) [order[i], order[j]] = [order[j]!, order[i]!];
   await writeOrder(ctx.db, order, ctx.now);
-  return listCompanies(ctx);
+  return queryCompanies(ctx);
 }

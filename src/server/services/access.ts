@@ -1,6 +1,7 @@
 import "server-only";
 import { and, eq, inArray, isNull, or, type SQL } from "drizzle-orm";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import { cache } from "react";
 import { z } from "zod";
 import { companies, metricDefinitions, people, personCompanies, salaryViewers, taskEvents, tasks, users } from "@/server/db/schema";
 import type { ServiceContext } from "./context";
@@ -61,6 +62,13 @@ export function visiblePeopleWhere(ctx: ServiceContext): SQL | undefined {
 }
 
 export async function assertCompanyAccess(ctx: ServiceContext, companyId: string): Promise<void> {
+  if (ctx.user.role === "founder") {
+    // Founders may access every live company: the (per-request + shared cached) company list
+    // answers it without a query per check (the AI roles page ran 16 of these).
+    const { listCompanies } = await import("./companies");
+    if (!(await listCompanies(ctx)).some((c) => c.id === companyId)) throw new ServiceError("not_found", "Company not found");
+    return;
+  }
   const [row] = await ctx.db
     .select({ id: companies.id })
     .from(companies)
@@ -89,9 +97,11 @@ export function assertValidId(id: unknown, what: string): asserts id is string {
  * Salary rows are additionally limited to companies the user can access
  * (`visibleLinksWhere`).
  */
-export async function isSalaryViewer(ctx: ServiceContext): Promise<boolean> {
+export const isSalaryViewer = cache(async (ctx: ServiceContext): Promise<boolean> => {
   // Re-checked in the database on every call: the user must still be a founder (a staff
-  // account left in salary_viewers, or a stale session role, gets nothing).
+  // account left in salary_viewers, or a stale session role, gets nothing). Within ONE page
+  // render the answer is memoized (React `cache`, same ctx; a person page asked four times);
+  // server actions and API routes always check again. Never shared across requests.
   if (ctx.user.role !== "founder") return false;
   const [row] = await ctx.db
     .select({ userId: salaryViewers.userId })
@@ -100,7 +110,7 @@ export async function isSalaryViewer(ctx: ServiceContext): Promise<boolean> {
     .where(and(eq(salaryViewers.userId, ctx.user.id), eq(users.role, "founder")))
     .limit(1);
   return !!row;
-}
+});
 
 /** Throws `forbidden` unless the user is a salary viewer. Call before touching `salaries`. */
 export async function assertSalaryViewer(ctx: ServiceContext): Promise<void> {

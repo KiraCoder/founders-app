@@ -1,5 +1,6 @@
 import "server-only";
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
+import { cache } from "react";
 import { addDays, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import {
   actCountsAsInvoiced,
@@ -82,13 +83,22 @@ export interface CompanyRef {
   color: string;
 }
 
-async function companyMap(db: Db): Promise<Map<string, CompanyRef>> {
+/**
+ * Labels for every company (archived ones too). Once per request (React `cache`, same db handle):
+ * the holding page asked five times. Outside a render (actions, API, planner) every call reads.
+ */
+const companyMap = cache(async (db: Db): Promise<Map<string, CompanyRef>> => {
   const rows = await db
     .select({ id: companies.id, slug: companies.slug, name: companies.name, color: companies.color })
     .from(companies)
     .orderBy(asc(companies.sort));
   return new Map(rows.map((r) => [r.id, r]));
-}
+});
+
+/** Every flow row (archived too), once per request — callers filter (never mutate the list). */
+const allFlowRows = cache(async (db: Db): Promise<IntercompanyFlow[]> =>
+  db.select().from(intercompanyFlows).orderBy(asc(intercompanyFlows.createdAt), asc(intercompanyFlows.id)),
+);
 
 async function assertLiveCompany(db: Db, id: string, field: string): Promise<void> {
   const [row] = await db.select({ id: companies.id }).from(companies).where(and(eq(companies.id, id), isNull(companies.archivedAt)));
@@ -145,15 +155,12 @@ function flowView(f: IntercompanyFlow, cmap: Map<string, CompanyRef>, ask: AskPe
 }
 
 async function loadFlows(db: Db, opts: { includeArchived?: boolean; ask?: AskPeopleIndex } = {}): Promise<FlowView[]> {
-  const [rows, cmap, ask] = await Promise.all([
-    db
-      .select()
-      .from(intercompanyFlows)
-      .where(opts.includeArchived ? undefined : isNull(intercompanyFlows.archivedAt))
-      .orderBy(asc(intercompanyFlows.createdAt), asc(intercompanyFlows.id)),
+  const [all, cmap, ask] = await Promise.all([
+    allFlowRows(db),
     companyMap(db),
     opts.ask ?? loadAskPeople(db, null),
   ]);
+  const rows = opts.includeArchived ? all : all.filter((f) => !f.archivedAt);
   return rows
     .map((f) => flowView(f, cmap, ask))
     .sort((a, b) => Number(a.archived) - Number(b.archived) || (a.status === b.status ? 0 : a.status === "active" ? -1 : 1));
@@ -543,7 +550,7 @@ export async function loadActsGrid(db: Db, todayIso: IsoDate, opts: GridOpts = {
   const grace = opts.grace ?? graceDays();
   const months = opts.months ?? gridMonths(todayIso);
   const askIndex = await loadAskPeople(db, todayIso.slice(0, 7));
-  const flowRows = new Map((await db.select().from(intercompanyFlows).where(isNull(intercompanyFlows.archivedAt))).map((f) => [f.id, f]));
+  const flowRows = new Map((await allFlowRows(db)).filter((f) => !f.archivedAt).map((f) => [f.id, f]));
   const flows = (await loadFlows(db, { ask: askIndex })).filter((f) => f.status === "active");
   // The default grid also looks at the months before it (see ActsGridRow.older); a grid
   // for given months (one cell after a change) does not.

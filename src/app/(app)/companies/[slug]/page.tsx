@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Icon } from "@/components/Icon";
@@ -26,7 +27,7 @@ import { FINANCIAL_ANALYST, ORG_STRUCTURE_EXPERT } from "@/lib/ai-roles";
 import { canManageRoutines, canUseAiRoles } from "@/server/services/access";
 import { listRoutines } from "@/server/services/routines";
 import { RoutinesList } from "@/components/routines/RoutinesList";
-import { listHireRuns, listHires } from "@/server/services/ai-roles";
+import { listHires, recentRunsOf } from "@/server/services/ai-roles";
 import { getCompanyBySlug } from "@/server/services/companies";
 import { today } from "@/server/services/context";
 import { ServiceError } from "@/server/services/errors";
@@ -96,15 +97,28 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         tabs={TABS.map((t) => ({ key: t.key, label: t.label, href: `/companies/${slug}${t.key === "overview" ? "" : `?tab=${t.key}`}` }))}
       />
 
-      {tab === "overview" && <Overview ctx={ctx} company={company} showArchived={archivedParam === "1"} />}
-      {tab === "numbers" && <NumbersTab ctx={ctx} company={company} granularity={g} />}
-      {tab === "projects" && <ProjectsTab ctx={ctx} companyId={company.id} />}
-      {tab === "tasks" && <TasksTab ctx={ctx} companyId={company.id} />}
-      {tab === "people" && <PeopleTab ctx={ctx} companyId={company.id} slug={company.slug} />}
-      {tab === "org" && <OrgTab ctx={ctx} company={company} unitSlug={unitParam} archived={archivedParam === "1"} />}
-      {tab === "documents" && <ComingSoon title="Documents">Contracts, акты and uploaded files for this company.</ComingSoon>}
-      {tab === "ai" && <AiRolesTab ctx={ctx} company={company} />}
+      {/* The header and tabs render first; the tab's panels stream in (no route-level loading.tsx). */}
+      <Suspense key={tab} fallback={<TabSkeleton />}>
+        {tab === "overview" && <Overview ctx={ctx} company={company} showArchived={archivedParam === "1"} />}
+        {tab === "numbers" && <NumbersTab ctx={ctx} company={company} granularity={g} />}
+        {tab === "projects" && <ProjectsTab ctx={ctx} companyId={company.id} />}
+        {tab === "tasks" && <TasksTab ctx={ctx} companyId={company.id} />}
+        {tab === "people" && <PeopleTab ctx={ctx} companyId={company.id} slug={company.slug} />}
+        {tab === "org" && <OrgTab ctx={ctx} company={company} unitSlug={unitParam} archived={archivedParam === "1"} />}
+        {tab === "documents" && <ComingSoon title="Documents">Contracts, акты and uploaded files for this company.</ComingSoon>}
+        {tab === "ai" && <AiRolesTab ctx={ctx} company={company} />}
+      </Suspense>
     </>
+  );
+}
+
+function TabSkeleton() {
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3" aria-busy="true" data-testid="tab-loading">
+      {Array.from({ length: 3 }, (_, i) => (
+        <div key={i} className="card h-24 bg-sunk" />
+      ))}
+    </div>
   );
 }
 
@@ -405,7 +419,7 @@ async function AiRolesTab({ ctx, company }: { ctx: Ctx; company: CompanyFull }) 
     return <div className="card px-4 py-6 text-center text-[13px] text-muted">Only the founders can see AI roles.</div>;
   }
   const hires = await listHires(ctx, { companyId: company.id });
-  const runs = new Map(await Promise.all(hires.map(async (h) => [h.id, await listHireRuns(ctx, h.id, 6)] as const)));
+  const runs = await recentRunsOf(ctx, hires, 6);
   const hiredAnalyst = hires.some((h) => h.templateKey === FINANCIAL_ANALYST);
   return (
     <Section

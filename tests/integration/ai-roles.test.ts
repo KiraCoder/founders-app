@@ -21,11 +21,15 @@ import { numbersWaitingSection } from "@/server/notifications/messages";
 import type { NeutralMessage, NotificationChannel } from "@/server/notifications/types";
 import {
   collectAiRequests,
+  companyMetricOptions,
+  companyMetricOptionsByCompany,
   createTaskFromFinding,
   getHire,
   getRun,
   hireRole,
+  listHireRuns,
   listHires,
+  recentRunsOf,
   rerunReport,
   runHireNow,
   updateHire,
@@ -598,6 +602,20 @@ describe("pay-named numbers never break a report", () => {
     } finally {
       await tp.handle.close();
     }
+  });
+});
+
+describe("batched page reads (one query instead of one per hire / company)", () => {
+  it("recentRunsOf and companyMetricOptionsByCompany equal the per-item reads", async () => {
+    const ctx = t.ctx("nuraaly");
+    const hires = await listHires(ctx);
+    expect(hires.length).toBeGreaterThan(0);
+    const batch = await recentRunsOf(ctx, hires, 2);
+    for (const h of hires) expect(batch.get(h.id)).toEqual(await listHireRuns(ctx, h.id, 2));
+    const ids = Object.values(t.companyIds);
+    const options = await companyMetricOptionsByCompany(ctx, ids);
+    for (const id of ids) expect(options.get(id)).toEqual(await companyMetricOptions(ctx, id));
+    await expect(companyMetricOptionsByCompany(t.ctx("nuraaly"), ["00000000-0000-0000-0000-000000000000"])).rejects.toMatchObject({ code: "not_found" });
   });
 });
 

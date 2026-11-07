@@ -1,5 +1,4 @@
 import "server-only";
-import bcrypt from "bcryptjs";
 import { and, eq, gt } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import type { Db } from "@/server/db/connect";
@@ -27,6 +26,9 @@ export const localAuthProvider: AuthProvider = {
       .select({ ...userColumns, passwordHash: users.passwordHash })
       .from(users)
       .where(eq(users.email, normalized));
+    // Loaded on sign-in only: every page checks the session through this module, and bcryptjs
+    // is not needed for that (keeps it out of the pages' cold start).
+    const { default: bcrypt } = await import("bcryptjs");
     const ok = await bcrypt.compare(password, row?.passwordHash ?? DUMMY_HASH);
     if (!row || !row.passwordHash || !ok) return null;
 

@@ -15,6 +15,8 @@ import {
   type PersonUpdateInput,
 } from "@/lib/people-schemas";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import { cache } from "react";
+import { CACHE_TAGS, invalidate, sharedCache } from "@/server/cache";
 import { zonedTimeToUtc } from "@/lib/dates";
 import type { Db } from "@/server/db/connect";
 import {
@@ -35,6 +37,7 @@ import {
   visibleLinksWhere,
   visiblePeopleWhere,
 } from "./access";
+import { listCompanies } from "./companies";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { addSalary, currentSalaries, logSalaryAccess, salaryHistory, type SalaryView } from "./salaries";
@@ -268,8 +271,16 @@ export async function getPerson(ctx: ServiceContext, id: string, opts: SalaryRea
 // ---------------------------------------------------------------------------
 
 type Tx = Db;
+/** Every people / link mutation runs here, so it is also where cached pickers are dropped. */
 async function inTx<T>(ctx: ServiceContext, fn: (tx: ServiceContext) => Promise<T>): Promise<T> {
-  return ctx.db.transaction(async (tx) => fn({ ...ctx, db: tx as unknown as Tx }));
+  const out = await ctx.db.transaction(async (tx) => fn({ ...ctx, db: tx as unknown as Tx }));
+  peopleChanged();
+  return out;
+}
+
+/** People or their company links changed: drops cached pickers (and org charts, which show names). */
+export function peopleChanged(): void {
+  invalidate(CACHE_TAGS.people);
 }
 
 async function assertUnitInCompany(ctx: ServiceContext, unitId: string | null | undefined, companyId: string) {
@@ -552,7 +563,21 @@ export async function companyHeadcount(ctx: ServiceContext, companyId: string): 
 }
 
 /** Companies + units for pickers (filters, link forms, importer). */
-export async function listCompanyUnitOptions(ctx: ServiceContext) {
+export const listCompanyUnitOptions = cache(async (ctx: ServiceContext) => {
+  if (ctx.user.role === "founder") {
+    // Founders: the cached company list plus every live unit (shared, tag `companies`).
+    const [list, units] = await Promise.all([
+      listCompanies(ctx),
+      sharedCache(["companies:live-units"], [CACHE_TAGS.companies], () =>
+        ctx.db
+          .select({ id: companyUnits.id, companyId: companyUnits.companyId, slug: companyUnits.slug, name: companyUnits.name })
+          .from(companyUnits)
+          .where(isNull(companyUnits.archivedAt))
+          .orderBy(asc(companyUnits.sort)),
+      ),
+    ]);
+    return list.map((c) => ({ id: c.id, slug: c.slug, name: c.name, legalName: c.legalName, units: units.filter((u) => u.companyId === c.id) }));
+  }
   const [cs, us] = await Promise.all([
     ctx.db
       .select({ id: companies.id, slug: companies.slug, name: companies.name, legalName: companies.legalName })
@@ -566,24 +591,34 @@ export async function listCompanyUnitOptions(ctx: ServiceContext) {
       .orderBy(asc(companyUnits.sort)),
   ]);
   return cs.map((c) => ({ ...c, units: us.filter((u) => u.companyId === c.id) }));
-}
+});
 export type CompanyUnitOption = Awaited<ReturnType<typeof listCompanyUnitOptions>>[number];
 
 // ---------------------------------------------------------------------------
 // Pickers used by tasks
 // ---------------------------------------------------------------------------
 
-/** Founders (app users) for assignee pickers. */
-export async function listFounders(ctx: ServiceContext) {
-  return ctx.db
-    .select({ id: users.id, name: users.name, shortName: users.shortName })
-    .from(users)
-    .where(and(eq(users.role, "founder")))
-    .orderBy(asc(users.shortName));
-}
+/** Founders (app users) for assignee pickers. Shared, cached (users change only via the seed). */
+export const listFounders = cache(async (ctx: ServiceContext) => {
+  const load = () =>
+    ctx.db
+      .select({ id: users.id, name: users.name, shortName: users.shortName })
+      .from(users)
+      .where(and(eq(users.role, "founder")))
+      .orderBy(asc(users.shortName));
+  return ctx.user.role === "founder" ? sharedCache(["people:founders"], [CACHE_TAGS.people], load) : load();
+});
 
-/** People who can be assigned tasks of a company (active, non-user people linked to it). */
-export async function assignablePeopleByCompany(ctx: ServiceContext): Promise<Record<string, { id: string; name: string }[]>> {
+/**
+ * People who can be assigned tasks of a company (active, non-user people linked to it).
+ * Per request and, for founders (identical for both), across requests (tags people, companies).
+ */
+export const assignablePeopleByCompany = cache(async (ctx: ServiceContext): Promise<Record<string, { id: string; name: string }[]>> => {
+  if (ctx.user.role !== "founder") return queryAssignablePeople(ctx);
+  return sharedCache(["people:assignable"], [CACHE_TAGS.people, CACHE_TAGS.companies], () => queryAssignablePeople(ctx));
+});
+
+async function queryAssignablePeople(ctx: ServiceContext): Promise<Record<string, { id: string; name: string }[]>> {
   const rows = await ctx.db
     .select({ companyId: personCompanies.companyId, id: people.id, name: people.fullName, userId: people.userId })
     .from(personCompanies)

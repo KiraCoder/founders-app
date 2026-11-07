@@ -1,12 +1,13 @@
 import "server-only";
 import { and, asc, eq, isNull } from "drizzle-orm";
+import { cache } from "react";
 import { companyTypeFor, ORG_STRUCTURE_EXPERT, summaryLineDueOn, type Schedule } from "@/lib/ai-roles";
 import { orgExpertSummaryLine, type OrgExpertOptions } from "@/lib/org";
 import { aiRoleHires, companies, type AiHireSettingsJson } from "@/server/db/schema";
 import { listFounders } from "@/server/notifications/founders";
 import type { MessageLine } from "@/server/notifications/types";
 import { canUseAiRoles } from "./access";
-import { disabledOrgRules, hireChecks, resolveRole, roleDefaultSettings } from "./ai-role-defs";
+import { configRowsFor, disabledOrgRules, hireChecks, resolveFrom, roleDefaultSettings, type ResolvedRole } from "./ai-role-defs";
 import { appUrl } from "./ai-roles";
 import { today, type ServiceContext } from "./context";
 import { orgExpertForCompany, type OrgExpertResult } from "./org";
@@ -20,8 +21,13 @@ export interface OrgExpertHire {
   options: OrgExpertOptions;
 }
 
-/** Active Org Structure Expert hires (company, tuned checks, schedule, recipients). */
-export async function orgExpertHires(ctx: ServiceContext): Promise<OrgExpertHire[]> {
+/** The Org Structure Expert role with its saved settings (per-request config read). */
+async function expertRole(ctx: ServiceContext): Promise<ResolvedRole | null> {
+  return resolveFrom(ORG_STRUCTURE_EXPERT, (await configRowsFor(ctx)).get(ORG_STRUCTURE_EXPERT));
+}
+
+/** Active Org Structure Expert hires (company, tuned checks, schedule, recipients). Once per request. */
+export const orgExpertHires = cache(async (ctx: ServiceContext): Promise<OrgExpertHire[]> => {
   const rows = await ctx.db
     .select({ companyId: aiRoleHires.companyId, settings: aiRoleHires.settings, slug: companies.slug })
     .from(aiRoleHires)
@@ -30,7 +36,7 @@ export async function orgExpertHires(ctx: ServiceContext): Promise<OrgExpertHire
     .orderBy(asc(companies.sort));
   if (!rows.length) return [];
   const founders = (await listFounders(ctx.db)).map((f) => f.id);
-  const role = (await resolveRole(ctx.db, ORG_STRUCTURE_EXPERT))!;
+  const role = (await expertRole(ctx))!;
   return rows.map((r) => {
     const s = (r.settings ?? {}) as Partial<AiHireSettingsJson>;
     const d = roleDefaultSettings(role, companyTypeFor(r.slug), founders);
@@ -45,7 +51,7 @@ export async function orgExpertHires(ctx: ServiceContext): Promise<OrgExpertHire
       options: optionsFrom(checks),
     };
   });
-}
+});
 
 function optionsFrom(checks: ReturnType<typeof hireChecks>): OrgExpertOptions {
   const max = checks.head_overloaded?.maxDepartments;
@@ -64,7 +70,7 @@ function optionsFrom(checks: ReturnType<typeof hireChecks>): OrgExpertOptions {
 export async function orgExpertOptionsFor(ctx: ServiceContext, companyId: string): Promise<OrgExpertOptions> {
   const hire = (await orgExpertHires(ctx)).find((h) => h.companyId === companyId);
   if (hire) return hire.options;
-  const role = await resolveRole(ctx.db, ORG_STRUCTURE_EXPERT);
+  const role = await expertRole(ctx);
   if (!role) return {};
   return optionsFrom(hireChecks(role, { thresholds: { changePct: 20, riskChangePct: 50 }, maxDepartmentsPerHead: undefined }));
 }

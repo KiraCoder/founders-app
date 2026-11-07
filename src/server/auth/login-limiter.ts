@@ -63,8 +63,16 @@ export async function clearLoginFailures(db: Db, key: LoginKey): Promise<void> {
   await db.delete(loginAttempts).where(eq(loginAttempts.emailHash, hashes(key).emailHash));
 }
 
-/** Client IP from the proxy headers (Vercel sets x-forwarded-for; the first entry is the client). */
+/**
+ * Client IP from the proxy headers, most trustworthy first:
+ * 1. `x-real-ip` — set by Vercel's edge to the address that connected to it (a client cannot
+ *    spoof it: Vercel overwrites any incoming value);
+ * 2. `x-vercel-forwarded-for` — Vercel's own forwarded-for, also written by the edge (first entry);
+ * 3. `x-forwarded-for` — first entry; spoofable when no trusted proxy rewrites it, so only a
+ *    fallback (local `next start`, other hosts).
+ * Prefixing the limiter key with a spoofed `x-forwarded-for` would let one attacker rotate "IPs".
+ */
 export function clientIpFromHeaders(headers: Pick<Headers, "get">): string | null {
-  const forwarded = headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return forwarded || headers.get("x-real-ip")?.trim() || null;
+  const first = (name: string) => headers.get(name)?.split(",")[0]?.trim() || null;
+  return first("x-real-ip") ?? first("x-vercel-forwarded-for") ?? first("x-forwarded-for");
 }

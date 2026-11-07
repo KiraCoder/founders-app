@@ -32,8 +32,9 @@ export async function GET(req: NextRequest, { params }: Params) {
     // with its exact type + nosniff, so it can never be treated as HTML, (3) only signed-in
     // founders can fetch it, and (4) PDF scripting runs inside the viewer's own sandbox,
     // not with this site's origin.
+    // (next.config.ts leaves this route's CSP to it; X-Frame-Options: DENY still applies to both.)
     if (file.contentType !== "application/pdf") {
-      headers["content-security-policy"] = "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'";
+      headers["content-security-policy"] = "sandbox; default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'";
     }
     return new Response(bytes as BodyInit, { status: 200, headers });
   });
