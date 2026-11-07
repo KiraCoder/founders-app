@@ -16,6 +16,7 @@ import { Dialog } from "@/components/ui/Dialog";
 import { IconButton } from "@/components/ui/IconButton";
 import { toast } from "@/components/ui/Toast";
 import { RoutineForm } from "./RoutineForm";
+import { useRoutineStatus } from "./RoutineStatus";
 import { EMPTY_ROUTINE, type RoutineFormOptions, type RoutineFormValues, type RoutineTodayRun } from "./form-values";
 
 /** What the action buttons need to know about a routine (serialisable, from a server page). */
@@ -33,11 +34,18 @@ type Action = (prev: RoutineFormState, fd: FormData) => Promise<RoutineFormState
 
 function useServerAction() {
   const [pending, start] = useTransition();
-  const call = (action: Action, fields: Record<string, string>, after?: (s: RoutineFormState) => void) =>
+  /** `optimistic` runs inside the transition first (e.g. the new status shows at once). */
+  const call = (action: Action, fields: Record<string, string>, after?: (s: RoutineFormState) => void, optimistic?: () => void) =>
     start(async () => {
+      optimistic?.();
       const fd = new FormData();
       for (const [k, v] of Object.entries(fields)) fd.set(k, v);
-      const res = await action({}, fd);
+      let res: RoutineFormState;
+      try {
+        res = await action({}, fd);
+      } catch {
+        res = { ok: false, error: "Could not reach the server. Nothing was changed." };
+      }
       if (res.ok) toast(res.message ?? "Done");
       else if (res.error) toast(res.error, { tone: "risk" });
       after?.(res);
@@ -65,8 +73,11 @@ export function RoutineActions({
   const { pending, call } = useServerAction();
   const [editing, setEditing] = useState(!!edit?.openInitially);
   const [ask, setAsk] = useState<null | "archive" | "delete">(null);
+  // Pause / Resume / Archive / Restore switch the buttons (and the scope's status tag) at once.
+  const { status, setStatus } = useRoutineStatus(data.status);
   const id = { id: data.id };
-  const active = data.status === "active";
+  const setTo = (next: string) => call(setRoutineStatusAction, { ...id, status: next }, undefined, () => setStatus(next));
+  const active = status === "active";
   const closedUnfinished = data.todayStatus === "partly" || data.todayStatus === "missed";
   return (
     <div className={`flex flex-wrap items-center gap-0.5 ${pending ? "opacity-60" : ""}`} aria-label={`Actions for ${data.title}`} role="group">
@@ -74,22 +85,17 @@ export function RoutineActions({
       {active && closedUnfinished && (
         <IconButton icon="rerun" label="Re-run missing items" disabled={pending} onClick={() => call(rerunRoutineAction, id)} />
       )}
-      {data.status !== "archived" &&
+      {status !== "archived" &&
         (edit ? (
           <IconButton icon="edit" label="Edit" onClick={() => setEditing(true)} />
         ) : (
           <IconButton icon="edit" label="Edit" href={`/routines/${data.id}?edit=1`} />
         ))}
-      {(data.status === "active" || data.status === "paused") && (
-        <IconButton
-          icon={active ? "pause" : "play"}
-          label={active ? "Pause" : "Resume"}
-          disabled={pending}
-          onClick={() => call(setRoutineStatusAction, { ...id, status: active ? "paused" : "active" })}
-        />
+      {(status === "active" || status === "paused") && (
+        <IconButton icon={active ? "pause" : "play"} label={active ? "Pause" : "Resume"} disabled={pending} onClick={() => setTo(active ? "paused" : "active")} />
       )}
-      {data.status === "archived" ? (
-        <IconButton icon="restore" label="Restore" disabled={pending} onClick={() => call(setRoutineStatusAction, { ...id, status: "active" })} />
+      {status === "archived" ? (
+        <IconButton icon="restore" label="Restore" disabled={pending} onClick={() => setTo("active")} />
       ) : (
         <IconButton icon="archive" label="Archive" disabled={pending} onClick={() => setAsk("archive")} />
       )}
@@ -107,7 +113,7 @@ export function RoutineActions({
         onCancel={() => setAsk(null)}
         onConfirm={() => {
           setAsk(null);
-          call(setRoutineStatusAction, { ...id, status: "archived" });
+          setTo("archived");
         }}
       />
       <ConfirmDialog

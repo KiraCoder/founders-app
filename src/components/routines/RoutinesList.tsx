@@ -4,10 +4,9 @@ import { formatDisplayDate, todayInTimeZone } from "@/lib/dates";
 import { runProgress } from "@/lib/routines";
 import type { RoutineView } from "@/server/services/routines";
 import { RoutineActions } from "./RoutineActions";
+import { RoutineStatusScope, RoutineStatusTag } from "./RoutineStatus";
 import { routineFormValues, todayRunOf, type RoutineFormOptions } from "./form-values";
 
-export const STATUS_TONE: Record<string, Tone> = { active: "ok", paused: "warn", ended: "neutral", archived: "neutral" };
-export const STATUS_LABEL: Record<string, string> = { active: "Active", paused: "Paused", ended: "Ended", archived: "Archived" };
 const RUN_TONE: Record<string, Tone> = { open: "info", escalated: "risk", done: "ok", partly: "warn", missed: "risk" };
 const RUN_LABEL: Record<string, string> = { open: "open", escalated: "open · founders told", done: "done", partly: "partly", missed: "missed" };
 
@@ -60,49 +59,51 @@ export function RoutinesList({
         const r = v.routine;
         return (
           <li key={r.id} className="flex flex-col gap-2 px-4 py-3 text-[13px] md:flex-row md:items-center" data-testid="routine-row">
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Link href={`/routines/${r.id}`} className="font-semibold hover:underline">
-                  {r.title}
-                </Link>
-                <Tag tone={STATUS_TONE[v.status]}>{STATUS_LABEL[v.status] ?? v.status}</Tag>
-                {v.assigneeKind === "person" && !v.reachable && v.status === "active" && (
-                  <Tag tone="warn" title="Runs open only while the bot may message them (Settings → Team on Telegram)">
-                    Not reachable on Telegram
-                  </Tag>
-                )}
+            <RoutineStatusScope status={v.status}>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Link href={`/routines/${r.id}`} className="font-semibold hover:underline">
+                    {r.title}
+                  </Link>
+                  <RoutineStatusTag status={v.status} />
+                  {v.assigneeKind === "person" && !v.reachable && v.status === "active" && (
+                    <Tag tone="warn" title="Runs open only while the bot may message them (Settings → Team on Telegram)">
+                      Not reachable on Telegram
+                    </Tag>
+                  )}
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-muted">
+                  <span>
+                    {v.assigneeName}
+                    {v.assigneeKind === "founder" ? " (founder)" : ""}
+                  </span>
+                  <span aria-hidden>·</span>
+                  <span>{v.companyName ?? "Group-wide"}</span>
+                  <span aria-hidden>·</span>
+                  <span>{v.scheduleText}</span>
+                  {r.confirmation === "checklist" && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>{r.items.length} items</span>
+                    </>
+                  )}
+                  {v.status === "active" && (
+                    <>
+                      <span aria-hidden>·</span>
+                      <span>next {formatNextDue(v.nextDueAt, r.timezone, now)}</span>
+                    </>
+                  )}
+                  {r.endsOn && <span>· until {formatDisplayDate(r.endsOn)}</span>}
+                </div>
               </div>
-              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-muted">
-                <span>
-                  {v.assigneeName}
-                  {v.assigneeKind === "founder" ? " (founder)" : ""}
-                </span>
-                <span aria-hidden>·</span>
-                <span>{v.companyName ?? "Group-wide"}</span>
-                <span aria-hidden>·</span>
-                <span>{v.scheduleText}</span>
-                {r.confirmation === "checklist" && (
-                  <>
-                    <span aria-hidden>·</span>
-                    <span>{r.items.length} items</span>
-                  </>
-                )}
-                {v.status === "active" && (
-                  <>
-                    <span aria-hidden>·</span>
-                    <span>next {formatNextDue(v.nextDueAt, r.timezone, now)}</span>
-                  </>
-                )}
-                {r.endsOn && <span>· until {formatDisplayDate(r.endsOn)}</span>}
+              <div className="flex flex-wrap items-center gap-2 md:justify-end">
+                {lastRunTag(v)}
+                <RoutineActions
+                  data={{ id: r.id, title: r.title, status: v.status, todayStatus: v.today?.status ?? null, hasRuns: !!v.lastRun, commentsCount: v.commentsCount }}
+                  edit={options ? { initial: routineFormValues(v), today: todayRunOf(v), options } : null}
+                />
               </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2 md:justify-end">
-              {lastRunTag(v)}
-              <RoutineActions
-                data={{ id: r.id, title: r.title, status: v.status, todayStatus: v.today?.status ?? null, hasRuns: !!v.lastRun, commentsCount: v.commentsCount }}
-                edit={options ? { initial: routineFormValues(v), today: todayRunOf(v), options } : null}
-              />
-            </div>
+            </RoutineStatusScope>
           </li>
         );
       })}

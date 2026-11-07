@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { RoutineActions } from "@/components/routines/RoutineActions";
-import { formatNextDue, STATUS_LABEL, STATUS_TONE } from "@/components/routines/RoutinesList";
+import { formatNextDue } from "@/components/routines/RoutinesList";
+import { RoutineStatusScope, RoutineStatusTag } from "@/components/routines/RoutineStatus";
 import { routineFormValues, todayRunOf } from "@/components/routines/form-values";
 import { BackLink } from "@/components/ui/BackLink";
 import { PageHeader, Section, Tag, type Tone } from "@/components/ui";
@@ -48,34 +49,36 @@ export default async function RoutinePage({ params, searchParams }: { params: Pr
   return (
     <>
       <BackLink href="/routines" className="mb-2" />
-      <PageHeader
-        title={
-          <span className="flex flex-wrap items-center gap-2">
-            {r.title}
-            <Tag tone={STATUS_TONE[view.status]}>{STATUS_LABEL[view.status] ?? view.status}</Tag>
-          </span>
-        }
-        actions={
-          <RoutineActions
-            variant="page"
-            data={{ id: r.id, title: r.title, status: view.status, todayStatus: view.today?.status ?? null, hasRuns: runs.length > 0, commentsCount: view.commentsCount }}
-            edit={view.status === "archived" ? null : { initial: routineFormValues(view), today: todayRunOf(view), options, openInitially: sp.edit === "1" }}
-          />
-        }
-      >
-        <p className="mt-2 max-w-[760px] rounded-[var(--radius-btn)] bg-accent-soft px-3 py-2 text-[13px] leading-relaxed" data-testid="routine-plan">
-          {view.planText}
-        </p>
-        {view.assigneeKind === "person" && !view.reachable && (
-          <p className="mt-2 text-[12px] text-warn">
-            The bot may not message {view.assigneeName} now, so runs do not open. Invite them / switch them on in{" "}
-            <Link href="/settings/team-telegram" className="underline">
-              Team on Telegram
-            </Link>
-            .
+      <RoutineStatusScope status={view.status}>
+        <PageHeader
+          title={
+            <span className="flex flex-wrap items-center gap-2">
+              {r.title}
+              <RoutineStatusTag status={view.status} />
+            </span>
+          }
+          actions={
+            <RoutineActions
+              variant="page"
+              data={{ id: r.id, title: r.title, status: view.status, todayStatus: view.today?.status ?? null, hasRuns: runs.length > 0, commentsCount: view.commentsCount }}
+              edit={view.status === "archived" ? null : { initial: routineFormValues(view), today: todayRunOf(view), options, openInitially: sp.edit === "1" }}
+            />
+          }
+        >
+          <p className="mt-2 max-w-[760px] rounded-[var(--radius-btn)] bg-accent-soft px-3 py-2 text-[13px] leading-relaxed" data-testid="routine-plan">
+            {view.planText}
           </p>
-        )}
-      </PageHeader>
+          {view.assigneeKind === "person" && !view.reachable && (
+            <p className="mt-2 text-[12px] text-warn">
+              The bot may not message {view.assigneeName} now, so runs do not open. Invite them / switch them on in{" "}
+              <Link href="/settings/team-telegram" className="underline">
+                Team on Telegram
+              </Link>
+              .
+            </p>
+          )}
+        </PageHeader>
+      </RoutineStatusScope>
 
       <dl className="card mb-6 grid gap-x-6 gap-y-3 p-4 text-[13px] sm:grid-cols-2 lg:grid-cols-3">
         <div>

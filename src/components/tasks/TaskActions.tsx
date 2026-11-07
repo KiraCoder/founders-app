@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useOptimistic, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import {
   chaseNowAction,
@@ -19,18 +19,36 @@ import { toast } from "@/components/ui/Toast";
 
 type Ask = { kind: "archive" | "chase" | "delete" };
 
+/** What a one-tap action changes before the server answers. */
+export type TaskPatch = { status?: TaskItem["status"]; paused?: boolean };
+
+/**
+ * The task (and its activity) with the pending one-tap changes applied (`useOptimistic`): Done /
+ * Reopen and Pause / Resume show at once; when the action fails, or once the page is re-rendered,
+ * the server's data takes over again (rollback is automatic). A list row calls it to restyle the
+ * whole row and passes the result to TaskActions; alone (the task page) TaskActions uses its own.
+ */
+export function useOptimisticTask(task: TaskItem, activity?: TaskActivityItem) {
+  const [shown, patch] = useOptimistic({ task, activity }, (s, p: TaskPatch) => ({
+    task: p.status ? { ...s.task, status: p.status, isOverdue: p.status === "done" || p.status === "cancelled" ? false : s.task.isOverdue } : s.task,
+    activity: p.paused !== undefined && s.activity ? { ...s.activity, chase: { ...s.activity.chase, paused: p.paused } } : s.activity,
+  }));
+  return { task: shown.task, activity: shown.activity, patch };
+}
+
 /**
  * The control-center buttons of one task: ✓ Done, ✎ Edit (dialog), ↗ Open, 🔔 Chase now,
  * ⏸ Pause chasing, 🗄 Archive. Each has an accessible name and a tooltip; results go to a toast;
  * archive, delete and anything that messages the person ask first.
  */
 export function TaskActions({
-  task,
-  activity,
+  task: given,
+  activity: givenActivity,
   options,
   showOpen = true,
   canChase,
   afterDelete,
+  optimistic,
 }: {
   task: TaskItem;
   activity?: TaskActivityItem;
@@ -40,7 +58,11 @@ export function TaskActions({
   canChase: boolean;
   /** Where to go after "Delete" (the task page leaves itself). */
   afterDelete?: string;
+  /** The row's optimistic state (`useOptimisticTask`); without it the buttons keep their own. */
+  optimistic?: ReturnType<typeof useOptimisticTask>;
 }) {
+  const own = useOptimisticTask(given, givenActivity);
+  const { task, activity, patch } = optimistic ?? own;
   const router = useRouter();
   const [pending, start] = useTransition();
   const [editing, setEditing] = useState(false);
@@ -49,24 +71,31 @@ export function TaskActions({
   const person = task.assignee?.kind === "person" && task.visibility === "shared" ? task.assignee : null;
   const paused = activity?.chase.paused ?? false;
 
-  const act = (fn: () => Promise<TaskActionResult>, after?: () => void) =>
+  const act = (fn: () => Promise<TaskActionResult>, after?: () => void, change?: TaskPatch) =>
     start(async () => {
-      const r = await fn();
+      if (change) patch(change);
+      let r: TaskActionResult;
+      try {
+        r = await fn();
+      } catch {
+        r = { ok: false, error: "Could not reach the server. Nothing was changed." };
+      }
       if (r.ok) {
         toast(r.message ?? "Done");
         after?.();
       } else toast(r.error ?? "Something went wrong", { tone: "risk" });
     });
+  const done = task.status === "done";
 
   return (
     <div className={`flex shrink-0 flex-wrap items-center justify-end gap-0.5 ${pending ? "opacity-60" : ""}`} data-testid="task-actions">
       <IconButton
         icon="check"
-        label={task.status === "done" ? "Reopen" : "Mark done"}
+        label={done ? "Reopen" : "Mark done"}
         tone="ok"
-        pressed={task.status === "done"}
+        pressed={done}
         disabled={pending || task.status === "cancelled"}
-        onClick={() => act(() => setStatusAction(task.id, task.status === "done" ? "todo" : "done"))}
+        onClick={() => act(() => setStatusAction(task.id, done ? "todo" : "done"), undefined, { status: done ? "todo" : "done" })}
       />
       <IconButton icon="edit" label="Edit" onClick={() => setEditing(true)} disabled={pending} />
       {showOpen && <IconButton icon="external" label="Open" href={`/tasks/${task.id}`} />}
@@ -78,7 +107,7 @@ export function TaskActions({
             label={paused ? "Resume chasing" : "Pause chasing"}
             pressed={paused}
             disabled={pending || closed}
-            onClick={() => act(() => pauseChasingAction(task.id, !paused))}
+            onClick={() => act(() => pauseChasingAction(task.id, !paused), undefined, { paused: !paused })}
           />
         </>
       )}

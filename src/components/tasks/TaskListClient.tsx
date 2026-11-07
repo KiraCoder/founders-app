@@ -6,7 +6,7 @@ import { CompanyDot, InitialsAvatar, Tag } from "@/components/ui";
 import { daysBetween, formatDueDate } from "@/lib/dates";
 import type { TaskFormOptions } from "@/server/services/options";
 import { PRIORITY_TONE, STATUS_TONE, priorityLabel, statusLabel } from "./labels";
-import { TaskActions } from "./TaskActions";
+import { TaskActions, useOptimisticTask } from "./TaskActions";
 import type { TaskActivityItem, TaskItem } from "./types";
 
 export function TaskListClient({
@@ -118,11 +118,11 @@ export function ActivityLine({ task, a, timeZone }: { task: TaskItem; a?: TaskAc
 }
 
 function TaskRow({
-  task,
+  task: given,
   today,
   options,
   showCompany,
-  activity,
+  activity: givenActivity,
   canChase,
   timeZone,
 }: {
@@ -134,6 +134,9 @@ function TaskRow({
   canChase: boolean;
   timeZone: string;
 }) {
+  // Done / Pause restyle the whole row at once (status tag, strike-through, "Chasing paused").
+  const optimistic = useOptimisticTask(given, givenActivity);
+  const { task, activity } = optimistic;
   const closed = task.status === "done" || task.status === "cancelled";
   return (
     <li className="px-3 py-2.5 sm:px-4" data-task-id={task.id}>
@@ -177,7 +180,7 @@ function TaskRow({
           </div>
           <ActivityLine task={task} a={activity} timeZone={timeZone} />
         </div>
-        <TaskActions task={task} activity={activity} options={options} canChase={canChase} />
+        <TaskActions task={given} activity={givenActivity} options={options} canChase={canChase} optimistic={optimistic} />
       </div>
     </li>
   );

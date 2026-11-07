@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useId, useRef, useState, useTransition } from "react";
+import { useActionState, useEffect, useId, useOptimistic, useRef, useState, useTransition } from "react";
 import {
   addChecklistItemAction,
   removeChecklistItemAction,
@@ -101,13 +101,16 @@ export function TaskChecklist({
   const [confirmed, setConfirmed] = useState(false);
   const [ask, setAsk] = useState<null | { what: string; go: () => void }>(null);
   const [editing, setEditing] = useState<string | null>(null);
-  // Optimistic ticks until the server data comes back.
-  const [ticks, setTicks] = useState<Record<string, boolean>>({});
-  useEffect(() => setTicks({}), [items]);
+  // Ticks show at once (useOptimistic) and several can be in flight; a failed one rolls back
+  // (the server's list takes over when its transition ends) with a toast.
+  const [shown, tick] = useOptimistic(items, (list, t: { id: string; done: boolean }) =>
+    list.map((i) => (i.id === t.id ? { ...i, doneAt: t.done ? new Date().toISOString() : null, doneBy: null, doneVia: t.done ? ("app" as const) : null, saving: true } : i)),
+  );
   const [pending, start] = useTransition();
+  const [, startTick] = useTransition();
   const fid = useId();
   const fmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone });
-  const done = items.filter((i) => i.doneAt).length;
+  const done = shown.filter((i) => i.doneAt).length;
 
   useEffect(() => {
     if (state.ok) {
@@ -121,31 +124,37 @@ export function TaskChecklist({
     if (notifyName && !confirmed) setAsk({ what, go });
     else go();
   };
-  const act = (fn: () => Promise<TaskActionResult>) =>
-    start(async () => {
-      const r = await fn();
-      if (r.ok) toast(r.message ?? "Saved");
-      else toast(r.error ?? "Something went wrong", { tone: "risk" });
+  const settle = async (fn: () => Promise<TaskActionResult>) => {
+    let r: TaskActionResult;
+    try {
+      r = await fn();
+    } catch {
+      r = { ok: false, error: "Could not reach the server. Nothing was changed." };
+    }
+    if (r.ok) toast(r.message ?? "Saved");
+    else toast(r.error ?? "Something went wrong", { tone: "risk" });
+  };
+  const act = (fn: () => Promise<TaskActionResult>) => start(() => settle(fn));
+  const toggle = (id: string, on: boolean) =>
+    startTick(async () => {
+      tick({ id, done: on });
+      await settle(() => toggleChecklistItemAction(id, on));
     });
 
   return (
     <div className="space-y-3" data-testid="task-checklist">
-      {items.length > 0 && <Progress done={done} total={items.length} />}
+      {shown.length > 0 && <Progress done={done} total={shown.length} />}
       <ul className={`card divide-y divide-line ${pending ? "opacity-60" : ""}`} aria-label="Checklist">
-        {items.length === 0 && <li className="px-4 py-3 text-[13px] text-muted">No checklist items yet.</li>}
-        {items.map((item, n) => (
+        {shown.length === 0 && <li className="px-4 py-3 text-[13px] text-muted">No checklist items yet.</li>}
+        {shown.map((item, n) => (
           <li key={item.id} className="flex items-start gap-3 px-3 py-2.5 sm:px-4" data-testid="checklist-item">
             <input
               type="checkbox"
               className="mt-1 size-[18px] shrink-0 accent-[var(--accent)]"
-              checked={ticks[item.id] ?? !!item.doneAt}
+              checked={!!item.doneAt}
               disabled={readOnly || pending}
               aria-label={`${item.doneAt ? "Untick" : "Tick"} “${item.title}”`}
-              onChange={(e) => {
-                const on = e.target.checked;
-                setTicks((s) => ({ ...s, [item.id]: on }));
-                act(() => toggleChecklistItemAction(item.id, on));
-              }}
+              onChange={(e) => toggle(item.id, e.target.checked)}
             />
             {editing === item.id ? (
               <EditItem
@@ -162,7 +171,7 @@ export function TaskChecklist({
                 {item.details && <p className="mt-0.5 whitespace-pre-wrap text-[12px] text-muted">{item.details}</p>}
                 {item.doneAt && (
                   <p className="mt-0.5 text-[12px] text-ok" data-testid="checklist-done-meta">
-                    ✓ {fmt.format(new Date(item.doneAt))} · {item.doneBy ?? "?"}
+                    ✓ {fmt.format(new Date(item.doneAt))} · {item.doneBy ?? ("saving" in item ? "saving…" : "?")}
                     {item.doneVia === "telegram" ? " (Telegram)" : ""}
                   </p>
                 )}
