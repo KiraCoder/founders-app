@@ -1,6 +1,6 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { CACHE_TAGS, refreshAfterWrite } from "@/server/cache";
 import { getPageContext } from "@/server/context";
 import { ImportFileError, MAX_IMPORT_BYTES, parseTableFile, type ParsedTable } from "@/server/import/parse-table";
 import { checkConnector } from "@/server/services/connectors";
@@ -31,7 +31,7 @@ export async function enterMetricValueAction(_prev: MetricActionState, fd: FormD
       // Empty = keep the existing note (the REST API clears one with `note: null`).
       note: str(fd, "note")?.trim() || undefined,
     });
-    revalidatePath("/", "layout");
+    refreshAfterWrite(CACHE_TAGS.metricValues);
     return {
       ok: true,
       message: res.action === "unchanged" ? "Same value as before — nothing changed." : res.action === "updated" ? "Corrected (the old value is kept in history)." : "Saved.",
@@ -62,7 +62,7 @@ export async function saveMetricGridAction(_prev: GridState, fd: FormData): Prom
       return { ok: false, error: "Could not read the grid. Reload the page." };
     }
     const result = await saveMetricGrid(ctx, str(fd, "companyId") ?? "", cells);
-    revalidatePath("/", "layout");
+    refreshAfterWrite(CACHE_TAGS.metricValues);
     return { ok: result.errors.length === 0, result, nonce: Date.now() };
   } catch (err) {
     const se = toServiceError(err);
@@ -102,7 +102,7 @@ export async function importNumbersAction(prev: NumbersImportState, fd: FormData
       const { applied, ...plan } = await applyMetricsImport(ctx, companyId, upload.table, {
         expectedSha256: str(fd, "fileSha256") ?? "",
       });
-      revalidatePath("/", "layout");
+      refreshAfterWrite(CACHE_TAGS.metricValues);
       return { step: "done", fileName: upload.name, plan, applied };
     }
     return { step: "preview", fileName: upload.name, plan: await planMetricsImport(ctx, companyId, upload.table) };
@@ -118,7 +118,7 @@ export async function checkConnectorAction(connectorId: string): Promise<MetricA
   const ctx = await getPageContext();
   try {
     const res = await checkConnector(ctx, connectorId);
-    revalidatePath("/", "layout");
+    refreshAfterWrite(CACHE_TAGS.metricValues);
     return { ok: res.status === "ok", message: res.message, nonce: Date.now() };
   } catch (err) {
     const se = toServiceError(err);

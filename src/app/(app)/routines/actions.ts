@@ -1,6 +1,6 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { CACHE_TAGS, refreshAfterWrite } from "@/server/cache";
 import { redirect } from "next/navigation";
 import type { RoutineStatus } from "@/lib/routines";
 import { getPageContext } from "@/server/context";
@@ -67,7 +67,7 @@ async function run(fn: () => Promise<unknown>, message?: string | (() => string)
     if (!se) throw err;
     return { ok: false, error: se.message, fieldErrors: se.fields, nonce: Date.now() };
   }
-  revalidatePath("/", "layout");
+  refreshAfterWrite(CACHE_TAGS.routines);
   return { ok: true, message: typeof message === "function" ? message() : message, nonce: Date.now() };
 }
 

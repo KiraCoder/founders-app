@@ -31,6 +31,14 @@ export const CACHE_TAGS = {
   org: "org",
   /** One chart's structure. */
   orgChart: (chartId: string) => `org:${chartId}`,
+  // Change signals for `refreshAfterWrite`: nothing is cached under these (yet), so revalidating
+  // one drops no entry; it only makes Next re-render the page the action was called from.
+  tasks: "tasks",
+  routines: "routines",
+  /** Team on Telegram (bot switch, pause, link, invite). */
+  staff: "staff",
+  salaries: "salaries",
+  metricValues: "metric-values",
 } as const;
 
 /** Seconds a cached entry lives at most (writes through the services drop it at once). */
@@ -75,6 +83,18 @@ export async function sharedCache<T>(key: readonly string[], tags: readonly stri
     throw err;
   }
   return decode<T>(text);
+}
+
+/**
+ * The end of a server action that wrote something: revalidate the touched entity's tag (the
+ * services already dropped the cached entries they own). Any revalidation makes Next send the
+ * calling page re-rendered (layout included) with the action result and makes the browser drop
+ * its router cache; every app page is dynamic, so all other pages are rendered fresh on the next
+ * visit. Deliberately NOT `revalidatePath("/", "layout")` (or any path): a path's implicit tag
+ * is on every cached entry read on that path, so it would refill the shared cache for nothing.
+ */
+export function refreshAfterWrite(...tags: string[]): void {
+  invalidate(...tags);
 }
 
 /**

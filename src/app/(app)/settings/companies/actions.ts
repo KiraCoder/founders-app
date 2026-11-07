@@ -1,6 +1,6 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { CACHE_TAGS, refreshAfterWrite } from "@/server/cache";
 import { getPageContext } from "@/server/context";
 import { toServiceError } from "@/server/services/errors";
 import {
@@ -33,9 +33,12 @@ const text = (fd: FormData, key: string) => {
   return typeof v === "string" ? v : undefined;
 };
 
-/** The sidebar, pickers and company pages all list companies: refresh everything. */
+/**
+ * The sidebar, pickers and company pages all list companies: the service dropped the cached
+ * list (tag `companies`); this re-renders the calling page, layout included.
+ */
 function refresh() {
-  revalidatePath("/", "layout");
+  refreshAfterWrite(CACHE_TAGS.companies);
 }
 
 async function run(fn: () => Promise<unknown>): Promise<CompanyActionResult> {

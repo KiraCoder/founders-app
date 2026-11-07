@@ -1,6 +1,6 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { CACHE_TAGS, refreshAfterWrite } from "@/server/cache";
 import { redirect } from "next/navigation";
 import type { LinkCreateInput, PersonCreateInput } from "@/lib/people-schemas";
 import { getPageContext } from "@/server/context";
@@ -30,7 +30,8 @@ export interface PeopleActionState {
   nonce?: number;
 }
 
-async function run(fn: () => Promise<unknown>): Promise<PeopleActionState> {
+/** `tag`: people / links (the services already dropped the cached pickers) or salaries. */
+async function run(fn: () => Promise<unknown>, tag: string = CACHE_TAGS.people): Promise<PeopleActionState> {
   try {
     await fn();
   } catch (err) {
@@ -38,7 +39,7 @@ async function run(fn: () => Promise<unknown>): Promise<PeopleActionState> {
     if (!se) throw err;
     return { ok: false, error: se.message, fieldErrors: se.fields };
   }
-  revalidatePath("/", "layout");
+  refreshAfterWrite(tag);
   return { ok: true, nonce: Date.now() };
 }
 
@@ -123,12 +124,13 @@ export async function addSalaryAction(_prev: PeopleActionState, fd: FormData): P
       effectiveFrom: str(fd, "effectiveFrom") ?? null,
       note: str(fd, "note") ?? null,
     }),
+    CACHE_TAGS.salaries,
   );
 }
 
 export async function setSalaryViewerAction(userId: string, enabled: boolean): Promise<PeopleActionState> {
   const ctx = await getPageContext();
-  return run(() => setSalaryViewer(ctx, userId, enabled));
+  return run(() => setSalaryViewer(ctx, userId, enabled), CACHE_TAGS.salaries);
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +195,7 @@ export async function importAction(prev: ImportState, fd: FormData): Promise<Imp
     }
     if (step === "confirm") {
       const result = await applyImport(ctx, table, mapping, { defaultCompanyId, expectedSha256: str(fd, "fileSha256") ?? "" });
-      revalidatePath("/", "layout");
+      refreshAfterWrite(CACHE_TAGS.people);
       const { applied, ...plan } = result;
       return { ...base, step: "done", plan, applied };
     }

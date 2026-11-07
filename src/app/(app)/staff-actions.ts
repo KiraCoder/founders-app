@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { CACHE_TAGS, refreshAfterWrite } from "@/server/cache";
 import { getPageContext } from "@/server/context";
 import { toServiceError } from "@/server/services/errors";
 import {
@@ -23,7 +24,8 @@ export interface StaffFormState {
   nonce?: number;
 }
 
-async function run(fn: () => Promise<unknown>, message?: string): Promise<StaffFormState> {
+/** `tag`: the touched entity — Team on Telegram (default) or tasks (comments, deadlines, a task's chase). */
+async function run(fn: () => Promise<unknown>, message?: string, tag: string = CACHE_TAGS.staff): Promise<StaffFormState> {
   try {
     await fn();
   } catch (err) {
@@ -31,7 +33,7 @@ async function run(fn: () => Promise<unknown>, message?: string): Promise<StaffF
     if (!se) throw err;
     return { ok: false, error: se.message, fieldErrors: se.fields };
   }
-  revalidatePath("/", "layout");
+  refreshAfterWrite(tag);
   return { ok: true, message, nonce: Date.now() };
 }
 
@@ -104,30 +106,31 @@ export async function unlinkPersonAction(_p: StaffFormState, fd: FormData): Prom
 
 export async function setTaskChaseAction(_p: StaffFormState, fd: FormData): Promise<StaffFormState> {
   const ctx = await getPageContext();
-  if (fd.get("clear")) return run(() => setTaskStaffChase(ctx, str(fd, "taskId"), {}), "Using the person's settings");
+  if (fd.get("clear")) return run(() => setTaskStaffChase(ctx, str(fd, "taskId"), {}), "Using the person's settings", CACHE_TAGS.tasks);
   return run(
     () => setTaskStaffChase(ctx, str(fd, "taskId"), fields(fd, ["chaseEnabled", "chaseEveryMinutes", "escalateAfterChases", "escalateAt"])),
     "Saved",
+    CACHE_TAGS.tasks,
   );
 }
 
 export async function addCommentAction(_p: StaffFormState, fd: FormData): Promise<StaffFormState> {
   const ctx = await getPageContext();
-  return run(() => addTaskComment(ctx, str(fd, "taskId"), str(fd, "text")));
+  return run(() => addTaskComment(ctx, str(fd, "taskId"), str(fd, "text")), undefined, CACHE_TAGS.tasks);
 }
 
 export async function editCommentAction(_p: StaffFormState, fd: FormData): Promise<StaffFormState> {
   const ctx = await getPageContext();
-  return run(() => updateTaskComment(ctx, str(fd, "commentId"), str(fd, "text")));
+  return run(() => updateTaskComment(ctx, str(fd, "commentId"), str(fd, "text")), undefined, CACHE_TAGS.tasks);
 }
 
 export async function deleteCommentAction(_p: StaffFormState, fd: FormData): Promise<StaffFormState> {
   const ctx = await getPageContext();
-  return run(() => deleteTaskComment(ctx, str(fd, "commentId")));
+  return run(() => deleteTaskComment(ctx, str(fd, "commentId")), undefined, CACHE_TAGS.tasks);
 }
 
 export async function decideDeadlineAction(_p: StaffFormState, fd: FormData): Promise<StaffFormState> {
   const ctx = await getPageContext();
   const approve = str(fd, "decision") === "approve";
-  return run(() => decideDeadlineRequest(ctx, str(fd, "requestId"), approve), approve ? "Approved" : "Declined");
+  return run(() => decideDeadlineRequest(ctx, str(fd, "requestId"), approve), approve ? "Approved" : "Declined", CACHE_TAGS.tasks);
 }

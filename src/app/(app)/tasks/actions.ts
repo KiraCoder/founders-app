@@ -1,6 +1,6 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { CACHE_TAGS, refreshAfterWrite } from "@/server/cache";
 import { parseAssignee, type TaskCreateInput, type TaskUpdateInput } from "@/lib/schemas";
 import { getPageContext } from "@/server/context";
 import { dispatch } from "@/server/notifications/dispatcher";
@@ -38,7 +38,7 @@ async function run(fn: () => Promise<{ message: string; taskId?: string }>): Pro
     if (!se) throw err;
     return { ok: false, error: se.message, fieldErrors: se.fields };
   }
-  revalidatePath("/", "layout");
+  refreshAfterWrite(CACHE_TAGS.tasks);
   return { ok: true, message: out.message, taskId: out.taskId, nonce: Date.now() };
 }
 

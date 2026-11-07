@@ -1,6 +1,6 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { CACHE_TAGS, refreshAfterWrite } from "@/server/cache";
 import { redirect } from "next/navigation";
 import { parseAssignee, type TaskCreateInput, type TaskUpdateInput } from "@/lib/schemas";
 import { signOut } from "@/server/auth";
@@ -25,7 +25,8 @@ async function run(fn: () => Promise<unknown>): Promise<ActionState> {
     if (!se) throw err;
     return { ok: false, error: se.message, fieldErrors: se.fields };
   }
-  revalidatePath("/", "layout");
+  // Tasks (and createProject, whose service drops `projects`).
+  refreshAfterWrite(CACHE_TAGS.tasks);
   return { ok: true, nonce: Date.now() };
 }
 
