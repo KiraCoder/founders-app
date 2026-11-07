@@ -17,7 +17,7 @@ import type { ParsedTable } from "@/server/import/parse-table";
 import { assertSalaryViewer, isSalaryViewer, visibleLinksWhere, visiblePeopleWhere } from "./access";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
-import { listCompanyUnitOptions, type CompanyUnitOption } from "./people";
+import { listCompanyUnitOptions, peopleChanged, type CompanyUnitOption } from "./people";
 import { assertSameFile } from "./import-common";
 import { lockTransaction } from "./locks";
 import { addSalary, currentSalaries, logSalaryAccess } from "./salaries";
@@ -579,7 +579,7 @@ export async function applyImport(
   opts: ApplyImportOptions,
 ): Promise<ImportResult> {
   assertSameFile(table, opts.expectedSha256);
-  return ctx.db.transaction(async (rawTx) => {
+  const result = await ctx.db.transaction(async (rawTx) => {
     const tx: ServiceContext = { ...ctx, db: rawTx as unknown as Db };
     await lockTransaction(tx.db, "people-import");
     const { ops, plan } = await buildPlan(tx, table, mapping, opts);
@@ -633,6 +633,8 @@ export async function applyImport(
     }
     return { ...plan, applied };
   });
+  peopleChanged();
+  return result;
 }
 
 /** Mapping suggestion + which headers are salary columns, for the mapping step. */

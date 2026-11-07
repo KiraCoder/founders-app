@@ -7,7 +7,8 @@ import { buildMetricCards, listMetricDefinitions } from "@/server/services/metri
 import { getOrgChart, orgExpertForCompany, orgPeopleOptions } from "@/server/services/org";
 import { orgExpertOptionsFor } from "@/server/services/org-expert";
 import { getOrgJourney } from "@/server/services/org-journey";
-import { OrgBoard, type LinkedMetric } from "./OrgBoard";
+import type { LinkedMetric } from "./OrgBoard";
+import { OrgBoardLazy as OrgBoard } from "./OrgBoardLazy";
 import { ApplyTemplateButton } from "./ApplyTemplateButton";
 import { OrgExpertStrip } from "./OrgExpertStrip";
 
@@ -68,17 +69,26 @@ export async function OrgWorkspace({
     );
   }
 
-  const [people, metricDefs, expert, journey] = await Promise.all([
+  const [people, metricDefs, expertOptions, journey] = await Promise.all([
     orgPeopleOptions(ctx, company.id),
     listMetricDefinitions(ctx, company.id),
-    orgExpertForCompany(ctx, company.id, await orgExpertOptionsFor(ctx, company.id)),
-    getOrgJourney(ctx, company.id),
+    orgExpertOptionsFor(ctx, company.id),
+    getOrgJourney(ctx, company.id, { slug: company.slug }),
   ]);
   const linkedIds = new Set(chart.divisions.flatMap((d) => [...d.departments, ...d.archivedDepartments]).map((d) => d.metricDefinitionId).filter(Boolean));
   const cards = await buildMetricCards(
     ctx,
     metricDefs.filter((m) => linkedIds.has(m.id)),
   );
+  // The expert works on what the board already loaded (chart, people, numbers): no second read
+  const expert = await orgExpertForCompany(ctx, company.id, expertOptions, {
+    company: { slug: company.slug, name: company.name },
+    metricDefs,
+    people,
+    views: new Map([[chart.id, chart]]),
+    cards: new Map(cards.map((c) => [c.id, c])),
+    onlyChartId: chart.id,
+  });
   const linkedMetrics: Record<string, LinkedMetric> = {};
   for (const c of cards) {
     linkedMetrics[c.id] = {

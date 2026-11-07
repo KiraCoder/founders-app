@@ -8,7 +8,6 @@ import { Toaster } from "@/components/ui/Toast";
 import { COMPANY_COOKIE, type NavCompany } from "@/components/shell/company-nav";
 import { getPageContext } from "@/server/context";
 import { devToolsEnabled } from "@/server/notifications/config";
-import { agentPanelHires } from "@/server/services/ai-roles";
 import { listCompanies } from "@/server/services/companies";
 
 export const dynamic = "force-dynamic";
@@ -20,7 +19,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // The company remembered from the last company page, for scoping the sidebar on global pages.
   const rememberedCompany = (await cookies()).get(COMPANY_COOKIE)?.value ?? null;
   // Hired AI roles + latest report links for the agent panel (a failure never breaks the shell).
-  const agentHires = await agentPanelHires(ctx).catch(() => []);
+  // Streamed: TopBar gets the promise and only the (closed) panel waits for it. The service is
+  // imported lazily so the shell's module graph does not include the AI roles engine.
+  const agentHires = import("@/server/services/ai-roles").then((m) => m.agentPanelHires(ctx)).catch(() => []);
   return (
     <div className="flex min-h-dvh">
       <Sidebar companies={companies} initialCompany={rememberedCompany} showDevTools={devToolsEnabled()} />

@@ -20,8 +20,11 @@ import {
   type RoleTemplate,
 } from "@/lib/ai-roles";
 import { isPayLikeMetric } from "@/server/ai/narrative";
+import { cache } from "react";
+import { CACHE_TAGS, invalidate, sharedCache } from "@/server/cache";
 import type { Db } from "@/server/db/connect";
 import { aiRoleConfigs, aiRoleSettingsLog, type AiRoleHire } from "@/server/db/schema";
+import type { ServiceContext } from "./context";
 
 /**
  * AI roles as the founders tuned them: the code catalogue (src/lib/ai-roles.ts) with their
@@ -125,14 +128,26 @@ export async function loadConfigRows(db: Db): Promise<Map<string, ConfigRow>> {
   return new Map(rows.map((r) => [r.key, r]));
 }
 
+/**
+ * The role configs for page reads: per request (one read for the layout's agent panel and the
+ * page) and, for founders (configs are shared, founders-only data), through the shared cache
+ * under `ai-roles` (dropped by every role settings change, see logSettingsChange). Write paths
+ * keep using `loadConfigRows` / `resolveRole` (always fresh).
+ */
+export const configRowsFor = cache(async (ctx: Pick<ServiceContext, "db" | "user">): Promise<Map<string, ConfigRow>> => {
+  if (ctx.user.role !== "founder") return loadConfigRows(ctx.db);
+  const rows = await sharedCache(["ai-roles:configs"], [CACHE_TAGS.aiRoles], async () => [...(await loadConfigRows(ctx.db)).values()]);
+  return new Map(rows.map((r) => [r.key, r]));
+});
+
 export async function resolveRole(db: Db, key: string): Promise<ResolvedRole | null> {
   const [row] = await db.select().from(aiRoleConfigs).where(eq(aiRoleConfigs.key, key));
   return resolveFrom(key, row);
 }
 
 /** Every role: the built-in catalogue (with edits) then the custom roles (oldest first). */
-export async function resolveAllRoles(db: Db): Promise<ResolvedRole[]> {
-  const rows = await loadConfigRows(db);
+export async function resolveAllRoles(db: Db, preloaded?: Map<string, ConfigRow>): Promise<ResolvedRole[]> {
+  const rows = preloaded ?? (await loadConfigRows(db));
   const builtIn = [...ROLE_TEMPLATES].sort((a, b) => a.sort - b.sort).map((t) => resolveFrom(t.key, rows.get(t.key))!);
   const custom = [...rows.values()].filter((r) => r.kind === "custom").map((r) => resolveFrom(r.key, r)!);
   return [...builtIn, ...custom];
@@ -209,6 +224,8 @@ export async function logSettingsChange(
   },
 ): Promise<number> {
   const scopeKey = e.scope === "hire" ? `hire:${e.hireId}` : `role:${e.roleKey}`;
+  // Every role-level config write (edit, revert, reset, new custom role) logs here.
+  if (e.scope === "role") invalidate(CACHE_TAGS.aiRoles);
   for (let attempt = 0; attempt < 5; attempt++) {
     const [top] = await db
       .select({ v: sql<number>`coalesce(max(${aiRoleSettingsLog.version}), 0)::int` })

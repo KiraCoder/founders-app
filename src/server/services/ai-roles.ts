@@ -1,7 +1,8 @@
 import "server-only";
 import { resolveAppBaseUrl } from "@/server/app-url";
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull, lt, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, lte, ne, notInArray, or, sql, type SQL } from "drizzle-orm";
+import { cache } from "react";
 import {
   addMonths,
   chaseDueToday,
@@ -42,9 +43,10 @@ import { monthlyName, monthTotalKind, monthTotalMark, monthValue, periodsInMonth
 import { generateNarrative, salaryLikeFinding } from "@/server/ai/narrative";
 import { getLlmProvider, type LlmProvider } from "@/server/ai/provider";
 import type { Db } from "@/server/db/connect";
-import { syncAiTemplates } from "@/server/db/seed";
+import { syncAiTemplates } from "@/server/db/ai-templates";
 import {
   aiDataRequests,
+  aiRoleConfigs,
   aiRoleHires,
   aiRoleRuns,
   companies,
@@ -59,12 +61,25 @@ import {
   type AiRunMissing,
   type AiRunStatus,
 } from "@/server/db/schema";
+
+type AiRoleConfigRow = typeof aiRoleConfigs.$inferSelect;
 import { defaultRegistry, type ConnectorRegistry } from "@/server/connectors/registry";
 import { listFounders } from "@/server/notifications/founders";
 import { enqueue } from "@/server/notifications/outbox";
 import type { NeutralMessage } from "@/server/notifications/types";
 import { assertAiRolesAccess, assertCompanyAccess, assertValidId } from "./access";
-import { hireChecks, isSalaryMetric, loadConfigRows, logSettingsChange, resolveAllRoles, resolveFrom, resolveRole, roleDefaultSettings, type ResolvedRole } from "./ai-role-defs";
+import {
+  configRowsFor,
+  hireChecks,
+  isSalaryMetric,
+  loadConfigRows,
+  logSettingsChange,
+  resolveAllRoles,
+  resolveFrom,
+  resolveRole,
+  roleDefaultSettings,
+  type ResolvedRole,
+} from "./ai-role-defs";
 import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { DEBT_METRIC_KEY } from "./holding";
@@ -258,7 +273,7 @@ async function loadHireRows(db: Db, where?: ReturnType<typeof eq>): Promise<Hire
   return rows.map((r) => ({ hire: r.hire, companySlug: r.companySlug, companyName: r.companyName, companyColor: r.companyColor, hiredByName: r.hiredByName ?? null }));
 }
 
-async function toHireViews(db: Db, rows: HireRow[]): Promise<HireView[]> {
+async function toHireViews(db: Db, rows: HireRow[], preloadedConfigs?: Map<string, AiRoleConfigRow>): Promise<HireView[]> {
   if (!rows.length) return [];
   const founders = await listFounders(db);
   const founderIds = founders.map((f) => f.id);
@@ -268,7 +283,7 @@ async function toHireViews(db: Db, rows: HireRow[]): Promise<HireView[]> {
     .from(aiRoleRuns)
     .where(inArray(aiRoleRuns.hireId, rows.map((r) => r.hire.id)))
     .orderBy(desc(aiRoleRuns.period));
-  const configs = await loadConfigRows(db);
+  const configs = preloadedConfigs ?? (await loadConfigRows(db));
   return rows.flatMap(({ hire, companySlug, companyName, companyColor, hiredByName }) => {
     const template = resolveFrom(hire.templateKey, configs.get(hire.templateKey));
     if (!template) return [];
@@ -312,13 +327,17 @@ export function listTemplates(): RoleTemplate[] {
 /** Every role the founders can hire or edit: built-ins (with their edits) and custom roles. */
 export async function listRoles(ctx: ServiceContext): Promise<ResolvedRole[]> {
   assertAiRolesAccess(ctx);
-  return resolveAllRoles(ctx.db);
+  return resolveAllRoles(ctx.db, await configRowsFor(ctx));
 }
+
+/** Every hire, once per request (the layout's agent panel and the AI roles page share it). */
+const allHires = cache(async (ctx: ServiceContext): Promise<HireView[]> => toHireViews(ctx.db, await loadHireRows(ctx.db), await configRowsFor(ctx)));
 
 export async function listHires(ctx: ServiceContext, opts: { companyId?: string } = {}): Promise<HireView[]> {
   assertAiRolesAccess(ctx);
-  if (opts.companyId) await assertCompanyAccess(ctx, opts.companyId);
-  return toHireViews(ctx.db, await loadHireRows(ctx.db, opts.companyId ? eq(aiRoleHires.companyId, opts.companyId) : undefined));
+  if (!opts.companyId) return allHires(ctx);
+  await assertCompanyAccess(ctx, opts.companyId);
+  return toHireViews(ctx.db, await loadHireRows(ctx.db, eq(aiRoleHires.companyId, opts.companyId)), await configRowsFor(ctx));
 }
 
 export async function getHire(ctx: ServiceContext, id: unknown): Promise<HireView> {
@@ -327,6 +346,30 @@ export async function getHire(ctx: ServiceContext, id: unknown): Promise<HireVie
   const [view] = await toHireViews(ctx.db, await loadHireRows(ctx.db, eq(aiRoleHires.id, id)));
   if (!view) throw new ServiceError("not_found", "AI role not found");
   return view;
+}
+
+/**
+ * The newest `limit` runs of each hire with ONE read. `hires` must come from `listHires` /
+ * `getHire` (already access-checked).
+ */
+export async function recentRunsOf(ctx: ServiceContext, hires: readonly Pick<HireView, "id">[], limit = 12): Promise<Map<string, RunSummary[]>> {
+  assertAiRolesAccess(ctx);
+  const ids = hires.map((h) => h.id);
+  if (!ids.length) return new Map();
+  const ranked = ctx.db
+    .select({ id: aiRoleRuns.id, rn: sql<number>`row_number() over (partition by ${aiRoleRuns.hireId} order by ${aiRoleRuns.period} desc)`.as("rn") })
+    .from(aiRoleRuns)
+    .where(inArray(aiRoleRuns.hireId, ids))
+    .as("ranked");
+  const rows = await ctx.db
+    .select({ run: aiRoleRuns })
+    .from(aiRoleRuns)
+    .innerJoin(ranked, eq(ranked.id, aiRoleRuns.id))
+    .where(sql`${ranked.rn} <= ${limit}`)
+    .orderBy(desc(aiRoleRuns.period));
+  const out = new Map<string, RunSummary[]>(ids.map((id) => [id, []]));
+  for (const { run } of rows) out.get(run.hireId)?.push(runSummary(run));
+  return out;
 }
 
 export async function listHireRuns(ctx: ServiceContext, hireId: string, limit = 12): Promise<RunSummary[]> {
@@ -379,13 +422,18 @@ function awaitingSourceOf(def: Pick<MetricDef, "sourceKind" | "connectorId">, re
 }
 
 async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]> {
+  return metricDefsOf(db, eq(metricDefinitions.companyId, companyId));
+}
+
+async function metricDefsOf(db: Db, where: SQL): Promise<(MetricDef & { companyId: string })[]> {
   const rows = await db
     .select({ d: metricDefinitions, unitName: companyUnits.name, unitSlug: companyUnits.slug })
     .from(metricDefinitions)
     .leftJoin(companyUnits, eq(companyUnits.id, metricDefinitions.companyUnitId))
-    .where(and(eq(metricDefinitions.companyId, companyId), isNull(metricDefinitions.archivedAt)))
+    .where(and(where, isNull(metricDefinitions.archivedAt)))
     .orderBy(asc(metricDefinitions.sort), asc(metricDefinitions.name));
   return rows.map(({ d, unitName, unitSlug }) => ({
+    companyId: d.companyId,
     id: d.id,
     key: d.key,
     name: d.name,
@@ -408,15 +456,33 @@ async function companyMetricDefs(db: Db, companyId: string): Promise<MetricDef[]
  * The metrics a role can wait for in this company (for the Tune wizard and the role editor),
  * one entry per key. `payData`: a custom role may never watch it (salary guard).
  */
-export async function companyMetricOptions(
-  ctx: ServiceContext,
-  companyId: string,
-): Promise<{ key: string; label: string; granularity: Granularity; unit: string; payData: boolean }[]> {
+export type MetricOption = { key: string; label: string; granularity: Granularity; unit: string; payData: boolean };
+
+export async function companyMetricOptions(ctx: ServiceContext, companyId: string): Promise<MetricOption[]> {
   assertAiRolesAccess(ctx);
   assertValidId(companyId, "Company");
   await assertCompanyAccess(ctx, companyId);
-  const defs = await companyMetricDefs(ctx.db, companyId);
-  const byKey = new Map<string, { key: string; label: string; granularity: Granularity; unit: string; payData: boolean }>();
+  return metricOptionsOf(await companyMetricDefs(ctx.db, companyId));
+}
+
+/**
+ * `companyMetricOptions` for several companies with ONE read (the AI roles page). Companies the
+ * user cannot access are left out (the access check is the per-request company list).
+ */
+export async function companyMetricOptionsByCompany(ctx: ServiceContext, companyIds: readonly string[]): Promise<Map<string, MetricOption[]>> {
+  assertAiRolesAccess(ctx);
+  const ids: string[] = [];
+  for (const id of companyIds) {
+    assertValidId(id, "Company");
+    await assertCompanyAccess(ctx, id);
+    ids.push(id);
+  }
+  const defs = ids.length ? await metricDefsOf(ctx.db, inArray(metricDefinitions.companyId, ids)) : [];
+  return new Map(ids.map((id) => [id, metricOptionsOf(defs.filter((d) => d.companyId === id))]));
+}
+
+function metricOptionsOf(defs: readonly MetricDef[]): MetricOption[] {
+  const byKey = new Map<string, MetricOption>();
   for (const d of defs) {
     const prev = byKey.get(d.key);
     if (!prev) byKey.set(d.key, { key: d.key, label: d.name, granularity: d.granularity, unit: d.unit, payData: isSalaryMetric(d) });

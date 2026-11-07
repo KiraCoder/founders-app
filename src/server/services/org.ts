@@ -27,6 +27,8 @@ import {
   type OrgFinding,
   type OrgNewPersonInput,
 } from "@/lib/org";
+import { cache } from "react";
+import { CACHE_TAGS, invalidate, sharedCache } from "@/server/cache";
 import type { Db } from "@/server/db/connect";
 import {
   companies,
@@ -50,7 +52,7 @@ import {
 import { assertOrgEdit, assertOrgRead, assertValidId, inAccessibleCompany, visibleTasksWhere } from "./access";
 import { today, type ServiceContext } from "./context";
 import { ServiceError, toServiceError } from "./errors";
-import { buildMetricCards, listMetricDefinitions } from "./metrics";
+import { buildMetricCards, listMetricDefinitions, type MetricCard, type MetricView } from "./metrics";
 import { createPerson } from "./people";
 import { CLOSED_STATUSES } from "./tasks-rules";
 import { createChartFromTemplate } from "@/server/db/org-charts";
@@ -189,6 +191,16 @@ async function findChart(db: Db, scope: OrgScope): Promise<OrgChart | null> {
   return row ?? null;
 }
 
+/** A chart changed (every board write locks it through `beginWrite` and logs through `writeLog`). */
+function orgChartChanged(chartId: string): void {
+  invalidate(CACHE_TAGS.orgChart(chartId), CACHE_TAGS.org);
+}
+
+/** Who reads the chart through the shared cache: founders (identical view for both). */
+function sharesOrgCache(ctx: ServiceContext): boolean {
+  return ctx.user.role === "founder";
+}
+
 /** Charts of a company: the whole-company one (unit null) and any per-unit ones. */
 export async function listOrgCharts(ctx: ServiceContext, companyId: string): Promise<{ id: string; companyUnitId: string | null }[]> {
   await assertOrgRead(ctx, companyId);
@@ -221,9 +233,30 @@ async function departmentTaskCounts(ctx: ServiceContext, departmentIds: string[]
 export async function getOrgChart(ctx: ServiceContext, scope: OrgScope, opts: { includeArchived?: boolean } = {}): Promise<OrgChartView | null> {
   await assertOrgRead(ctx, scope.companyId);
   if (scope.companyUnitId) assertValidId(scope.companyUnitId, "Unit");
-  const chart = await findChart(ctx.db, scope);
+  const chart = sharesOrgCache(ctx)
+    ? ((await companyCharts(ctx, scope.companyId)).find((c) => c.chart.companyUnitId === (scope.companyUnitId ?? null))?.chart ?? null)
+    : await findChart(ctx.db, scope);
   if (!chart) return null;
   return loadChartView(ctx, chart, opts);
+}
+
+type CompanyChart = { chart: OrgChart; unitName: string | null };
+
+const chartsQuery = (db: Db, companyId?: string) =>
+  db
+    .select({ chart: orgCharts, unitName: companyUnits.name })
+    .from(orgCharts)
+    .leftJoin(companyUnits, eq(companyUnits.id, orgCharts.companyUnitId))
+    .where(and(companyId ? eq(orgCharts.companyId, companyId) : undefined, isNull(orgCharts.archivedAt)))
+    .orderBy(sql`${orgCharts.companyUnitId} is not null`, asc(companyUnits.sort));
+
+/** Every live chart of every company: one read per request and, for founders, shared (tag `org`). */
+const allCharts = cache(async (ctx: ServiceContext): Promise<CompanyChart[]> => sharedCache(["org:charts"], [CACHE_TAGS.org], () => chartsQuery(ctx.db)));
+
+/** A company's live charts (whole company first, then units in their order). */
+async function companyCharts(ctx: ServiceContext, companyId: string): Promise<CompanyChart[]> {
+  if (!sharesOrgCache(ctx)) return chartsQuery(ctx.db, companyId);
+  return (await allCharts(ctx)).filter((c) => c.chart.companyId === companyId);
 }
 
 export async function getOrgChartById(ctx: ServiceContext, chartId: unknown, opts: { includeArchived?: boolean } = {}): Promise<OrgChartView> {
@@ -234,18 +267,43 @@ export async function getOrgChartById(ctx: ServiceContext, chartId: unknown, opt
   return loadChartView(ctx, chart, opts);
 }
 
+/**
+ * The chart view. Its structure (divisions, departments, functions, posts, names, history) is the
+ * same for both founders and is read through the shared cache (tags `org:<chartId>`, `org`,
+ * `people`); the per-department task counts depend on the reader (personal todos) and are always
+ * read fresh, per request.
+ */
 async function loadChartView(ctx: ServiceContext, chart: OrgChart, opts: { includeArchived?: boolean }): Promise<OrgChartView> {
+  const includeArchived = !!opts.includeArchived;
+  const view = sharesOrgCache(ctx)
+    ? await sharedCache(["org:chart", chart.id, includeArchived ? "all" : "live"], [CACHE_TAGS.orgChart(chart.id), CACHE_TAGS.org, CACHE_TAGS.people], () =>
+        loadChartStructure(ctx.db, chart, { includeArchived }),
+      )
+    : await loadChartStructure(ctx.db, chart, { includeArchived });
+  const allDepts = view.divisions.flatMap((d) => [...d.departments, ...d.archivedDepartments]);
+  const counts = await departmentTaskCounts(ctx, view.allDepartmentIds);
+  for (const d of allDepts) {
+    d.openTasks = counts.get(d.id)?.open ?? 0;
+    d.overdueTasks = counts.get(d.id)?.overdue ?? 0;
+  }
+  const { allDepartmentIds: _ids, ...out } = view;
+  void _ids;
+  return out;
+}
+
+/** Everything of the view that is the same for every founder (task counts are left at 0). */
+async function loadChartStructure(db: Db, chart: OrgChart, opts: { includeArchived: boolean }): Promise<OrgChartView & { allDepartmentIds: string[] }> {
   const [divs, depts, fns, posts] = await Promise.all([
-    ctx.db.select().from(orgDivisions).where(and(eq(orgDivisions.chartId, chart.id), isNull(orgDivisions.archivedAt))),
-    ctx.db.select().from(orgDepartments).where(eq(orgDepartments.chartId, chart.id)).orderBy(asc(orgDepartments.sort), asc(orgDepartments.number)),
-    ctx.db.select().from(orgFunctions).where(eq(orgFunctions.chartId, chart.id)).orderBy(asc(orgFunctions.sort), asc(orgFunctions.createdAt)),
-    ctx.db
+    db.select().from(orgDivisions).where(and(eq(orgDivisions.chartId, chart.id), isNull(orgDivisions.archivedAt))),
+    db.select().from(orgDepartments).where(eq(orgDepartments.chartId, chart.id)).orderBy(asc(orgDepartments.sort), asc(orgDepartments.number)),
+    db.select().from(orgFunctions).where(eq(orgFunctions.chartId, chart.id)).orderBy(asc(orgFunctions.sort), asc(orgFunctions.createdAt)),
+    db
       .select()
       .from(orgPosts)
       .where(and(eq(orgPosts.chartId, chart.id), isNull(orgPosts.archivedAt)))
       .orderBy(asc(orgPosts.sort), asc(orgPosts.createdAt)),
   ]);
-  const names = await namesFor(ctx.db, [
+  const names = await namesFor(db, [
     ...divs.map((d) => d.headPersonId),
     ...depts.map((d) => d.headPersonId),
     ...fns.map((f) => f.responsiblePersonId),
@@ -261,7 +319,6 @@ async function loadChartView(ctx: ServiceContext, chart: OrgChart, opts: { inclu
     hiring: p.hiring,
     hiringRoleTitle: p.hiringRoleTitle,
   });
-  const counts = await departmentTaskCounts(ctx, depts.map((d) => d.id));
   const fnView = (f: OrgFunction): OrgFunctionView => ({
     id: f.id,
     departmentId: f.departmentId,
@@ -289,8 +346,8 @@ async function loadChartView(ctx: ServiceContext, chart: OrgChart, opts: { inclu
       functions: own.filter((f) => !f.archivedAt).map(fnView),
       posts: posts.filter((p) => p.departmentId === d.id).map(postView),
       archivedFunctions: opts.includeArchived ? own.filter((f) => f.archivedAt).map(fnView) : [],
-      openTasks: counts.get(d.id)?.open ?? 0,
-      overdueTasks: counts.get(d.id)?.overdue ?? 0,
+      openTasks: 0,
+      overdueTasks: 0,
     };
   };
   const divisions = [...divs]
@@ -312,14 +369,14 @@ async function loadChartView(ctx: ServiceContext, chart: OrgChart, opts: { inclu
         archivedDepartments: opts.includeArchived ? own.filter((d) => d.archivedAt).map(deptView) : [],
       };
     });
-  const log = await ctx.db
+  const log = await db
     .select({ row: orgChangeLog, actorName: users.shortName })
     .from(orgChangeLog)
     .leftJoin(users, eq(users.id, orgChangeLog.actorUserId))
     .where(eq(orgChangeLog.chartId, chart.id))
     .orderBy(desc(orgChangeLog.seq))
     .limit(UNDO_DEPTH);
-  const window = await undoWindow(ctx.db, chart.id);
+  const window = await undoWindow(db, chart.id);
   const next = window.find((r) => !r.undoneAt) ?? null;
   return {
     id: chart.id,
@@ -338,6 +395,7 @@ async function loadChartView(ctx: ServiceContext, chart: OrgChart, opts: { inclu
       undone: !!row.undoneAt,
     })),
     version: String(log[0]?.row.seq ?? 0),
+    allDepartmentIds: depts.map((d) => d.id),
   };
 }
 
@@ -356,8 +414,13 @@ async function undoWindow(db: Db, chartId: string) {
 // ---------------------------------------------------------------------------
 
 /** People who can head a division / department or be responsible for a function: active people of that company. */
-export async function orgPeopleOptions(ctx: ServiceContext, companyId: string): Promise<{ id: string; name: string; role: string }[]> {
+export const orgPeopleOptions = cache(async (ctx: ServiceContext, companyId: string): Promise<{ id: string; name: string; role: string }[]> => {
   await assertOrgRead(ctx, companyId);
+  if (!sharesOrgCache(ctx)) return queryOrgPeople(ctx, companyId);
+  return sharedCache(["org:people", companyId], [CACHE_TAGS.people], () => queryOrgPeople(ctx, companyId));
+});
+
+async function queryOrgPeople(ctx: ServiceContext, companyId: string): Promise<{ id: string; name: string; role: string }[]> {
   const rows = await ctx.db
     .select({ id: people.id, name: personName, role: personCompanies.role, title: personCompanies.title })
     .from(personCompanies)
@@ -370,7 +433,12 @@ export async function orgPeopleOptions(ctx: ServiceContext, companyId: string): 
 }
 
 /** Departments per company for the task form ("21 Отдел владельца"), active charts only. */
-export async function orgDepartmentOptionsByCompany(ctx: ServiceContext): Promise<Record<string, { id: string; label: string }[]>> {
+export const orgDepartmentOptionsByCompany = cache(async (ctx: ServiceContext): Promise<Record<string, { id: string; label: string }[]>> => {
+  if (!sharesOrgCache(ctx)) return queryDepartmentOptions(ctx);
+  return sharedCache(["org:department-options"], [CACHE_TAGS.org, CACHE_TAGS.companies], () => queryDepartmentOptions(ctx));
+});
+
+async function queryDepartmentOptions(ctx: ServiceContext): Promise<Record<string, { id: string; label: string }[]>> {
   const rows = await ctx.db
     .select({ id: orgDepartments.id, companyId: orgDepartments.companyId, number: orgDepartments.number, name: orgDepartments.name, unitName: companyUnits.name })
     .from(orgDepartments)
@@ -431,6 +499,7 @@ export async function applyVysotskyTemplate(ctx: ServiceContext, scope: OrgScope
     summary: "Applied the Vysotsky 7/21 template",
     now: ctx.now,
   });
+  orgChartChanged(id);
   return getOrgChartById(ctx, id);
 }
 
@@ -532,11 +601,14 @@ async function checkVersion(tx: Db, chartId: string, opts: OrgWriteOpts): Promis
 
 /** Locks the chart and checks the client's version: the start of every board write. */
 export async function beginWrite(tx: Db, chartId: string, opts: OrgWriteOpts): Promise<void> {
+  // Dropped when the request ends (after the commit); a rolled-back write only costs a re-read.
+  orgChartChanged(chartId);
   await lockChart(tx, chartId);
   await checkVersion(tx, chartId, opts);
 }
 
 export async function writeLog(tx: Db, ctx: ServiceContext, chartId: string, companyId: string, log: LogInput, opts: OrgWriteOpts = {}): Promise<void> {
+  orgChartChanged(chartId);
   await tx.update(orgCharts).set({ updatedAt: ctx.now }).where(eq(orgCharts.id, chartId));
   const [row] = await tx.insert(orgChangeLog).values({ chartId, companyId, actorUserId: ctx.user.id, ...log, createdAt: ctx.now }).returning({ seq: orgChangeLog.seq });
   if (opts.result) opts.result.version = String(row!.seq);
@@ -1386,64 +1458,83 @@ export interface OrgExpertResult {
   findings: OrgFinding[];
 }
 
+/** What a caller that already loaded them can hand to the expert (no second read). */
+export interface OrgExpertPreloaded {
+  company?: { slug: string; name: string };
+  /** Metric definitions of the company. */
+  metricDefs?: MetricView[];
+  /** Active people of the company (orgPeopleOptions). */
+  people?: { id: string; name: string }[];
+  /** Chart views already loaded, by chart id (any `includeArchived`: only live rows are read). */
+  views?: Map<string, OrgChartView>;
+  /** Metric cards already built, by metric id (must cover the departments' linked numbers). */
+  cards?: Map<string, MetricCard>;
+  /** Only this chart's result (the board shows one chart). */
+  onlyChartId?: string;
+}
+
 /**
  * The expert's findings for a company: one result per chart (the whole-company chart and
  * any unit charts), or one "no chart yet" result. Reads as `ctx` (tasks it can see).
+ * `pre`: data the caller already loaded (the org board passes its chart, people and numbers).
  */
-export async function orgExpertForCompany(ctx: ServiceContext, companyId: string, opts: OrgExpertOptions = {}): Promise<OrgExpertResult[]> {
+export async function orgExpertForCompany(ctx: ServiceContext, companyId: string, opts: OrgExpertOptions = {}, pre: OrgExpertPreloaded = {}): Promise<OrgExpertResult[]> {
   await assertOrgRead(ctx, companyId);
-  const [company] = await ctx.db.select({ slug: companies.slug, name: companies.name }).from(companies).where(eq(companies.id, companyId));
-  const charts = await ctx.db
-    .select({ chart: orgCharts, unitName: companyUnits.name })
-    .from(orgCharts)
-    .leftJoin(companyUnits, eq(companyUnits.id, orgCharts.companyUnitId))
-    .where(and(eq(orgCharts.companyId, companyId), isNull(orgCharts.archivedAt)))
-    .orderBy(sql`${orgCharts.companyUnitId} is not null`, asc(companyUnits.sort));
-  const base = { companyId, companySlug: company!.slug, companyName: company!.name };
+  const company =
+    pre.company ??
+    (await ctx.db.select({ slug: companies.slug, name: companies.name }).from(companies).where(eq(companies.id, companyId)))[0]!;
+  const charts = (await companyCharts(ctx, companyId)).filter((c) => !pre.onlyChartId || c.chart.id === pre.onlyChartId);
+  const base = { companyId, companySlug: company.slug, companyName: company.name };
   if (!charts.length) {
-    return [{ ...base, scopeName: company!.name, chartId: null, findings: orgExpertFindings({ hasChart: false, divisions: [], departments: [], functions: [], personNames: {} }) }];
+    return [{ ...base, scopeName: company.name, chartId: null, findings: orgExpertFindings({ hasChart: false, divisions: [], departments: [], functions: [], personNames: {} }) }];
   }
-  const metricDefs = await listMetricDefinitions(ctx, companyId);
+  const metricDefs = pre.metricDefs ?? (await listMetricDefinitions(ctx, companyId));
   // Real people only (review follow-up): a head / responsible person who left the company (or
   // whose link to it ended) counts as "nobody", and names come from the People records.
-  const active = new Map((await orgPeopleOptions(ctx, companyId)).map((p) => [p.id, p.name]));
-  const real = (id: string | null) => (id && active.has(id) ? id : null);
+  const active = new Map((pre.people ?? (await orgPeopleOptions(ctx, companyId))).map((p) => [p.id, p.name]));
   const out: OrgExpertResult[] = [];
   for (const { chart, unitName } of charts) {
-    const view = await loadChartView(ctx, chart, {});
+    const view = pre.views?.get(chart.id) ?? (await loadChartView(ctx, chart, {}));
     const depts = view.divisions.flatMap((d) => d.departments);
     const linked = metricDefs.filter((m) => depts.some((d) => d.metricDefinitionId === m.id));
-    const cards = new Map((await buildMetricCards(ctx, linked)).map((c) => [c.id, c]));
-    const personNames: Record<string, string> = Object.fromEntries(active);
+    const cards = pre.cards && linked.every((m) => pre.cards!.has(m.id)) ? pre.cards : new Map((await buildMetricCards(ctx, linked)).map((c) => [c.id, c]));
     out.push({
       ...base,
-      scopeName: unitName ? `${company!.name} · ${unitName}` : company!.name,
+      scopeName: unitName ? `${company.name} · ${unitName}` : company.name,
       chartId: chart.id,
-      findings: orgExpertFindings(
-        {
-          hasChart: true,
-          divisions: view.divisions.map((d) => ({ id: d.id, number: d.number, name: d.name, headPersonId: real(d.headPersonId) })),
-          departments: depts.map((d) => {
-            const card = d.metricDefinitionId ? cards.get(d.metricDefinitionId) : undefined;
-            return {
-              id: d.id,
-              number: d.number,
-              name: d.name,
-              headPersonId: real(d.headPersonId),
-              ckp: d.ckp,
-              statistic: d.statistic,
-              metric: card ? { label: card.label, freshness: card.freshness.status } : null,
-              overdueTasks: d.overdueTasks,
-            };
-          }),
-          functions: depts.flatMap((d) => d.functions.map((f) => ({ id: f.id, text: f.text, responsiblePersonId: real(f.responsiblePersonId) }))),
-          personNames,
-        },
-        opts,
-      ),
+      findings: findingsForView(view, cards, active, opts),
     });
   }
   return out;
+}
+
+/** The expert's rules over one loaded chart (pure: no reads). */
+function findingsForView(view: OrgChartView, cards: Map<string, MetricCard>, active: Map<string, string>, opts: OrgExpertOptions): OrgFinding[] {
+  const real = (id: string | null) => (id && active.has(id) ? id : null);
+  const depts = view.divisions.flatMap((d) => d.departments);
+  const personNames: Record<string, string> = Object.fromEntries(active);
+  return orgExpertFindings(
+    {
+      hasChart: true,
+      divisions: view.divisions.map((d) => ({ id: d.id, number: d.number, name: d.name, headPersonId: real(d.headPersonId) })),
+      departments: depts.map((d) => {
+        const card = d.metricDefinitionId ? cards.get(d.metricDefinitionId) : undefined;
+        return {
+          id: d.id,
+          number: d.number,
+          name: d.name,
+          headPersonId: real(d.headPersonId),
+          ckp: d.ckp,
+          statistic: d.statistic,
+          metric: card ? { label: card.label, freshness: card.freshness.status } : null,
+          overdueTasks: d.overdueTasks,
+        };
+      }),
+      functions: depts.flatMap((d) => d.functions.map((f) => ({ id: f.id, text: f.text, responsiblePersonId: real(f.responsiblePersonId) }))),
+      personNames,
+    },
+    opts,
+  );
 }
 
 // ---------------------------------------------------------------------------

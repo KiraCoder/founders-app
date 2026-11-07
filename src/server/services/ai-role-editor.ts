@@ -1,6 +1,6 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
-import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   CHECK_CATALOGUE,
   ChecksError,
@@ -57,6 +57,8 @@ function changedFields(before: Record<string, unknown> | null, after: Record<str
   return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter((k) => a[k] !== b[k]).sort();
 }
 
+type LogRow = { log: typeof aiRoleSettingsLog.$inferSelect; byName: string | null };
+
 async function versions(ctx: ServiceContext, scopeKey: string, limit = 30): Promise<SettingsVersion[]> {
   const rows = await ctx.db
     .select({ log: aiRoleSettingsLog, byName: users.shortName })
@@ -65,7 +67,53 @@ async function versions(ctx: ServiceContext, scopeKey: string, limit = 30): Prom
     .where(eq(aiRoleSettingsLog.scopeKey, scopeKey))
     .orderBy(desc(aiRoleSettingsLog.version))
     .limit(limit);
-  return rows.map(({ log, byName }) => ({
+  return rows.map(toVersion);
+}
+
+/**
+ * The settings history of many roles and hires with ONE read (the AI roles page): newest first,
+ * at most `limit` versions each. Roles must come from `listRoles` and hires from `listHires`
+ * (both already access-checked); a custom role still follows its company rule.
+ */
+export async function settingsVersionsFor(
+  ctx: ServiceContext,
+  targets: { roles: readonly Pick<ResolvedRole, "key" | "companyId">[]; hireIds: readonly string[] },
+  limit = 30,
+): Promise<{ roles: Map<string, SettingsVersion[]>; hires: Map<string, SettingsVersion[]> }> {
+  assertAiRolesAccess(ctx);
+  for (const r of targets.roles) if (r.companyId) await assertCompanyAccess(ctx, r.companyId);
+  const keys = [...targets.roles.map((r) => `role:${r.key}`), ...targets.hireIds.map((id) => `hire:${id}`)];
+  const ranked = ctx.db
+    .select({
+      id: aiRoleSettingsLog.id,
+      rn: sql<number>`row_number() over (partition by ${aiRoleSettingsLog.scopeKey} order by ${aiRoleSettingsLog.version} desc)`.as("rn"),
+    })
+    .from(aiRoleSettingsLog)
+    .where(inArray(aiRoleSettingsLog.scopeKey, keys.length ? keys : [""]))
+    .as("ranked");
+  const rows: LogRow[] = keys.length
+    ? await ctx.db
+        .select({ log: aiRoleSettingsLog, byName: users.shortName })
+        .from(aiRoleSettingsLog)
+        .innerJoin(ranked, eq(ranked.id, aiRoleSettingsLog.id))
+        .leftJoin(users, eq(users.id, aiRoleSettingsLog.changedBy))
+        .where(sql`${ranked.rn} <= ${limit}`)
+    : [];
+  const byScope = new Map<string, LogRow[]>();
+  for (const r of rows) {
+    const list = byScope.get(r.log.scopeKey) ?? [];
+    list.push(r);
+    byScope.set(r.log.scopeKey, list);
+  }
+  const of = (scopeKey: string) => (byScope.get(scopeKey) ?? []).sort((a, b) => b.log.version - a.log.version).map(toVersion);
+  return {
+    roles: new Map(targets.roles.map((r) => [r.key, of(`role:${r.key}`)])),
+    hires: new Map(targets.hireIds.map((id) => [id, of(`hire:${id}`)])),
+  };
+}
+
+function toVersion({ log, byName }: LogRow): SettingsVersion {
+  return {
     version: log.version,
     action: log.action as SettingsVersion["action"],
     revertedTo: log.revertedTo,
@@ -74,7 +122,7 @@ async function versions(ctx: ServiceContext, scopeKey: string, limit = 30): Prom
     before: log.before ?? null,
     after: log.after,
     changed: changedFields(log.before ?? null, log.after),
-  }));
+  };
 }
 
 /** A role's settings history, newest first. */

@@ -10,7 +10,8 @@ import { consumeLinkCode, createLinkCode } from "@/server/notifications/linking"
 import { planTick } from "@/server/notifications/planner";
 import type { NeutralMessage, NotificationChannel } from "@/server/notifications/types";
 import { hireRole, runHireNow, updateHire } from "@/server/services/ai-roles";
-import { applyVysotskyTemplate, getOrgChart, orgExpertForCompany, updateDepartment } from "@/server/services/org";
+import { buildMetricCards, listMetricDefinitions } from "@/server/services/metrics";
+import { applyVysotskyTemplate, getOrgChart, orgExpertForCompany, orgPeopleOptions, updateDepartment } from "@/server/services/org";
 import { createTask } from "@/server/services/tasks";
 import { createTestDb, type TestDb } from "../helpers/db";
 
@@ -72,6 +73,21 @@ describe("Org Structure Expert", () => {
     // Tuned limit: 5 departments are fine with a limit of 5.
     const [tuned] = await orgExpertForCompany(ctx, kiwi, { maxDepartmentsPerHead: 5 });
     expect(tuned!.findings.some((f) => f.rule === "head_overloaded")).toBe(false);
+
+    // The org board hands over what it already loaded (archived rows included): same findings.
+    const board = (await getOrgChart(ctx, { companyId: kiwi, companyUnitId: null }, { includeArchived: true }))!;
+    const metricDefs = await listMetricDefinitions(ctx, kiwi);
+    const linked = metricDefs.filter((m) => board.divisions.flatMap((x) => [...x.departments, ...x.archivedDepartments]).some((x) => x.metricDefinitionId === m.id));
+    const cards = new Map((await buildMetricCards(ctx, linked)).map((c) => [c.id, c]));
+    const [pre] = await orgExpertForCompany(ctx, kiwi, {}, {
+      company: { slug: "kiwi-go", name: "Kiwi Go" },
+      metricDefs,
+      people: await orgPeopleOptions(ctx, kiwi),
+      views: new Map([[board.id, board]]),
+      cards,
+      onlyChartId: board.id,
+    });
+    expect(pre).toEqual(res);
   });
 
   it("is hireable without numbers; has no monthly runs and no Run now", async () => {

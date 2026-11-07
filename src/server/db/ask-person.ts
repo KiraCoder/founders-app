@@ -6,6 +6,7 @@
  * No "server-only": the seed uses `defaultAskPersonId` too.
  */
 import { and, eq, isNull } from "drizzle-orm";
+import { cache } from "react";
 import type { Db } from "./connect";
 import { holdingAskOverrides, people, personCompanies } from "./schema";
 
@@ -103,14 +104,24 @@ export interface AskPeopleIndex {
  * Loads people, their active company links and (with `roundKey` = "YYYY-MM") that round's
  * overrides. People who left, inactive links and app users (the founders) are not eligible.
  */
-export async function loadAskPeople(db: Db, roundKey: string | null): Promise<AskPeopleIndex> {
-  const [rows, links, overrides] = await Promise.all([
+/**
+ * People and their active links, once per request (React `cache`, same db handle): the holding
+ * page builds the index three times (flows, contracts, the grid). Outside a render every call reads.
+ */
+const askPeopleRows = cache(async (db: Db) =>
+  Promise.all([
     db.select({ id: people.id, fullName: people.fullName, shortName: people.shortName, leftAt: people.leftAt, userId: people.userId }).from(people),
     db
       .select({ personId: personCompanies.personId, companyId: personCompanies.companyId, role: personCompanies.role, title: personCompanies.title })
       .from(personCompanies)
       .innerJoin(people, eq(people.id, personCompanies.personId))
       .where(and(eq(personCompanies.isActive, true), isNull(people.leftAt), isNull(people.userId))),
+  ]),
+);
+
+export async function loadAskPeople(db: Db, roundKey: string | null): Promise<AskPeopleIndex> {
+  const [[rows, links], overrides] = await Promise.all([
+    askPeopleRows(db),
     roundKey
       ? db.select({ flowId: holdingAskOverrides.flowId, personId: holdingAskOverrides.personId }).from(holdingAskOverrides).where(eq(holdingAskOverrides.roundKey, roundKey))
       : Promise.resolve([] as { flowId: string; personId: string }[]),

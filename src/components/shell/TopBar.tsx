@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 import { Icon } from "@/components/Icon";
@@ -27,8 +27,12 @@ const RUN_LABEL: Record<string, string> = {
   failed: "Failed",
 };
 
-/** Hired AI roles in the agent panel: this company's first (on a company page), then the rest. */
-function AgentHires({ hires, onNavigate }: { hires: AgentHire[]; onNavigate: () => void }) {
+/**
+ * Hired AI roles in the agent panel: this company's first (on a company page), then the rest.
+ * `hires` is streamed from the layout (a promise): the shell never waits for it.
+ */
+function AgentHires({ hires: pending, onNavigate }: { hires: Promise<AgentHire[]>; onNavigate: () => void }) {
+  const hires = use(pending);
   const pathname = usePathname();
   const slug = /^\/companies\/([^/?#]+)/.exec(pathname)?.[1] ?? null;
   const here = slug ? hires.filter((h) => h.companySlug === slug) : [];
@@ -71,7 +75,9 @@ function AgentHires({ hires, onNavigate }: { hires: AgentHire[]; onNavigate: () 
   );
 }
 
-export function TopBar({ user, agentHires = [] }: { user: { name: string; shortName: string; email: string }; agentHires?: AgentHire[] }) {
+const NO_HIRES: Promise<AgentHire[]> = Promise.resolve([]);
+
+export function TopBar({ user, agentHires = NO_HIRES }: { user: { name: string; shortName: string; email: string }; agentHires?: Promise<AgentHire[]> }) {
   const [agentOpen, setAgentOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -183,7 +189,9 @@ export function TopBar({ user, agentHires = [] }: { user: { name: string; shortN
           </button>
         </div>
         <div className="flex-1 overflow-y-auto">
-          <AgentHires hires={agentHires} onNavigate={() => setAgentOpen(false)} />
+          <Suspense fallback={<p className="p-4 text-[13px] text-muted">Loading AI roles…</p>}>
+            <AgentHires hires={agentHires} onNavigate={() => setAgentOpen(false)} />
+          </Suspense>
           <div className="mx-4 mb-4 flex flex-col gap-1.5 rounded-[10px] border border-line bg-sunk p-3 text-[12px]">
             <p className="text-muted">Ask the AI assistant about tasks, people and routines, or have it prepare changes for you to confirm.</p>
             <button
