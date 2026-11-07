@@ -446,7 +446,7 @@ everyone**. Every timing is a setting — global default → per person → per 
 | --- | --- | --- |
 | Quiet hours | 21:00–08:00 | nothing is sent; messages wait until they end |
 | Chase hours | 09:00–20:00 | reminders only inside these hours |
-| Chase every | 120 min | one reminder per task per slot (slots counted from the start of chase hours) |
+| Chase every | 120 min | one reminder message per person per slot (slots counted from the start of chase hours), listing every task due a chase |
 | Max messages per day | 12 | per person; over it a reminder is dropped (the next slot asks again), a new-task message waits for tomorrow |
 | Tell the founder after | 3 unanswered reminders | the task's founder gets a push "Edil hasn't confirmed …"; reminders stop until the person answers (0 = never) |
 | Tell the founder if still open at | off | e.g. 18:00 on the due day or later: a heads-up push, reminders go on |
@@ -460,7 +460,13 @@ so they do not use the founders' 3-per-day budget. Stored in `app_settings`
 `messages-ru.ts`), for open **shared** tasks assigned to them:
 - **New task** (once, on the next tick; only tasks assigned after the switch-on, within 3 days):
   «Новая задача: … · Срок: 12.11 · Компания: …» with **Принято / Готово / Нужна помощь / Перенести срок**.
-- **Reminders** on the due day and every day after, per the cadence above, until done or escalated.
+- **Reminders** on the due day and every day after, per the cadence above, until done or escalated:
+  **one message per slot**, whatever the number of tasks — one task is «Напоминание: …», several are a
+  numbered list with a button row per task (*1 · Готово / 1 · Помощь / 1 · Срок*, at most 8, then
+  «…и ещё N — /tasks»). So 8 overdue tasks are 1 message every 2 hours, and the daily cap lasts the
+  whole day. No reminder in the slot in which the person was switched on (no burst on switch-on).
+  After *Tell the founder after* silent reminders the founder is told; once the person answers and
+  then goes quiet again for that many reminders, the founder is told again.
 - **Morning list** when switched on for them.
 - An info line when a founder approves or declines their deadline request.
 
@@ -478,6 +484,16 @@ founder's token does nothing):
 - **Photos / voice / files** → «Пока принимаю только текст»; nothing is stored, the founders get a line.
 - Commands: `/tasks` (numbered, with Готово buttons), `/done N`, `/help`, `/stop` (no more messages;
   founders get a line; `/start` turns it back on).
+
+A person's update about a task (done, help, a deadline request, an escalation) is **not** the
+founder's "one push per task per day": a help push at 10:00 does not cancel the founder's own 12:00
+due-today nudge for that task (it still uses the founder's daily budget). The founder's own Snooze /
+Done / +N day never cancels a person's waiting help or deadline-request push, and a deadline request
+decided on the task page disappears from the next summary.
+
+**Dev inbox:** *Run tick now* / *Simulate morning* run the founders' reminders only (never staff).
+*Simulate staff tick* runs staff reminders and routines at the real current time into the dev inbox;
+it is off while a Telegram bot token is set (real people are then messaged by the real clock only).
 
 **Founders' side:** the task page (`/tasks/<id>`, the task title in any list) shows the comment
 thread (founders add, edit and delete their own comments), pending deadline requests with

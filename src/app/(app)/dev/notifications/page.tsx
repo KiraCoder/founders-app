@@ -7,7 +7,7 @@ import { actionKey, KIND_LABELS, type ActionCallbacks, type NeutralMessage, type
 import { canManageStaffBot } from "@/server/services/access";
 import { listRecentStaffMessages } from "@/server/services/staff";
 import { getMyTelegramLink, listMyNotifications } from "@/server/services/notifications";
-import { runTickAction } from "./actions";
+import { runStaffTickAction, runTickAction } from "./actions";
 
 export const metadata = { title: "Dev inbox" };
 export const dynamic = "force-dynamic";
@@ -149,9 +149,23 @@ export default async function DevNotificationsPage() {
         </ul>
       )}
       <section className="mt-8" aria-labelledby="team-messages-heading">
-        <h2 id="team-messages-heading" className="eyebrow mb-2">
-          Team messages (staff on Telegram, in Russian)
-        </h2>
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <h2 id="team-messages-heading" className="eyebrow">
+            Team messages (staff on Telegram, in Russian)
+          </h2>
+          {canManageStaffBot(ctx) && !telegramBotToken() && (
+            <form action={runStaffTickAction} className="ml-auto">
+              <button type="submit" className="btn btn-sm">
+                Simulate staff tick
+              </button>
+            </form>
+          )}
+        </div>
+        <p className="mb-2 text-[12px] text-muted">
+          {telegramBotToken()
+            ? "A Telegram bot token is set: staff messages go out with the real reminder clock only (the simulation is off, so real people's slots and daily caps are never used up here)."
+            : "“Simulate staff tick” runs the staff reminders and routines at the real current time into this inbox (the founders' buttons above never touch staff messages)."}
+        </p>
         {team.length === 0 ? (
           <EmptyState>No staff messages yet. Invite someone in Settings → Team on Telegram.</EmptyState>
         ) : (

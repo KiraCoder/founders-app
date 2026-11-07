@@ -172,6 +172,8 @@ export interface PersonPlanInput {
   tasks: StaffPlanTask[];
   /** Per task: chases sent for its current deadline since the person last answered on it. */
   unanswered: ReadonlyMap<string, number>;
+  /** Per task: when the person last answered on it (any button or reply), if ever. */
+  answeredAt?: ReadonlyMap<string, Date>;
 }
 
 export interface StaffEscalation {
@@ -181,6 +183,8 @@ export interface StaffEscalation {
   dueDate: IsoDate;
   reason: "count" | "time";
   chases: number;
+  /** The person's last answer on the task (part of the dedupe key: going quiet again escalates again). */
+  answeredAt: Date | null;
 }
 
 export interface PersonPlan {
@@ -188,18 +192,33 @@ export interface PersonPlan {
   escalations: StaffEscalation[];
 }
 
+/** One task inside a grouped staff chase (payload.tasks of a `staff_chase` row). */
+export interface StaffChaseEntry {
+  id: string;
+  dueDate: IsoDate;
+  /** Start of this task's own chase slot (its cadence may differ from the person's). */
+  slotStart: string;
+}
+
+const hmOf = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+
 /**
  * Staff plan for one person (pure):
  * - **New task**: once (`new:<task>`), right away, for tasks assigned after the bot was switched on
  *   and within STAFF_NEW_TASK_MAX_AGE_DAYS.
- * - **Chase**: on the due day and every day after, inside working hours, one per task per slot of
- *   `chaseEveryMinutes` counted from `workStart` (`chase:<task>:<day>:<slot>`, expires at the
- *   slot's end so missed slots never pile up). Stops when the task is done or after
+ * - **Chase**: on the due day and every day after, inside working hours, per slot of
+ *   `chaseEveryMinutes` counted from `workStart`. ONE grouped message per person per slot
+ *   (`chase:<day>:<HH:MM slot start>`) lists every task due a chase in that slot, with buttons per
+ *   task — never one message per task (a person with 8 overdue tasks gets 1 message, not 8, so the
+ *   daily cap lasts all day). Tasks with their own cadence join the group of their slot start.
+ *   It expires at the slot's end so missed slots never pile up. No chase in the slot in which the
+ *   person was switched on (no burst on switch-on). A task stops being chased after
  *   `escalateAfterChases` chases without an answer (the founder is told; any answer resumes it).
- * - **Escalation** to the task's founder: after N unanswered chases, or (heads-up only, chasing goes
- *   on) when still open at `escalateAt` on the due day or later. Once per deadline and reason.
+ * - **Escalation** to the task's founder: after N unanswered chases (again after each new
+ *   answer + N more unanswered chases), or (heads-up only, chasing goes on) when still open at
+ *   `escalateAt` on the due day or later (once per deadline).
  * - **Morning list** of their open tasks when switched on (`list:<day>`).
- * Quiet hours, the daily cap and "one push per task per slot" are the dispatcher's.
+ * Quiet hours, the daily cap and "one chase per task per slot" are the dispatcher's.
  */
 export function planForPerson(input: PersonPlanInput): PersonPlan {
   const { personId, now, timeZone: tz, settings: s } = input;
@@ -210,6 +229,8 @@ export function planForPerson(input: PersonPlanInput): PersonPlan {
   const workEnd = hmToMinutes(s.workEnd);
   const messages: PersonEnqueueInput[] = [];
   const escalations: StaffEscalation[] = [];
+  /** slot start (minutes) → tasks due a chase in it, and the latest slot end among them. */
+  const groups = new Map<number, { entries: StaffChaseEntry[]; end: number }>();
 
   for (const t of input.tasks) {
     if (
@@ -230,27 +251,34 @@ export function planForPerson(input: PersonPlanInput): PersonPlan {
     if (!t.dueDate || t.dueDate > today) continue;
     const c = taskChaseSettings(s, t.override);
     const sent = input.unanswered.get(t.id) ?? 0;
+    const answeredAt = input.answeredAt?.get(t.id) ?? null;
     const byCount = c.escalateAfterChases > 0 && sent >= c.escalateAfterChases;
-    if (byCount) {
-      escalations.push({ taskId: t.id, ownerUserId: t.ownerUserId, title: t.title, dueDate: t.dueDate, reason: "count", chases: sent });
-    }
-    if (c.escalateAt && minutes >= hmToMinutes(c.escalateAt)) {
-      escalations.push({ taskId: t.id, ownerUserId: t.ownerUserId, title: t.title, dueDate: t.dueDate, reason: "time", chases: sent });
-    }
+    const base = { taskId: t.id, ownerUserId: t.ownerUserId, title: t.title, dueDate: t.dueDate, chases: sent, answeredAt };
+    if (byCount) escalations.push({ ...base, reason: "count" });
+    if (c.escalateAt && minutes >= hmToMinutes(c.escalateAt)) escalations.push({ ...base, reason: "time" });
     if (!c.chaseEnabled || byCount || minutes < workStart || minutes >= workEnd) continue;
     const slot = Math.floor((minutes - workStart) / c.chaseEveryMinutes);
     const slotStart = workStart + slot * c.chaseEveryMinutes;
     const slotEnd = Math.min(slotStart + c.chaseEveryMinutes, workEnd);
-    const hm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+    const slotStartAt = zonedTimeToUtc(today, hmOf(slotStart), tz);
+    // Switched on during this slot: the first chase waits for the next slot.
+    if (input.enabledAt && input.enabledAt.getTime() >= slotStartAt.getTime()) continue;
+    const g = groups.get(slotStart) ?? { entries: [], end: slotEnd };
+    g.entries.push({ id: t.id, dueDate: t.dueDate, slotStart: slotStartAt.toISOString() });
+    g.end = Math.max(g.end, slotEnd);
+    groups.set(slotStart, g);
+  }
+
+  for (const [slotStart, g] of [...groups.entries()].sort((a, b) => a[0] - b[0])) {
     messages.push({
       personId,
       kind: "staff_chase",
-      taskId: t.id,
-      dedupeKey: `chase:${t.id}:${today}:${slot}`,
-      scheduledFor: zonedTimeToUtc(today, hm(slotStart), tz),
-      expiresAt: slotEnd >= 24 * 60 ? endOfDay : zonedTimeToUtc(today, hm(slotEnd), tz),
+      taskId: null,
+      dedupeKey: `chase:${today}:${hmOf(slotStart)}`,
+      scheduledFor: zonedTimeToUtc(today, hmOf(slotStart), tz),
+      expiresAt: g.end >= 24 * 60 ? endOfDay : zonedTimeToUtc(today, hmOf(g.end), tz),
       priority: "normal",
-      payload: { dueDate: t.dueDate, slot, daysOverdue: daysBetween(t.dueDate, today), slotStart: zonedTimeToUtc(today, hm(slotStart), tz).toISOString() },
+      payload: { day: today, slotStart: zonedTimeToUtc(today, hmOf(slotStart), tz).toISOString(), tasks: g.entries },
     });
   }
 
@@ -267,6 +295,19 @@ export function planForPerson(input: PersonPlanInput): PersonPlan {
     });
   }
   return { messages, escalations };
+}
+
+/** The tasks a sent staff chase listed (grouped rows: payload.listed; rows from before the grouping: taskId). */
+export function listedInChase(row: { taskId: string | null; payload: unknown }): { id: string; dueDate: string | null }[] {
+  const p = (row.payload ?? {}) as { listed?: { id: string; dueDate: string | null }[]; dueDate?: string };
+  if (Array.isArray(p.listed)) return p.listed;
+  return row.taskId ? [{ id: row.taskId, dueDate: p.dueDate ?? null }] : [];
+}
+
+/** Escalation dedupe key. "count" includes the last answer: after an answer, N more silent chases escalate again. */
+export function escalationKey(e: StaffEscalation): string {
+  if (e.reason === "time") return `esc:${e.taskId}:${e.dueDate}:time`;
+  return `esc:${e.taskId}:${e.dueDate}:count:${e.answeredAt ? e.answeredAt.toISOString() : "never"}`;
 }
 
 /** Line (and push) to the task's founder when a person does not react. */
@@ -336,7 +377,6 @@ export async function planStaffTick(db: Db, now: Date, timeZone: string): Promis
             eq(notificationsOutbox.personId, person.id),
             eq(notificationsOutbox.kind, "staff_chase"),
             eq(notificationsOutbox.status, "sent"),
-            inArray(notificationsOutbox.taskId, ids),
             isNotNull(notificationsOutbox.sentAt),
           ),
         ),
@@ -346,11 +386,12 @@ export async function planStaffTick(db: Db, now: Date, timeZone: string): Promis
     const dueOf = new Map(open.map((t) => [t.id, t.dueDate]));
     const unanswered = new Map<string, number>();
     for (const c of chases) {
-      const due = (c.payload as { dueDate?: string }).dueDate;
-      if (!c.taskId || due !== dueOf.get(c.taskId)) continue;
-      const reply = lastReply.get(c.taskId);
-      if (reply && c.sentAt!.getTime() <= reply.getTime()) continue;
-      unanswered.set(c.taskId, (unanswered.get(c.taskId) ?? 0) + 1);
+      for (const entry of listedInChase(c)) {
+        if (!dueOf.has(entry.id) || entry.dueDate !== dueOf.get(entry.id)) continue;
+        const reply = lastReply.get(entry.id);
+        if (reply && c.sentAt!.getTime() <= reply.getTime()) continue;
+        unanswered.set(entry.id, (unanswered.get(entry.id) ?? 0) + 1);
+      }
     }
     const name = person.shortName || person.fullName;
     const plan = planForPerson({
@@ -369,10 +410,24 @@ export async function planStaffTick(db: Db, now: Date, timeZone: string): Promis
         override: parseTaskOverride(t.staffChase),
       })),
       unanswered,
+      answeredAt: lastReply,
     });
     for (const m of plan.messages) {
       out.planned++;
       if ((await enqueueForPerson(db, m)).created) out.created++;
+      else if (m.kind === "staff_chase") {
+        // Same slot, planned again: a task that became due later in the slot joins the waiting message.
+        await db
+          .update(notificationsOutbox)
+          .set({ payload: m.payload ?? {}, expiresAt: m.expiresAt ?? null })
+          .where(
+            and(
+              eq(notificationsOutbox.personId, person.id),
+              eq(notificationsOutbox.dedupeKey, m.dedupeKey),
+              eq(notificationsOutbox.status, "pending"),
+            ),
+          );
+      }
     }
     for (const e of plan.escalations) {
       const note = escalationNote(e, name);
@@ -380,7 +435,7 @@ export async function planStaffTick(db: Db, now: Date, timeZone: string): Promis
         userIds: [e.ownerUserId],
         line: note.line,
         taskId: e.taskId,
-        dedupeKey: `esc:${e.taskId}:${e.dueDate}:${e.reason}`,
+        dedupeKey: escalationKey(e),
         now,
         push: { priority: "high", message: note.message },
       });

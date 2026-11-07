@@ -41,16 +41,17 @@ describe("planForPerson", () => {
   it("chases on the due day inside working hours, one key per 120-minute slot", () => {
     expect(plan(at(D, "08:59"), [task()]).messages).toHaveLength(0);
     const m9 = plan(at(D, "09:00"), [task()]).messages;
-    expect(m9.map((m) => m.dedupeKey)).toEqual([`chase:t1:${D}:0`]);
+    expect(m9.map((m) => m.dedupeKey)).toEqual([`chase:${D}:09:00`]);
+    expect(m9[0]!.payload).toMatchObject({ tasks: [{ id: "t1", dueDate: D }] });
     expect(m9[0]!.expiresAt!.toISOString()).toBe(at(D, "11:00").toISOString());
-    expect(plan(at(D, "10:59"), [task()]).messages[0]!.dedupeKey).toBe(`chase:t1:${D}:0`);
-    expect(plan(at(D, "19:30"), [task()]).messages[0]!.dedupeKey).toBe(`chase:t1:${D}:5`);
+    expect(plan(at(D, "10:59"), [task()]).messages[0]!.dedupeKey).toBe(`chase:${D}:09:00`);
+    expect(plan(at(D, "19:30"), [task()]).messages[0]!.dedupeKey).toBe(`chase:${D}:19:00`);
     // The last slot is cut at the end of working hours.
     expect(plan(at(D, "19:30"), [task()]).messages[0]!.expiresAt!.toISOString()).toBe(at(D, "20:00").toISOString());
     expect(plan(at(D, "20:00"), [task()]).messages).toHaveLength(0);
     // Not before the due day; every day after it.
     expect(plan(at(D, "10:00"), [task({ dueDate: "2026-11-03" })]).messages).toHaveLength(0);
-    expect(plan(at("2026-11-09", "13:00"), [task()]).messages[0]!.payload).toMatchObject({ daysOverdue: 7, dueDate: D });
+    expect(plan(at("2026-11-09", "13:00"), [task()]).messages[0]!.payload).toMatchObject({ day: "2026-11-09", tasks: [{ id: "t1", dueDate: D }] });
   });
 
   it("new-task message once, only for tasks assigned after the switch-on and recently", () => {
@@ -72,7 +73,7 @@ describe("planForPerson", () => {
 
   it("per-task override: chasing off or another cadence", () => {
     expect(plan(at(D, "10:00"), [task({ override: { chaseEnabled: false } })]).messages).toHaveLength(0);
-    expect(plan(at(D, "10:00"), [task({ override: { chaseEveryMinutes: 30 } })]).messages[0]!.dedupeKey).toBe(`chase:t1:${D}:2`);
+    expect(plan(at(D, "10:00"), [task({ override: { chaseEveryMinutes: 30 } })]).messages[0]!.dedupeKey).toBe(`chase:${D}:10:00`);
   });
 
   it("morning list only when switched on", () => {
@@ -80,6 +81,37 @@ describe("planForPerson", () => {
     expect(plan(at(D, "09:00"), [later]).messages).toHaveLength(0);
     const on = plan(at(D, "09:00"), [later], { settings: { ...DEFAULT_STAFF_SETTINGS, morningList: true } }).messages;
     expect(on.map((m) => m.dedupeKey)).toEqual([`list:${D}`]);
+  });
+});
+
+describe("planForPerson: grouped chase (review A, E)", () => {
+  it("8 overdue tasks → ONE chase per slot listing all of them; none in the slot of the switch-on", () => {
+    const eight = Array.from({ length: 8 }, (_, i) => task({ id: `t${i}`, dueDate: "2026-10-28" }));
+    const m = plan(at(D, "09:10"), eight).messages.filter((x) => x.kind === "staff_chase");
+    expect(m).toHaveLength(1);
+    expect((m[0]!.payload as { tasks: unknown[] }).tasks).toHaveLength(8);
+    // Switched on at 09:05 → nothing in the 09:00 slot, the 11:00 slot chases.
+    expect(plan(at(D, "09:10"), eight, { enabledAt: at(D, "09:05") }).messages.filter((x) => x.kind === "staff_chase")).toHaveLength(0);
+    expect(plan(at(D, "11:00"), eight, { enabledAt: at(D, "09:05") }).messages.filter((x) => x.kind === "staff_chase")).toHaveLength(1);
+  });
+
+  it("a task with its own cadence joins the group of its slot start", () => {
+    const p = plan(at(D, "10:00"), [task(), task({ id: "t2", override: { chaseEveryMinutes: 60 } })]).messages;
+    expect(p.map((m) => m.dedupeKey).sort()).toEqual([`chase:${D}:09:00`, `chase:${D}:10:00`]);
+    const p11 = plan(at(D, "11:00"), [task(), task({ id: "t2", override: { chaseEveryMinutes: 60 } })]).messages;
+    expect(p11.map((m) => m.dedupeKey)).toEqual([`chase:${D}:11:00`]);
+    expect((p11[0]!.payload as { tasks: unknown[] }).tasks).toHaveLength(2);
+  });
+
+  it("escalation by count is keyed by the last answer, so going quiet again escalates again", async () => {
+    const { escalationKey } = await import("@/server/notifications/planner");
+    const first = plan(at(D, "13:00"), [task()], { unanswered: new Map([["t1", 3]]) }).escalations[0]!;
+    const again = plan(at(D, "17:00"), [task()], {
+      unanswered: new Map([["t1", 3]]),
+      answeredAt: new Map([["t1", at(D, "13:30")]]),
+    }).escalations[0]!;
+    expect(escalationKey(first)).toBe(`esc:t1:${D}:count:never`);
+    expect(escalationKey(again)).not.toBe(escalationKey(first));
   });
 });
 

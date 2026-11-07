@@ -390,7 +390,7 @@ describe("task messages to staff", () => {
     // Daily cap: global max 2 per day for everyone.
     await updateStaffDefaults(t.ctx("nuraaly"), { ...DEFAULT_STAFF_SETTINGS, maxPerDay: 2 });
     expect((await tick(local(D, "12:00"))).sent.filter((s) => s.personId)).toHaveLength(0);
-    const capped = (await personRows(edil)).find((r) => r.dedupeKey === `chase:${a.id}:${D}:2`);
+    const capped = (await personRows(edil)).find((r) => r.dedupeKey === `chase:${D}:12:00`);
     expect(capped).toMatchObject({ status: "cancelled", lastError: "daily_cap_full" });
   });
 

@@ -82,6 +82,8 @@ async function logReply(pctx: PersonContext, t: Task, value: Record<string, unkn
     kind: "staff_reply",
     field: "telegram",
     newValue: value,
+    // The context clock (= the real time in production): the planner compares answers with chases.
+    createdAt: pctx.now,
   });
 }
 
@@ -119,6 +121,7 @@ export async function personMarkDone(pctx: PersonContext, taskId: string): Promi
       field: "status",
       oldValue: task.status,
       newValue: "done",
+      createdAt: pctx.now,
     });
   });
   await cancelPersonPending(pctx, task.id, "task_closed");

@@ -1,5 +1,5 @@
 import "server-only";
-import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, people, users, type NotificationPriority } from "@/server/db/schema";
 import type { NotificationKind, PersonKind } from "./types";
@@ -134,6 +134,8 @@ export async function scheduleTaskReminder(
 /**
  * Cancels everything still waiting for one user + task (after done / snooze / deadline
  * move): pending, held as not linked, and parked items not yet listed in a summary.
+ * Never a `staff_update` (a person's help request, comment or deadline request about the task):
+ * the founder's own Snooze / Done / +N day is no answer to it.
  */
 export async function cancelPendingForTask(db: Db, userId: string, taskId: string, reason: string): Promise<number> {
   const rows = await db
@@ -143,6 +145,7 @@ export async function cancelPendingForTask(db: Db, userId: string, taskId: strin
       and(
         eq(notificationsOutbox.userId, userId),
         eq(notificationsOutbox.taskId, taskId),
+        ne(notificationsOutbox.kind, "staff_update"),
         or(
           inArray(notificationsOutbox.status, ["pending", "not_linked"]),
           and(eq(notificationsOutbox.status, "parked"), isNull(notificationsOutbox.bundledIntoId)),

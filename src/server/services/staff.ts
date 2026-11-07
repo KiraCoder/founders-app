@@ -209,7 +209,7 @@ async function cancelPersonQueue(db: Db, personId: string, reason: string) {
   await db
     .update(notificationsOutbox)
     .set({ status: "cancelled", lastError: reason, nextAttemptAt: null })
-    .where(and(eq(notificationsOutbox.personId, personId), inArray(notificationsOutbox.status, ["pending", "not_linked"])));
+    .where(and(eq(notificationsOutbox.personId, personId), inArray(notificationsOutbox.status, ["pending", "not_linked", "parked"])));
 }
 
 /** What the bot sent (or tried to) to this person, newest first. */

@@ -5,7 +5,7 @@
 import { daysBetween, type IsoDate } from "@/lib/dates";
 import { renderedLineLength, renderTelegramTitleLength } from "./render-telegram";
 import { SUMMARY_TEXT_BUDGET } from "./messages";
-import type { MessageAction, MessageLine, NeutralMessage, StaffAction } from "./types";
+import { taskRef, type MessageAction, type MessageLine, type NeutralMessage, type StaffAction } from "./types";
 
 /** What a staff message shows about a task: nothing private (no notes, no owner, no other people). */
 export interface StaffTaskLite {
@@ -85,6 +85,44 @@ export function buildStaffChase(t: StaffTaskLite, today: IsoDate): NeutralMessag
     ],
     actions: staffTaskButtons(t.id, false),
   };
+}
+
+/** At most this many tasks (with buttons) in one grouped staff chase; the rest: «…и ещё N — /tasks». */
+export const MAX_STAFF_GROUPED_TASKS = 8;
+
+/**
+ * Grouped chase (one message per person per slot): one task → the single-task reminder; several →
+ * a numbered list with a keyboard row per task («1 · Готово», «1 · Помощь», «1 · Срок»). Lines are
+ * listed only while they fit Telegram's limit (the footer and «…и ещё N» always stay); a task not
+ * listed has no buttons and does not count as chased. `listed` = the ids in the message.
+ */
+export function buildStaffGroupedChase(tasks: readonly StaffTaskLite[], today: IsoDate): { message: NeutralMessage; listed: string[] } {
+  if (tasks.length === 1) return { message: buildStaffChase(tasks[0]!, today), listed: [tasks[0]!.id] };
+  const n = tasks.length;
+  const late = tasks.some((t) => t.dueDate && daysBetween(t.dueDate, today) > 0);
+  const title = late ? `Напоминание: ${n} задач(и) ждут ответа, есть просроченные` : `Напоминание: ${n} задач(и) на сегодня`;
+  const footer: MessageLine = { text: "Нажмите «Готово» у выполненной задачи. Нужна помощь или другой срок — кнопки ниже.", style: "muted" };
+  const more = (k: number): MessageLine => ({ text: `…и ещё ${k} — /tasks`, style: "muted" });
+  let left = SUMMARY_TEXT_BUDGET - renderTelegramTitleLength(title) - renderedLineLength(footer);
+  const lines: MessageLine[] = [];
+  const shown: StaffTaskLite[] = [];
+  for (const t of tasks.slice(0, MAX_STAFF_GROUPED_TASKS)) {
+    const line: MessageLine = { text: `${shown.length + 1}. ${t.title} — ${metaLine(t, today)}`, style: "text", refs: [taskRef(t.id)] };
+    const len = renderedLineLength(line);
+    const isLast = shown.length === n - 1;
+    if (len + (isLast ? 0 : renderedLineLength(more(n))) > left) break;
+    left -= len;
+    lines.push(line);
+    shown.push(t);
+  }
+  if (n > shown.length) lines.push(more(n - shown.length));
+  lines.push(footer);
+  const actions: MessageAction[] = shown.flatMap((t, i) => [
+    { action: "staff_done" as const, taskId: t.id, label: `${i + 1} · Готово`, row: i },
+    { action: "staff_help" as const, taskId: t.id, label: `${i + 1} · Помощь`, row: i },
+    { action: "staff_move" as const, taskId: t.id, label: `${i + 1} · Срок`, row: i },
+  ]);
+  return { message: { title, lines, actions }, listed: shown.map((t) => t.id) };
 }
 
 /** Numbered list of open tasks with one "N · Готово" button per task (the /tasks reply and the morning list). */

@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, isNotNull } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, or, sql } from "drizzle-orm";
 import { commentTextSchema } from "@/lib/staff-schemas";
 import {
   notificationsOutbox,
@@ -13,7 +13,7 @@ import {
 } from "@/server/db/schema";
 import { ruDate } from "@/server/notifications/messages-ru";
 import { enqueueForPerson } from "@/server/notifications/outbox";
-import { assertValidId } from "./access";
+import { assertStaffBotAccess, assertValidId } from "./access";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { changeTaskDeadline, getTask } from "./tasks";
@@ -109,19 +109,23 @@ export async function decideDeadlineRequest(
   requestId: string,
   approve: boolean,
 ): Promise<{ status: "approved" | "declined"; proposedDueDate: string; taskTitle: string }> {
+  assertStaffBotAccess(ctx);
   assertValidId(requestId, "Request");
   const [req] = await ctx.db.select().from(taskDeadlineRequests).where(eq(taskDeadlineRequests.id, requestId));
   if (!req) throw new ServiceError("not_found", "Request not found");
   const task = await getTask(ctx, req.taskId);
   if (req.status !== "pending") throw new ServiceError("conflict", `This request was already ${req.status}`);
   const status = approve ? "approved" : "declined";
-  const [claimed] = await ctx.db
-    .update(taskDeadlineRequests)
-    .set({ status, decidedByUserId: ctx.user.id, decidedAt: ctx.now })
-    .where(and(eq(taskDeadlineRequests.id, req.id), eq(taskDeadlineRequests.status, "pending")))
-    .returning({ id: taskDeadlineRequests.id });
-  if (!claimed) throw new ServiceError("conflict", "This request was already decided");
-  if (approve) await changeTaskDeadline(ctx, task.id, req.proposedDueDate);
+  // The decision and the deadline move succeed or fail together (never "approved" with the old deadline).
+  await ctx.db.transaction(async (tx) => {
+    const [claimed] = await tx
+      .update(taskDeadlineRequests)
+      .set({ status, decidedByUserId: ctx.user.id, decidedAt: ctx.now })
+      .where(and(eq(taskDeadlineRequests.id, req.id), eq(taskDeadlineRequests.status, "pending")))
+      .returning({ id: taskDeadlineRequests.id });
+    if (!claimed) throw new ServiceError("conflict", "This request was already decided");
+    if (approve) await changeTaskDeadline({ ...ctx, db: tx as unknown as ServiceContext["db"] }, task.id, req.proposedDueDate);
+  });
   await enqueueForPerson(ctx.db, {
     personId: req.personId,
     kind: "staff_info",
@@ -162,7 +166,17 @@ export async function getTaskStaffTrail(ctx: ServiceContext, taskId: string): Pr
       .select({ o: notificationsOutbox, name: people.fullName, short: people.shortName })
       .from(notificationsOutbox)
       .innerJoin(people, eq(people.id, notificationsOutbox.personId))
-      .where(and(eq(notificationsOutbox.taskId, taskId), eq(notificationsOutbox.status, "sent"))),
+      .where(
+        and(
+          isNotNull(notificationsOutbox.personId),
+          eq(notificationsOutbox.status, "sent"),
+          // A grouped chase lists several tasks (payload.listed).
+          or(
+            eq(notificationsOutbox.taskId, taskId),
+            sql`(${notificationsOutbox.payload} -> 'listed') @> ${JSON.stringify([{ id: taskId }])}::jsonb`,
+          ),
+        ),
+      ),
     ctx.db
       .select({ e: taskEvents, name: people.fullName, short: people.shortName })
       .from(taskEvents)

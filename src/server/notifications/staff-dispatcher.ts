@@ -1,5 +1,5 @@
 import "server-only";
-import { and, count, eq, gte, lt, ne, or } from "drizzle-orm";
+import { and, count, eq, gte, lt, ne, or, sql } from "drizzle-orm";
 import { addDays, isWithinWindow, todayInTimeZone, windowEndAfter, zonedTimeToUtc } from "@/lib/dates";
 import { effectiveStaffSettings, parsePersonOverride, parseTaskOverride, taskChaseSettings, type StaffSettings } from "@/lib/staff-schemas";
 import type { Db } from "@/server/db/connect";
@@ -9,9 +9,9 @@ import { loadStaffDefaults } from "@/server/services/staff";
 import { mintActionTokens } from "./action-tokens";
 import type { ChannelRegistry } from "./channels";
 import { getLinkForPerson } from "./linking";
-import { buildStaffChase, buildStaffInfo, buildStaffMorningList, buildStaffNewTask } from "./messages-ru";
+import { buildStaffGroupedChase, buildStaffInfo, buildStaffMorningList, buildStaffNewTask, type StaffTaskLite } from "./messages-ru";
 import { fitTelegram } from "./render-telegram";
-import type { NeutralMessage } from "./types";
+import { taskRef, type NeutralMessage } from "./types";
 
 type Finish = (set: Partial<typeof notificationsOutbox.$inferInsert>) => Promise<unknown>;
 
@@ -76,36 +76,17 @@ export async function processPersonItem(
   const pctx = personContext(db, person, now, tz);
   const today = todayInTimeZone(now, tz);
   let message: NeutralMessage;
-  if (item.kind === "staff_new_task" || item.kind === "staff_chase") {
+  let listed: { id: string; dueDate: string | null }[] | null = null;
+  if (item.kind === "staff_chase") {
+    const chase = await buildChase(db, pctx, item, settings, today);
+    if ("skip" in chase) return cancel(chase.skip);
+    message = chase.message;
+    listed = chase.listed;
+  } else if (item.kind === "staff_new_task") {
     const own = item.taskId ? await getPersonTask(pctx, item.taskId).catch(() => null) : null;
     if (!own) return cancel("task_gone_or_reassigned");
     if (own.task.status === "done" || own.task.status === "cancelled") return cancel("task_closed");
-    if (item.kind === "staff_chase") {
-      const p = item.payload as { dueDate?: string; slotStart?: string };
-      if (own.task.dueDate !== p.dueDate) return cancel("deadline_moved");
-      if (!taskChaseSettings(settings, parseTaskOverride(own.task.staffChase)).chaseEnabled) return cancel("chase_off");
-      const since = p.slotStart ? new Date(p.slotStart) : now;
-      const [dup] = await db
-        .select({ n: count() })
-        .from(notificationsOutbox)
-        .where(
-          and(
-            eq(notificationsOutbox.personId, person.id),
-            eq(notificationsOutbox.taskId, own.task.id),
-            ne(notificationsOutbox.id, item.id),
-            or(
-              and(eq(notificationsOutbox.status, "sent"), gte(notificationsOutbox.sentAt, since)),
-              eq(notificationsOutbox.status, "sending"),
-              // The new-task message goes first (it waits in the queue behind this earlier slot).
-              and(eq(notificationsOutbox.kind, "staff_new_task"), eq(notificationsOutbox.status, "pending")),
-            ),
-          ),
-        );
-      if ((dup?.n ?? 0) > 0) return cancel("already_pushed_this_slot");
-      message = buildStaffChase(toLite(own.task, own.companyName), today);
-    } else {
-      message = buildStaffNewTask(toLite(own.task, own.companyName), today);
-    }
+    message = buildStaffNewTask(toLite(own.task, own.companyName), today);
   } else if (item.kind === "staff_morning_list") {
     const open = await listPersonOpenTasks(pctx);
     if (!open.length) return cancel("nothing_to_send");
@@ -160,7 +141,18 @@ export async function processPersonItem(
       nextAttemptAt: null,
       // The dev inbox only (never Telegram): keep the button data so a developer / the e2e test can
       // "press" a button through the webhook. Real Telegram rows never store raw tokens.
-      ...(channel.name === "dev" && callbacks ? { payload: { ...(item.payload as object), devCallbacks: callbacks } } : {}),
+      // A grouped chase records which tasks it listed (the chase count per task, the delivery
+      // trail); with exactly one task it is "about" that task (a text reply becomes its comment).
+      ...(listed ? { taskId: listed.length === 1 ? listed[0]!.id : null } : {}),
+      ...(listed || (channel.name === "dev" && callbacks)
+        ? {
+            payload: {
+              ...(item.payload as object),
+              ...(listed ? { listed } : {}),
+              ...(channel.name === "dev" && callbacks ? { devCallbacks: callbacks } : {}),
+            },
+          }
+        : {}),
     });
     report.sent++;
   } else if (result.permanent || attempts >= opts.maxAttempts) {
@@ -176,4 +168,102 @@ export async function processPersonItem(
     });
     report.retrying++;
   }
+}
+
+type ChaseEntry = { id: string; dueDate: string | null; slotStart?: string };
+
+/** The tasks a chase row is for (grouped rows: payload.tasks; rows queued before the grouping: taskId). */
+function chaseEntries(item: OutboxItem): ChaseEntry[] {
+  const p = (item.payload ?? {}) as { tasks?: ChaseEntry[]; dueDate?: string; slotStart?: string };
+  if (Array.isArray(p.tasks)) return p.tasks;
+  return item.taskId ? [{ id: item.taskId, dueDate: p.dueDate ?? null, slotStart: p.slotStart }] : [];
+}
+
+/**
+ * Builds the grouped chase at send time from the tasks' CURRENT state. A task is left out when it
+ * is no longer theirs / open, its deadline moved, chasing was switched off for it, or it was
+ * already messaged in its slot (an earlier chase listed it, or its new-task message was sent in the
+ * slot or still waits — the new-task message goes first).
+ */
+async function buildChase(
+  db: Db,
+  pctx: ReturnType<typeof personContext>,
+  item: OutboxItem & { personId: string },
+  settings: StaffSettings,
+  today: string,
+): Promise<{ message: NeutralMessage; listed: { id: string; dueDate: string | null }[] } | { skip: string }> {
+  const reasons: string[] = [];
+  const keep: { lite: StaffTaskLite; dueDate: string | null }[] = [];
+  for (const e of chaseEntries(item)) {
+    const own = await getPersonTask(pctx, e.id).catch(() => null);
+    if (!own) {
+      reasons.push("task_gone_or_reassigned");
+      continue;
+    }
+    if (own.task.status === "done" || own.task.status === "cancelled") {
+      reasons.push("task_closed");
+      continue;
+    }
+    if (own.task.dueDate !== e.dueDate) {
+      reasons.push("deadline_moved");
+      continue;
+    }
+    if (!taskChaseSettings(settings, parseTaskOverride(own.task.staffChase)).chaseEnabled) {
+      reasons.push("chase_off");
+      continue;
+    }
+    const since = e.slotStart ? new Date(e.slotStart) : pctx.now;
+    const o = notificationsOutbox;
+    const listedJson = JSON.stringify([{ id: e.id }]);
+    const [dup] = await db
+      .select({ n: count() })
+      .from(o)
+      .where(
+        and(
+          eq(o.personId, item.personId),
+          ne(o.id, item.id),
+          or(
+            // Its new-task message (sent in the slot, or still waiting: it goes first).
+            and(
+              eq(o.kind, "staff_new_task"),
+              eq(o.taskId, e.id),
+              or(and(eq(o.status, "sent"), gte(o.sentAt, since)), eq(o.status, "pending"), eq(o.status, "sending")),
+            ),
+            // An earlier chase that listed it in this slot (or one being sent right now).
+            and(
+              eq(o.kind, "staff_chase"),
+              eq(o.status, "sent"),
+              gte(o.sentAt, since),
+              or(eq(o.taskId, e.id), sql`(${o.payload} -> 'listed') @> ${listedJson}::jsonb`),
+            ),
+            and(
+              eq(o.kind, "staff_chase"),
+              eq(o.status, "sending"),
+              or(eq(o.taskId, e.id), sql`(${o.payload} -> 'tasks') @> ${listedJson}::jsonb`),
+            ),
+          ),
+        ),
+      );
+    if ((dup?.n ?? 0) > 0) {
+      reasons.push("already_pushed_this_slot");
+      continue;
+    }
+    keep.push({ lite: toLite(own.task, own.companyName), dueDate: own.task.dueDate });
+  }
+  if (!keep.length) {
+    const unique = [...new Set(reasons)];
+    return { skip: unique.length === 1 ? unique[0]! : "nothing_to_send" };
+  }
+  // Earliest deadline first (the longest overdue on top).
+  keep.sort((a, b) => (a.dueDate ?? "").localeCompare(b.dueDate ?? ""));
+  const built = buildStaffGroupedChase(
+    keep.map((k) => k.lite),
+    today,
+  );
+  const fitted = fitTelegram(built.message);
+  const shown = new Set(built.listed.filter((id) => keep.length === 1 || fitted.keptRefs.has(taskRef(id))));
+  return {
+    message: built.message,
+    listed: keep.filter((k) => shown.has(k.lite.id)).map((k) => ({ id: k.lite.id, dueDate: k.dueDate })),
+  };
 }

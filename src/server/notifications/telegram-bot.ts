@@ -1,5 +1,5 @@
 import "server-only";
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { todayInTimeZone } from "@/lib/dates";
 import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, telegramLinks } from "@/server/db/schema";
@@ -194,7 +194,13 @@ async function handlePersonMessage(
       await pctx.db
         .update(notificationsOutbox)
         .set({ status: "cancelled", lastError: "stopped", nextAttemptAt: null })
-        .where(and(eq(notificationsOutbox.personId, pctx.person.id), eq(notificationsOutbox.status, "pending")));
+        .where(
+          and(
+            eq(notificationsOutbox.personId, pctx.person.id),
+            // Waiting, held (quiet hours / pause are pending with a later attempt), not linked or parked.
+            inArray(notificationsOutbox.status, ["pending", "not_linked", "parked"]),
+          ),
+        );
       await personBotSwitched(pctx, true);
       return [plain(chatId, "Сообщения отключены", RU.stopped)];
     case "/done": {

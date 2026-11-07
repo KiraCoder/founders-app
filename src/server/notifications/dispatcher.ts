@@ -67,8 +67,10 @@ export interface DispatchOptions {
   userIds?: readonly string[];
   /** Wall clock for claims. Defaults to the real clock; tests inject one. */
   clock?: () => Date;
-  /** Also send staff (person) rows. Default true; with `userIds` the dev tick still sends them. */
+  /** Also send staff (person) rows. Default true. The founders' dev tick passes false. */
   staff?: boolean;
+  /** Only staff (person) rows (the dev-only "Simulate staff tick"). */
+  onlyStaff?: boolean;
 }
 
 const PRIORITY_RANK = sql<number>`case ${notificationsOutbox.priority} when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end`;
@@ -129,6 +131,16 @@ async function usedToday(db: Db, item: FounderItem, now: Date, tz: string, filte
       ),
     );
   return row?.n ?? 0;
+}
+
+/**
+ * "One push per task per day": the pushes that count as this task's touch today. A `staff_update`
+ * (a team member's answer / help / deadline request / escalation about the task) does NOT count: it
+ * is news from the team, not a reminder, so it never cancels the founder's own due-today nudge or
+ * chase. It still uses the daily budget like any push.
+ */
+function taskTouchFilter(taskId: string): SQL {
+  return and(eq(notificationsOutbox.taskId, taskId), ne(notificationsOutbox.kind, "staff_update"))!;
 }
 
 function budgetFilter(cls: Exclude<BudgetClass, "urgent">, item: FounderItem): SQL {
@@ -201,10 +213,22 @@ async function collectParked(ctx: ServiceContext): Promise<{ drop: string[]; ite
     if (r.kind === "staff_update") {
       // A line about the team (done, a reply, an escalation): shown as it was written, no task
       // id (so it is never merged into a task line of the same message).
-      const line = (r.payload as { summaryLine?: string }).summaryLine;
+      const p = r.payload as { summaryLine?: string; requestId?: string | null };
+      const line = p.summaryLine;
       if (!line) {
         drop.push(r.id);
         continue;
+      }
+      // A deadline request already approved / declined (e.g. on the task page): nothing to ask.
+      if (p.requestId) {
+        const [req] = await ctx.db
+          .select({ status: taskDeadlineRequests.status })
+          .from(taskDeadlineRequests)
+          .where(eq(taskDeadlineRequests.id, p.requestId));
+        if (!req || req.status !== "pending") {
+          drop.push(r.id);
+          continue;
+        }
       }
       add(`staff:${r.id}`, r.id, () => ({ text: line }));
       continue;
@@ -340,8 +364,12 @@ async function claimNext(
   )!;
   const userFilter = userIds
     ? staff
-      ? or(inArray(o.userId, [...userIds]), isNotNull(o.personId))
-      : inArray(o.userId, [...userIds])
+      ? userIds.length
+        ? or(inArray(o.userId, [...userIds]), isNotNull(o.personId))
+        : isNotNull(o.personId)
+      : userIds.length
+        ? inArray(o.userId, [...userIds])
+        : sql`false`
     : staff
       ? undefined
       : isNotNull(o.userId);
@@ -402,10 +430,10 @@ export async function dispatch(db: Db, now: Date, opts: DispatchOptions = {}): P
   const prefsCache = new Map<string, Preferences>();
   let staffDefaults: Awaited<ReturnType<typeof loadStaffDefaults>> | undefined;
 
-  await releaseReachable(db, registry, opts.userIds);
+  if (!opts.onlyStaff) await releaseReachable(db, registry, opts.userIds);
 
   for (let n = 0; n < limit; n++) {
-    const item = await claimNext(db, now, clock(), opts.userIds, opts.staff !== false);
+    const item = await claimNext(db, now, clock(), opts.onlyStaff ? [] : opts.userIds, opts.staff !== false || !!opts.onlyStaff);
     if (!item) break;
     const finish = (set: Partial<typeof notificationsOutbox.$inferInsert>) =>
       db
@@ -506,7 +534,7 @@ async function processItem(
 
   // One push per task per local day, whatever the kind (backs up the planner's shared key).
   if (item.taskId && !isSummaryKind(item.kind) && item.kind !== "staff_update") {
-    if ((await usedToday(db, founderItem, now, tz, eq(notificationsOutbox.taskId, item.taskId))) > 0) {
+    if ((await usedToday(db, founderItem, now, tz, taskTouchFilter(item.taskId))) > 0) {
       return cancel("already_pushed_today");
     }
   }
@@ -690,7 +718,7 @@ async function sendGroupedChase(
   for (const row of [leader, ...followers]) {
     let skip: string | null = null;
     if (row.taskId && seenTasks.has(row.taskId)) skip = "already_pushed_today";
-    else if (row.taskId && row.id !== leader.id && (await usedToday(db, row, now, ctx.timeZone, eq(o.taskId, row.taskId))) > 0) {
+    else if (row.taskId && row.id !== leader.id && (await usedToday(db, row, now, ctx.timeZone, taskTouchFilter(row.taskId))) > 0) {
       skip = "already_pushed_today";
     }
     const loaded = skip ? { skip } : await loadTaskForPush(ctx, row);

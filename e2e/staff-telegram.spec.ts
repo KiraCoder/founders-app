@@ -53,7 +53,7 @@ test("invite a person → /start via webhook → assign a task → tick → Russ
 
   // Tick → the Russian message for Edil appears in the dev inbox's team messages.
   await page.goto("/dev/notifications");
-  await page.getByRole("button", { name: "Run tick now" }).click();
+  await page.getByRole("button", { name: "Simulate staff tick" }).click();
   const msg = page.getByTestId("team-message").filter({ hasText: `Новая задача: ${title}` });
   await expect(msg).toBeVisible();
   await expect(msg.getByText("Срок: 15.01 · Компания: Jobutify")).toBeVisible();
