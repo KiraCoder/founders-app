@@ -482,7 +482,7 @@ founder's token does nothing):
 - **Text**: a reply to a task message becomes a comment on that task (the founder gets a line);
   other text → «К какой задаче?» with buttons of their open tasks.
 - **Photos / voice / files** → «Пока принимаю только текст»; nothing is stored, the founders get a line.
-- Commands: `/tasks` (numbered, with Готово buttons), `/done N`, `/help`, `/stop` (no more messages;
+- Commands: `/tasks` (numbered, with Готово buttons), `/routines` (today's open routines), `/done N`, `/help`, `/stop` (no more messages;
   founders get a line; `/start` turns it back on).
 
 A person's update about a task (done, help, a deadline request, an escalation) is **not** the
@@ -502,6 +502,50 @@ and the per-task chase settings. Personal todos can never be assigned to a perso
 salaries, holding, numbers — never reach staff. The dev inbox (`/dev/notifications`) lists *Team
 messages* too; its buttons carry their callback data (dev channel only) so a developer can press
 them through the webhook.
+
+## Routines
+
+A **routine** is a recurring job assigned to a person (staff, through the bot, in Russian) or a
+founder (their normal channel and rules) — e.g. *Kadyr: pick up Wildberries returns, Tue/Wed/Sat
+10:00, confirm with Готово*. Founders only: **Routines** in the sidebar (`/routines`), plus a
+*Routines* list on each company's Tasks tab and on each person's page.
+
+- **Full CRUD**: create / edit (who does it — a person or a founder; company or group-wide; days of
+  the week + time, or a day of the month (31 = the month's last day); time zone Asia/Bishkek;
+  confirmation *one button* or *checklist* (one item per line); chase settings), **Pause / Resume**,
+  **Archive / Restore** (keeps the history), **Delete** only while a routine never ran, **Run now**
+  (opens today's run on any day and asks right away), and the **run history** per routine: *done on
+  time*, *done late* (after the "remind until" time or after the founders were told), *partly* (which
+  items were missing), *missed*. Filters: company, who, status.
+- **Each scheduled day** the planner (`notifications/routine-planner.ts`, every tick) opens a run at
+  the ask time (for a person only while the bot may message them — see *Team on Telegram*; the page
+  says "Not reachable on Telegram" otherwise) and sends «Рутина: …» with buttons: **Готово**, or for a
+  checklist one **«✓ item»** per item plus «✓ Всё сделано». Reminders («Напоминание: …») list **only
+  the items not ticked yet**; the run is done when every item is ticked (the founders get one line in
+  the next summary). The person's `/routines` command shows today's open runs with their buttons.
+- **Every timing is a setting**, routine → the person's chase settings → global staff defaults
+  (Settings → Team on Telegram): *remind every* (default the person's "Chase every", 120 min),
+  *remind until* (default the end of chase hours), *tell the founders at* (default off) *or after N
+  reminders* (default 3), *max messages per day*. One message per run per slot (slot 0 = the ask, then
+  every N minutes before "until"; missed slots never pile up), quiet hours hold messages, the person's
+  daily cap applies. **Escalation** once per run: a push to both founders ("Elmurat hasn't finished
+  "1C…" today — missing: Jobutify, Alura Brand"), following the founders' rules (quiet hours, budget,
+  folded into the morning summary). A founder's own routine escalates to the other founder.
+- **Missed runs are recorded**: the first tick of the next day closes yesterday's unfinished run as
+  *partly* or *missed* and cancels what was still waiting; the next run happens as scheduled.
+- **Founder routines** arrive like any other founder push (Telegram or the dev inbox, budget, quiet
+  hours; parked ones become "Routine still open: …" in the next summary), buttons *Done* / *✓ item*.
+- **Security**: a button carries a one-time token bound to its owner; a run can be ticked only by the
+  routine's assignee (another person's or a forged token does nothing; `tickRoutineRun` re-checks).
+- **The founder's first routine — Elmurat, daily 1C financial entries for all companies**: Mon–Sat,
+  ask 15:00, remind every 120 min until 19:00, tell the founders at 19:00; checklist = every *active*
+  company (Kiwi Go, Jobutify, Alura Brand, Alura Style, Upsell Group, Asqa Zou Holding; Marketing joins
+  when it stops being *planned*). `npm run db:seed` creates it once if Elmurat exists as a person and it
+  is absent (`src/server/db/example-routines.ts`; never re-created after a founder deleted it). A live
+  database seeded before routines existed: **Routines → Use example: Elmurat 1C** (shown while it is absent).
+- Data: `routines` and `routine_runs` (migration `0029_routines.sql`, RLS + revoke like every table),
+  `notification_action_tokens.routine_run_id` for the buttons. Texts: `messages-ru.ts` (staff),
+  `messages.ts` (founders).
 
 ## People and salaries
 
@@ -1157,7 +1201,7 @@ src/
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
                            people-import, metrics, metrics-import, connectors, search, notifications,
                            holding, holding-asks, holding-files, ai-roles, ai-role-defs, ai-role-editor, org, org-expert,
-                           extension, staff (Team on Telegram), staff-tasks (what a person may do), task-comments)
+                           extension, staff (Team on Telegram), staff-tasks (what a person may do), task-comments, routines)
     ai/                    AI roles: provider.ts (LlmProvider, NoneProvider), finance-rules.ts, month-values.ts,
                            narrative.ts (prompt builder, no salaries), orchestrator.ts (tick + morning-summary dedupe)
     storage/               FileStorage for documents: local .data/uploads, Supabase placeholder
@@ -1165,7 +1209,8 @@ src/
     connectors/            Data sources: Connector interface, registry, stubs (no network), runner
     notifications/         Channels (Telegram, dev, push stub), outbox, planner, dispatcher, bot, staff-dispatcher,
                            messages-ru.ts (staff texts), staff-notify.ts (lines/pushes to founders about staff),
-                           telegram-setup.ts (setWebhook / setMyCommands), reminder-clock.ts (pg_cron + Vault)
+                           telegram-setup.ts (setWebhook / setMyCommands), reminder-clock.ts (pg_cron + Vault),
+                           routine-planner.ts (routines: open runs, ask, remind, escalate, close)
     http/request-guard.ts  Same-origin + JSON check for mutating /api/v1 calls
     http/ingest.ts         POST /api/v1/ingest: key auth, CORS for chrome-extension://, limits, log
   middleware.ts            Redirects signed-out users to /login (401 JSON for /api), CSRF guard

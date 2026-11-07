@@ -23,7 +23,9 @@ import { currentValues, listCompanyMetricCards, listMetricDefinitions, type Metr
 import { getPageContext } from "@/server/context";
 import { RunStatusTag } from "@/components/ai-roles/AiRolesBoard";
 import { FINANCIAL_ANALYST, ORG_STRUCTURE_EXPERT } from "@/lib/ai-roles";
-import { canUseAiRoles } from "@/server/services/access";
+import { canManageRoutines, canUseAiRoles } from "@/server/services/access";
+import { listRoutines } from "@/server/services/routines";
+import { RoutinesList } from "@/components/routines/RoutinesList";
 import { listHireRuns, listHires } from "@/server/services/ai-roles";
 import { getCompanyBySlug } from "@/server/services/companies";
 import { today } from "@/server/services/context";
@@ -364,9 +366,26 @@ async function PeopleTab({ ctx, companyId, slug }: { ctx: Awaited<ReturnType<typ
 }
 
 async function TasksTab({ ctx, companyId }: { ctx: Awaited<ReturnType<typeof getPageContext>>; companyId: string }) {
-  const [tasks, options] = await Promise.all([listTasks(ctx, { companyId, status: "open" }), getTaskFormOptions(ctx)]);
+  const [tasks, options, companyRoutines] = await Promise.all([
+    listTasks(ctx, { companyId, status: "open" }),
+    getTaskFormOptions(ctx),
+    canManageRoutines(ctx) ? listRoutines(ctx, { companyId }) : Promise.resolve([]),
+  ]);
   return (
     <>
+      {canManageRoutines(ctx) && (
+        <Section
+          title="Routines"
+          count={companyRoutines.filter((v) => v.routine.status !== "archived").length}
+          action={
+            <Link href={`/routines/new?company=${companyId}`} className="btn btn-sm">
+              New routine
+            </Link>
+          }
+        >
+          <RoutinesList items={companyRoutines.filter((v) => v.routine.status !== "archived")} empty="No routines for this company." />
+        </Section>
+      )}
       <div className="mb-4">
         <NewTaskPanel options={options} defaults={{ visibility: "shared", companyId }} />
       </div>

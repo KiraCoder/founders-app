@@ -11,7 +11,9 @@ import { ServiceError } from "@/server/services/errors";
 import { orgPositionsForPerson, type OrgPosition } from "@/server/services/org";
 import { getPerson, listCompanyUnitOptions } from "@/server/services/people";
 import { canViewSalaries } from "@/server/services/salaries";
-import { canManageStaffBot } from "@/server/services/access";
+import { canManageRoutines, canManageStaffBot } from "@/server/services/access";
+import { listRoutines } from "@/server/services/routines";
+import { RoutinesList } from "@/components/routines/RoutinesList";
 import { getTeamMember } from "@/server/services/staff";
 import { InviteToTelegram } from "@/components/staff/InviteToTelegram";
 
@@ -32,6 +34,7 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
   const companies = (await listCompanyUnitOptions(ctx)).map((c) => ({ id: c.id, name: c.name, units: c.units.map((u) => ({ id: u.id, name: u.name })) }));
   const left = person.leftAt !== null;
   const tg = canManageStaffBot(ctx) && !person.isUser ? await getTeamMember(ctx, person.id) : null;
+  const personRoutines = canManageRoutines(ctx) && !person.isUser ? await listRoutines(ctx, { personId: person.id }) : null;
   const TG_TEXT = {
     not_linked: "Not on Telegram yet. Invite them: they open the link and press Start.",
     invited: "Invited — waiting for them to open the link.",
@@ -73,6 +76,22 @@ export default async function PersonPage({ params }: { params: Promise<{ id: str
           </p>
           {tg.state !== "linked" && <InviteToTelegram personId={person.id} personName={person.shortName || person.fullName} />}
         </section>
+      )}
+
+      {personRoutines && (
+        <Section
+          title="Routines"
+          count={personRoutines.filter((v) => v.routine.status !== "archived").length}
+          action={
+            !left && (
+              <Link href={`/routines/new?who=person:${person.id}`} className="btn btn-sm">
+                New routine
+              </Link>
+            )
+          }
+        >
+          <RoutinesList items={personRoutines.filter((v) => v.routine.status !== "archived")} empty="No routines for them." />
+        </Section>
       )}
 
       <Section title="Companies and roles" count={person.roles.filter((r) => r.isActive).length}>

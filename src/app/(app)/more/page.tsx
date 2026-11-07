@@ -8,6 +8,7 @@ import { logoutAction } from "../actions";
 export const metadata = { title: "More" };
 
 const LINKS: { href: string; label: string; icon: IconName }[] = [
+  { href: "/routines", label: "Routines", icon: "repeat" },
   { href: "/holding", label: "Holding", icon: "holding" },
   { href: "/people", label: "People", icon: "people" },
   { href: "/org", label: "Org structure", icon: "org" },

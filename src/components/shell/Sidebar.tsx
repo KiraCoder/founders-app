@@ -80,6 +80,7 @@ function CompanySectionLinksWithTab(props: { slug: string; collapsed: boolean })
 const GLOBAL: { href: string; label: string; icon: IconName; exact?: boolean }[] = [
   { href: "/", label: "Today", icon: "today", exact: true },
   { href: "/tasks", label: "Tasks", icon: "tasks" },
+  { href: "/routines", label: "Routines", icon: "repeat" },
   { href: "/people", label: "People", icon: "people" },
   { href: "/search", label: "Search", icon: "search" },
   { href: "/settings", label: "Settings", icon: "settings" },
