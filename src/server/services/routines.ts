@@ -4,7 +4,6 @@ import { addDays, hmToMinutes, todayInTimeZone, zonedTimeToUtc, type IsoDate } f
 import {
   askTimesOf,
   AWAIT_COMMENT_MINUTES,
-  checklistItems,
   describeRoutinePlan,
   describeSchedule,
   effectiveFounderRoutineChase,

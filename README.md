@@ -522,25 +522,54 @@ founder (their normal channel and rules) — e.g. *Kadyr: pick up Wildberries re
 10:00, confirm with Готово*. Founders only: **Routines** in the sidebar (`/routines`), plus a
 *Routines* list on each company's Tasks tab and on each person's page.
 
-- **Full CRUD**: create / edit (who does it — a person or a founder; company or group-wide; days of
-  the week + time, or a day of the month (31 = the month's last day); time zone Asia/Bishkek;
-  confirmation *one button* or *checklist* (one item per line); chase settings), **Pause / Resume**,
-  **Archive / Restore** (keeps the history), **Delete** only while a routine never ran, **Run now**
-  (opens today's run on any day and asks right away), and the **run history** per routine: *done on
-  time*, *done late* (after the "remind until" time or after the founders were told), *partly* (which
-  items were missing), *missed*. Filters: company, who, status.
+- **The list is a control center**: per routine its status (*Active / Paused / Ended / Archived*),
+  who, company, schedule and **next ask**, the latest run (*Today 3/5 · open*, *03.11 · missed*), and
+  icon buttons (aria-label + tooltip): ▶ **Run now** (opens today's run on any day and asks right away —
+  "Asked now: sent to Telegram"), ↻ **Re-run missing items** (today's run closed unfinished: asks
+  again about what is not done; done items stay done), ✎ **Edit**, ⏸ / ▶ **Pause / Resume**,
+  🗄 **Archive** (confirm) / **Restore**, 💬 comments, ↗ **Open**. Filters: company, who, status.
+- **Create / edit in a dialog** (**+ New**): who does it — picking a **person limits the company list to
+  the companies they work for** (People links + org-chart posts; one company is picked for you; a
+  founder: every company; the same rule is enforced server-side); days of the week or a day of the
+  month (31 = the month's last day), **ask times as chips** (*10:00*, *+ add time* → *16:00*: still ONE
+  run a day, each later ask re-asks only what is still open), optional **Starts on / Ends on**
+  (after the end day, Asia/Bishkek, the planner marks it *Ended*: no new runs; a later end date brings
+  it back); confirmation *one button* or a **checklist built item by item** (title, optional details /
+  instructions shown in italics, a *needs a comment* flag, move up / down, delete); **Reminders**: *Ask
+  once* / *Remind every N h until HH:MM* / *Remind N times*; **Escalation**: *Off* / *If not done by
+  HH:MM tell the founders* (pick who; none = both) / *After N reminders*. A **live sentence** under the
+  form says what will happen ("Bot asks Asan Mon–Sat at 15:00, reminds every 2 h until 19:00; if not
+  done by 19:00 it tells Nuraaly."; for a founder it says whether they will be chased). Errors show
+  per field plus a toast. **Editing the checklist while today's run exists** asks first: an *open*
+  run gets the new items (removed ones drop out, their ticks too) and the person gets **one updated
+  message**; a *done* run stays done (from the next run) unless the founder picks **Add to today too**,
+  which reopens it.
+- **The routine page** (read-only, "← Back"): the plan sentence, facts, the checklist, the **run
+  history** (date, each item with ✅ / 🟡 / ❌ / ⬜, the time it was ticked, by whom and its comment;
+  reminders sent and when; escalated?), all **comments**, and the **message log** (every message about
+  the routine: time, kind — ask, reminder, updated checklist, escalation, done / can't to founders —
+  to whom, delivered or why not). Outcomes: *done on time*, *done late*, *partly*, *missed*, *can't*.
+  **Delete** only while a routine never ran (confirm), else archive.
 - **Each scheduled day** the planner (`notifications/routine-planner.ts`, every tick) opens a run at
-  the ask time (for a person only while the bot may message them — see *Team on Telegram*; the page
-  says "Not reachable on Telegram" otherwise) and sends «Рутина: …» with buttons: **Готово**, or for a
-  checklist one **«✓ item»** per item plus «✓ Всё сделано». Reminders («Напоминание: …») list **only
-  the items not ticked yet**; the run is done when every item is ticked (the founders get one line in
-  the next summary). The person's `/routines` command shows today's open runs with their buttons.
+  the first ask time (for a person only while the bot may message them — see *Team on Telegram*; the
+  page says "Not reachable on Telegram" otherwise) and sends one HTML message: «📋 Рутина: …», 🏢 company
+  · ⏰ until, «Прогресс: 2/5», the whole checklist with ✅ done / 🟡 partly / ❌ can't / ⬜ open (details in
+  italics), one **«✓ item»** button per open item, «✅ Всё готово» (or «✅ Готово»), and «💬 Комментарий»
+  «🟡 Частично» «❌ Не могу». **Every tick edits that message in place** (no new message), ending with
+  «Готово, спасибо! 5/5 ✅». Reminders («⏰ Напоминание: …») say what is left. «Частично» / «Не могу»
+  (a pick of the item on a checklist) **require a comment**: the person's next text is saved with the
+  item's state; «💬 Комментарий» adds one to an item or the run; an item flagged *needs a comment* asks
+  for it on tick. «Не могу» tells the founders (a push through their rules), comments and «Частично»
+  are a line in their next summary. The run closes when nothing is open (done, or partly / missed with
+  the reasons); the founders get one line when it is done. `/routines` shows today's open runs.
 - **Every timing is a setting**, routine → the person's chase settings → global staff defaults
-  (Settings → Team on Telegram): *remind every* (default the person's "Chase every", 120 min),
+  (Settings → Team on Telegram; a form field left at its default is saved blank, so it keeps
+  following the default): *reminder mode* (default *every*), *remind every* (default the person's "Chase every", 120 min),
   *remind until* (default the end of chase hours), *tell the founders at* (default off) *or after N
-  reminders* (default 3), *max messages per day*. One message per run per slot (slot 0 = the ask, then
-  every N minutes before "until"; missed slots never pile up), quiet hours hold messages, the person's
-  daily cap applies. **Escalation** once per run: a push to both founders ("Elmurat hasn't finished
+  reminders* (default 3), *tell whom* (default both), *max messages per day*. One message per run per
+  slot (`routineSlots`: an ask at each ask time, then the reminders of the mode until the next ask /
+  "until"; the cap keeps the asks first; missed slots never pile up), quiet hours hold messages, the
+  person's daily cap applies. **Escalation** once per run: a push to the founders picked ("Elmurat hasn't finished
   "1C…" today — missing: Jobutify, Alura Brand"), following the founders' rules (quiet hours, budget,
   folded into the morning summary). A founder's own routine escalates to the other founder.
   A run that is already open still escalates when the person becomes unreachable during the day
@@ -567,8 +596,12 @@ founder (their normal channel and rules) — e.g. *Kadyr: pick up Wildberries re
   is absent (`src/server/db/example-routines.ts`; never re-created after a founder deleted it). A live
   database seeded before routines existed: **Routines → Use example: Elmurat 1C** (shown while it is absent).
 - Data: `routines` and `routine_runs` (migration `0029_routines.sql`, RLS + revoke like every table),
-  `notification_action_tokens.routine_run_id` for the buttons. Texts: `messages-ru.ts` (staff),
-  `messages.ts` (founders).
+  `notification_action_tokens.routine_run_id` for the buttons; 0031 adds `routines.times / starts_on /
+  ends_on` (+ status *ended*), `routine_runs.item_states` (per item: state, at, by, comment) and
+  `awaiting_comment`, and the `routine_comments` table (RLS + revoke). Texts: `messages-ru.ts` (staff),
+  `messages.ts` (founders). Reusable UI for other pages (Tasks next): `src/components/ui/` — `Dialog`,
+  `ConfirmDialog`, `IconButton`, `Toast` (`toast()` + `<Toaster />` in the app layout), `BackLink`,
+  `ChecklistEditor`, `Segmented`.
 
 ## People and salaries
 

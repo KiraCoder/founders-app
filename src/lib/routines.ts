@@ -345,15 +345,17 @@ export function describeRoutinePlan(p: RoutinePlanText): string {
   let remind: string;
   if (c.reminderMode === "once") remind = "no reminders";
   else if (c.reminderMode === "times") {
-    remind = `${c.remindTimes === 1 ? "1 reminder" : `${c.remindTimes} reminders`} ${describeMinutes(c.chaseEveryMinutes)} apart${times.length > 1 ? " after each ask" : ""}, not after ${c.chaseUntil}`;
+    remind = `${c.remindTimes === 1 ? `1 reminder ${describeMinutes(c.chaseEveryMinutes)} later` : `${c.remindTimes} reminders ${describeMinutes(c.chaseEveryMinutes)} apart`}${times.length > 1 ? " after each ask" : ""}, not after ${c.chaseUntil}`;
   } else remind = `reminds every ${describeMinutes(c.chaseEveryMinutes)} until ${c.chaseUntil}`;
+  // "After N reminders" never fires when there are no reminders.
+  const afterN = c.reminderMode === "once" ? 0 : c.escalateAfterChases;
   const esc =
-    c.escalateAt && c.escalateAfterChases
-      ? `if not done by ${c.escalateAt} (or after ${c.escalateAfterChases} reminders) it tells ${p.escalateNames}`
+    c.escalateAt && afterN
+      ? `if not done by ${c.escalateAt} (or after ${afterN} reminders) it tells ${p.escalateNames}`
       : c.escalateAt
         ? `if not done by ${c.escalateAt} it tells ${p.escalateNames}`
-        : c.escalateAfterChases
-          ? `if still not done after ${c.escalateAfterChases} reminders it tells ${p.escalateNames}`
+        : afterN
+          ? `if still not done after ${afterN} reminders it tells ${p.escalateNames}`
           : "nobody else is told if it is not done";
   const dates =
     p.startsOn && p.endsOn

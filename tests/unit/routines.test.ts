@@ -172,7 +172,7 @@ describe("routine schedule", () => {
     });
     expect(two).toBe("Bot asks Asan Mon–Sat at 10:00 and 16:00 (each later ask only about what is still open), no reminders; nobody else is told if it is not done. Ends on 31.12.2026.");
     const f = effectiveFounderRoutineChase(DEFAULT_STAFF_SETTINGS, {});
-    expect(describeRoutinePlan({ assigneeName: "Talant", forFounder: true, schedule: s, chase: f, escalateNames: "Nuraaly" })).toContain("Talant will be chased: 1 reminder 3 h apart");
+    expect(describeRoutinePlan({ assigneeName: "Talant", forFounder: true, schedule: s, chase: f, escalateNames: "Nuraaly" })).toContain("Talant will be chased: 1 reminder 3 h later");
     expect(describeRoutinePlan({ assigneeName: "Talant", forFounder: true, schedule: s, chase: { ...f, reminderMode: "once" }, escalateNames: "Nuraaly" })).toContain(
       "Talant is asked once and not chased",
     );

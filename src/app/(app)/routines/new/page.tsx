@@ -1,36 +1,10 @@
-import Link from "next/link";
-import { notFound } from "next/navigation";
-import { RoutineForm } from "@/components/routines/RoutineForm";
-import { EMPTY_ROUTINE } from "@/components/routines/form-values";
-import { PageHeader } from "@/components/ui";
-import { getPageContext } from "@/server/context";
-import { canManageRoutines } from "@/server/services/access";
-import { routineFormOptions } from "@/server/services/routines";
-import { createRoutineAction } from "../actions";
+import { redirect } from "next/navigation";
 
-export const metadata = { title: "New routine" };
-
+/** Old "New routine" page: creating now happens in a dialog on the Routines page (prefilled from `who` / `company`). */
 export default async function NewRoutinePage({ searchParams }: { searchParams: Promise<Record<string, string | undefined>> }) {
-  const ctx = await getPageContext();
-  if (!canManageRoutines(ctx)) notFound();
   const sp = await searchParams;
-  const options = await routineFormOptions(ctx);
-  return (
-    <>
-      <PageHeader
-        eyebrow={
-          <Link href="/routines" className="hover:underline">
-            Routines
-          </Link>
-        }
-        title="New routine"
-      />
-      <RoutineForm
-        action={createRoutineAction}
-        initial={{ ...EMPTY_ROUTINE, assignee: sp.who ?? "", companyId: sp.company ?? "" }}
-        options={options}
-        submitLabel="Create routine"
-      />
-    </>
-  );
+  const q = new URLSearchParams({ new: "1" });
+  if (sp.who) q.set("who", sp.who);
+  if (sp.company) q.set("company", sp.company);
+  redirect(`/routines?${q.toString()}`);
 }
