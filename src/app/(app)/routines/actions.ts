@@ -12,6 +12,7 @@ import {
   deleteRoutine,
   rerunRoutineToday,
   runRoutineNow,
+  setRoutineAssignee,
   setRoutineStatus,
   updateRoutine,
   updateRoutineChecklist,
@@ -157,4 +158,17 @@ export async function createExampleRoutineAction(): Promise<RoutineFormState> {
   });
   if (id) redirect(`/routines/${id}`);
   return state;
+}
+
+/** The list's inline status menu (0034): Active / Paused / Archived (Ended follows "Ends on"). */
+export async function setRoutineStatusInlineAction(id: string, status: RoutineStatus): Promise<RoutineFormState> {
+  const ctx = await getPageContext();
+  const label = status === "paused" ? "Paused" : status === "archived" ? "Archived" : "Active again";
+  return run(() => setRoutineStatus(ctx, id, status), label);
+}
+
+/** The list's inline assignee menu (0034). */
+export async function setRoutineAssigneeAction(id: string, assignee: string): Promise<RoutineFormState> {
+  const ctx = await getPageContext();
+  return run(() => setRoutineAssignee(ctx, id, assignee), "Assignee changed");
 }

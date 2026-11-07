@@ -1184,3 +1184,26 @@ async function queryRoutineFormOptions(ctx: ServiceContext) {
   };
 }
 export type RoutineFormOptionsData = Awaited<ReturnType<typeof routineFormOptions>>;
+
+/**
+ * Reassigns a routine from the list (0034, inline like a task's assignee): "user:<id>" (a founder)
+ * or "person:<id>". Same checks as the form (the person must work for the routine's company);
+ * messages already queued for the old assignee are cancelled.
+ */
+export async function setRoutineAssignee(ctx: ServiceContext, id: string, assignee: string): Promise<Routine> {
+  const current = await loadRoutine(ctx, id);
+  if (current.status === "archived") throw new ServiceError("validation", "Restore the routine before editing it");
+  const m = /^(user|person):([0-9a-f-]{36})$/i.exec(assignee);
+  if (!m) throw new ServiceError("validation", "Pick who does it", { assignee: ["Pick who does it"] });
+  const personId = m[1] === "person" ? m[2]! : null;
+  const userId = m[1] === "user" ? m[2]! : null;
+  if (personId === current.assigneePersonId && userId === current.assigneeUserId) return current;
+  await validateRefs(ctx, { companyId: current.companyId, personId, userId });
+  const [row] = await ctx.db
+    .update(routines)
+    .set({ assigneePersonId: personId, assigneeUserId: userId, updatedAt: ctx.now })
+    .where(eq(routines.id, current.id))
+    .returning();
+  await cancelRoutineMessages(ctx.db, current.id, "reassigned");
+  return row!;
+}
