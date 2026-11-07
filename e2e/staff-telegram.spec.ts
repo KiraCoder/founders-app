@@ -56,9 +56,10 @@ test("invite a person → /start via webhook → assign a task → tick → Russ
   await page.getByRole("button", { name: "Simulate staff tick" }).click();
   const msg = page.getByTestId("team-message").filter({ hasText: `Новая задача: ${title}` });
   await expect(msg).toBeVisible();
-  await expect(msg.getByText("Срок: 15.01 · Компания: Jobutify")).toBeVisible();
+  await expect(msg.getByText("📅 Срок: 15.01")).toBeVisible();
+  await expect(msg.getByText("🏢 Jobutify")).toBeVisible();
   await expect(msg.getByText("To Edil")).toBeVisible();
-  const done = msg.locator(".btn", { hasText: "Готово" });
+  const done = msg.locator(".btn", { hasText: "✅ Готово" });
   const callback = (await done.getAttribute("data-callback"))!;
   expect(callback).toMatch(/^a:/);
 
@@ -85,7 +86,7 @@ test("invite a person → /start via webhook → assign a task → tick → Russ
   await page.reload();
   await expect(page.getByText(`Edil marked done (Telegram): ${title}`)).toBeVisible();
   await page.goto(`/tasks/${taskId}`);
-  const trail = page.getByRole("list", { name: "Delivery trail" });
+  const trail = page.getByRole("list", { name: "Timeline" });
   await expect(trail.getByText("New task sent")).toBeVisible();
   await expect(trail.getByText("Marked done")).toBeVisible();
 
