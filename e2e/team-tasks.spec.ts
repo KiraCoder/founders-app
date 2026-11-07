@@ -22,7 +22,7 @@ test("Team view: grouped by person with counts, private todos stay private, pers
 
   // Nuraaly sees her own todo in her own group.
   await page.goto("/tasks?view=team");
-  await expect(page.getByRole("link", { name: "Team", exact: true })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("navigation", { name: "Views" }).getByRole("link", { name: "Team" })).toHaveAttribute("aria-current", "page");
   const groups = page.getByTestId("team-group");
   await expect(groups.first()).toContainText("Nuraaly");
   await expect(groups.first()).toContainText(secret);

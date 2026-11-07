@@ -21,6 +21,12 @@ async function failActions(page: Page) {
 }
 const normalActions = (page: Page) => page.unrouteAll({ behavior: "ignoreErrors" });
 
+/** Picks a status from the row's status menu (Linear style, 0034). */
+async function setStatus(page: Page, row: ReturnType<Page["locator"]>, status: string) {
+  await row.getByRole("button", { name: "Change status" }).click();
+  await page.getByRole("listbox", { name: "Change status" }).getByRole("option", { name: status }).click();
+}
+
 test("Today: quick add, Done (optimistic, rollback on failure), Reopen on Tasks, back on Today; checklist ticks", async ({ page }) => {
   const title = `[e2e] refresh ${Date.now()}`;
   await login(page, "nuraaly");
@@ -33,32 +39,30 @@ test("Today: quick add, Done (optimistic, rollback on failure), Reopen on Tasks,
 
   // A failing Done: shown at once, then rolled back with a toast.
   await failActions(page);
-  await row.getByRole("button", { name: "Mark done" }).click();
+  await setStatus(page, row, "Done");
   await expect(page.getByTestId("toast").filter({ hasText: "Could not reach the server" })).toBeVisible();
-  await expect(row.getByRole("button", { name: "Mark done" })).toBeVisible();
-  await expect(row).toContainText("To do");
+  await expect(row.getByRole("button", { name: "Change status" })).toHaveAttribute("title", "Status: Todo");
   await normalActions(page);
 
   // A slow Done: the row says Done before the server answers; then the todo leaves Today's open lists.
   await slowActions(page);
-  await row.getByRole("button", { name: "Mark done" }).click();
-  await expect(row.getByRole("button", { name: "Reopen" })).toHaveAttribute("aria-pressed", "true", { timeout: 1000 });
-  await expect(row).toContainText("Done", { timeout: 1000 });
+  await setStatus(page, row, "Done");
+  await expect(row.getByRole("button", { name: "Change status" })).toHaveAttribute("title", "Status: Done", { timeout: 1000 });
   await expect(row).toHaveCount(0);
   await normalActions(page);
 
   // Another page reads it fresh: Done on Tasks; Reopen there → back on Today.
   await page.goto("/tasks?view=my&status=any");
   const onTasks = page.locator("li[data-task-id]", { hasText: title });
-  await expect(onTasks).toContainText("Done");
-  await onTasks.getByRole("button", { name: "Reopen" }).click();
-  await expect(onTasks).toContainText("To do");
+  await expect(onTasks.getByRole("button", { name: "Change status" })).toHaveAttribute("title", "Status: Done");
+  await setStatus(page, onTasks, "Todo");
+  await expect(onTasks.getByRole("button", { name: "Change status" })).toHaveAttribute("title", "Status: Todo");
   await page.getByRole("link", { name: "Today" }).first().click();
   await expect(page.getByRole("heading", { name: /Good day/ })).toBeVisible();
   await expect(page.locator("li[data-task-id]", { hasText: title })).toBeVisible();
 
   // Checklist on the task page: a slow tick shows at once ("saving…"), then who ticked it; a failing one rolls back.
-  await page.locator("li[data-task-id]", { hasText: title }).getByRole("link", { name: "Open", exact: true }).click();
+  await page.locator("li[data-task-id]", { hasText: title }).getByTestId("task-title").click();
   const checklist = page.getByTestId("task-checklist");
   for (const item of ["Первый", "Второй"]) {
     await checklist.getByLabel("Item", { exact: true }).fill(item);
@@ -96,7 +100,7 @@ test("Routines: Pause / Resume are optimistic; the routine page and the list sta
 
   await slowActions(page);
   await row.getByRole("button", { name: "Pause", exact: true }).click();
-  await expect(row.getByText("Paused", { exact: true })).toBeVisible({ timeout: 1000 });
+  await expect(row.getByRole("button", { name: /^Change status of/ })).toHaveAttribute("title", "Status: Paused", { timeout: 1000 });
   await expect(row.getByRole("button", { name: "Resume", exact: true })).toBeVisible({ timeout: 1000 });
   await expect(row.getByRole("button", { name: "Run now" })).toHaveCount(0);
   await expect(page.getByTestId("toast").filter({ hasText: "Paused" })).toBeVisible();
@@ -111,7 +115,7 @@ test("Routines: Pause / Resume are optimistic; the routine page and the list sta
   await expect(header.getByText("Active", { exact: true })).toBeVisible();
   await expect(page.getByTestId("toast").filter({ hasText: "Active again" })).toBeVisible();
   await page.goto("/routines");
-  await expect(row.getByText("Active", { exact: true })).toBeVisible();
+  await expect(row.getByRole("button", { name: /^Change status of/ })).toHaveAttribute("title", "Status: Active");
 });
 
 test("Settings → Companies: the sidebar's company switcher follows add / rename / delete without a reload", async ({ page }) => {

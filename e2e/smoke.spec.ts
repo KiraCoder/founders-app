@@ -20,7 +20,8 @@ test("login → create personal todo → visible in My tasks → hidden from the
 
   const row = page.locator("li", { hasText: title });
   await expect(row).toBeVisible();
-  await expect(row.getByText("Personal")).toBeVisible();
+  await expect(row.getByLabel("Personal")).toBeVisible();
+  await expect(row.getByTestId("task-key")).toHaveText(/^ME-\d+$/);
 
   // Also on Today under "My personal todos".
   await page.goto("/");
@@ -51,10 +52,10 @@ test("login → create personal todo → visible in My tasks → hidden from the
   // Clean up through the in-page delete confirmation.
   await login(page, "nuraaly");
   await page.goto("/tasks");
-  const mine = page.locator("li", { hasText: title });
-  await mine.getByRole("button", { name: "Edit" }).click();
-  await mine.getByRole("button", { name: "Delete task…" }).click();
-  await mine.getByRole("button", { name: "Yes, delete" }).click();
+  const mine = page.locator("li[data-task-id]", { hasText: title });
+  await mine.getByRole("button", { name: `More actions for ${title}` }).click();
+  await page.getByRole("listbox", { name: `More actions for ${title}` }).getByRole("option", { name: "Delete…" }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Yes, delete" }).click();
   await expect(page.getByText(title)).toHaveCount(0);
 });
 

@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { E2E_WEBHOOK_SECRET, login } from "./helpers";
 
-test("invite a person → /start via webhook → assign a task → tick → Russian message → Готово → done + founder line", async ({ page }) => {
+test("invite a person → /start via webhook → assign a task → tick → Russian message → Готово → In Review + founder push → approve → Done", async ({ page }) => {
   await login(page, "nuraaly");
   const people = (await (await page.request.get("/api/v1/people?q=Edil")).json()) as { data: { id: string; fullName: string }[] };
   const edil = people.data.find((p) => p.fullName === "Edil")!;
@@ -77,21 +77,28 @@ test("invite a person → /start via webhook → assign a task → tick → Russ
     },
   });
   const pressBody = (await pressed.json()) as { actions: { params: { text: string } }[] };
-  expect(pressBody.actions[0]!.params.text).toContain("Отмечено как выполненное");
+  // "Needs review" is on by default for staff tasks: the task waits for the founder.
+  expect(pressBody.actions[0]!.params.text).toContain("Отправлено на проверку");
 
   const task = (await (await page.request.get(`/api/v1/tasks/${taskId}`)).json()) as { data: { status: string } };
-  expect(task.data.status).toBe("done");
+  expect(task.data.status).toBe("in_review");
 
-  // The founder gets one line (for the next summary), and the task page shows the trail.
+  // The founder gets a push to approve, and the task page shows the trail.
   await page.reload();
-  await expect(page.getByText(`Edil marked done (Telegram): ${title}`)).toBeVisible();
+  await expect(page.getByText(`Edil finished (Telegram) — waiting for your review: ${title}`).first()).toBeVisible();
   await page.goto(`/tasks/${taskId}`);
   const trail = page.getByRole("list", { name: "Timeline" });
   await expect(trail.getByText("New task sent")).toBeVisible();
-  await expect(trail.getByText("Marked done")).toBeVisible();
+  await expect(trail.getByText("Sent for review (Telegram)")).toBeVisible();
+  // Approve from the Properties sidebar: In Review → Done.
+  const props = page.getByTestId("task-properties");
+  await props.getByRole("button", { name: "Change status" }).click();
+  await page.getByRole("listbox", { name: "Change status" }).getByRole("option", { name: "Done" }).click();
+  await expect(page.getByTestId("toast").filter({ hasText: "Status: Done" })).toBeVisible();
+  expect(((await (await page.request.get(`/api/v1/tasks/${taskId}`)).json()) as { data: { status: string } }).data.status).toBe("done");
 
-  // Founders comment on the task page (CRUD on their own comments).
+  // Founders comment on the task page (CRUD on their own comments); Telegram replies carry a badge.
   await page.getByLabel("New comment").fill("Thanks, Edil");
-  await page.getByRole("button", { name: "Add comment" }).click();
+  await page.getByRole("button", { name: "Comment", exact: true }).click();
   await expect(page.getByTestId("task-comment").filter({ hasText: "Thanks, Edil" })).toBeVisible();
 });

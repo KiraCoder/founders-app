@@ -173,3 +173,32 @@ test("AI role editor and browser extension screenshots", async ({ page }) => {
   await card.scrollIntoViewIfNeeded();
   await page.locator("section", { has: card }).screenshot({ path: "docs/screenshots/extension-keys.png" });
 });
+
+/**
+ * The Linear-style Tasks pass (0034): /tasks, a task page, /routines and the profile / theme menu,
+ * at 1400 px and 390 px, light and dark (deviceScaleFactor 1). docs/screenshots/linear/*.png.
+ */
+test("linear tasks screenshots", async ({ browser }) => {
+  test.setTimeout(240_000);
+  for (const scheme of ["light", "dark"] as const) {
+    for (const [name, width, height] of [["desktop", 1400, 900], ["phone", 390, 844]] as const) {
+      const context = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 1, colorScheme: scheme, isMobile: name === "phone", hasTouch: name === "phone" });
+      const page = await context.newPage();
+      await login(page, "nuraaly");
+      const shot = (what: string) => page.screenshot({ path: `docs/screenshots/linear/${what}-${name}-${scheme}.png` });
+      await page.goto("/tasks?view=all");
+      await page.getByTestId("task-board").waitFor();
+      await shot("tasks");
+      await page.locator("li[data-task-id]").first().getByTestId("task-title").click();
+      await page.getByTestId("task-properties").waitFor();
+      await shot("task");
+      await page.goto("/routines");
+      await page.getByRole("search", { name: "Filter routines" }).waitFor();
+      await shot("routines");
+      await page.getByRole("button", { name: "User menu" }).click();
+      await page.getByRole("group", { name: "Theme" }).waitFor();
+      await shot("menu");
+      await context.close();
+    }
+  }
+});

@@ -105,15 +105,16 @@ test("a task keeps its archived department when edited; the task row shows the d
   await expect(card).toHaveCount(0);
 
   await page.goto("/tasks?view=company");
-  const row = page.locator("li", { hasText: title });
+  const row = page.locator("li[data-task-id]", { hasText: title });
   await expect(row.getByTestId("task-department")).toHaveText(`${number} ${name}`);
-  await row.getByRole("button", { name: "Edit" }).click();
+  await row.getByRole("button", { name: `More actions for ${title}` }).click();
+  await page.getByRole("listbox", { name: `More actions for ${title}` }).getByRole("option", { name: "Edit…" }).click();
   const select = row.getByLabel("Department (org chart)");
   await expect(select.locator("option:checked")).toHaveText(`${number} ${name} (archived)`);
   await row.getByLabel("Title").fill(`${title} (edited)`);
   await row.getByRole("button", { name: "Save changes" }).click();
   await page.reload();
-  const edited = page.locator("li", { hasText: `${title} (edited)` });
+  const edited = page.locator("li[data-task-id]", { hasText: `${title} (edited)` });
   await expect(edited.getByTestId("task-department")).toHaveText(`${number} ${name}`);
 });
 
