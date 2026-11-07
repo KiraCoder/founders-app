@@ -27,6 +27,8 @@ export const NOTIFICATION_KINDS = [
   "staff_chase",
   "staff_morning_list",
   "staff_info",
+  /** To a person: their task changed after it was sent (new checklist items, deadline, title) — one updated card (0032). */
+  "staff_task_update",
   /** Routines (0029): the ask / a reminder about today's run, to the person (staff) … */
   "staff_routine",
   /** … or to the founder the routine is assigned to (normal founder rules: budget, quiet hours). */
@@ -54,12 +56,13 @@ export const KIND_LABELS: Record<NotificationKind, string> = {
   staff_chase: "Staff · reminder",
   staff_morning_list: "Staff · morning list",
   staff_info: "Staff · info",
+  staff_task_update: "Staff · task updated",
   staff_routine: "Staff · routine",
   routine_reminder: "Routine",
 };
 
 /** Kinds that go to a person (people row) instead of a founder. */
-export const PERSON_KINDS = ["staff_new_task", "staff_chase", "staff_morning_list", "staff_info", "staff_routine"] as const;
+export const PERSON_KINDS = ["staff_new_task", "staff_chase", "staff_morning_list", "staff_info", "staff_routine", "staff_task_update"] as const;
 export type PersonKind = (typeof PERSON_KINDS)[number];
 
 /** Actions a founder can take straight from a task notification. */
@@ -110,6 +113,10 @@ export const STAFF_ACTIONS = [
   "staff_move_3d",
   "staff_move_7d",
   "staff_comment_pick",
+  /** «💬 Комментарий»: the person's next text becomes a comment on the task (0032). */
+  "staff_comment",
+  /** Tick one checklist item (`item` = its id, 0032). */
+  "staff_check",
 ] as const;
 export type StaffAction = (typeof STAFF_ACTIONS)[number];
 
@@ -131,6 +138,8 @@ export type MessageAction =
       requestId?: undefined;
       runId?: undefined;
       row?: number;
+      /** Checklist item id (staff_check); part of the button's key. */
+      item?: string;
       /** Server-side data stored with the button's token (never sent to Telegram). */
       payload?: Record<string, unknown>;
     }

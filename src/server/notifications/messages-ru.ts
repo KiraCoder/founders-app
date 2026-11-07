@@ -17,14 +17,16 @@ export interface StaffTaskLite {
 }
 
 export const STAFF_ACTION_LABELS: Record<StaffAction, string> = {
-  staff_accept: "Принято",
-  staff_done: "Готово",
-  staff_help: "Нужна помощь",
-  staff_move: "Перенести срок",
+  staff_accept: "👍 Принято",
+  staff_done: "✅ Готово",
+  staff_help: "🆘 Нужна помощь",
+  staff_move: "📅 Перенести срок",
   staff_move_1d: "+1 день",
   staff_move_3d: "+3 дня",
   staff_move_7d: "+7 дней",
   staff_comment_pick: "Выбрать",
+  staff_comment: "💬 Комментарий",
+  staff_check: "⬜",
 };
 
 export const MOVE_DAYS: Record<"staff_move_1d" | "staff_move_3d" | "staff_move_7d", number> = {
@@ -56,35 +58,117 @@ function metaLine(t: StaffTaskLite, today: IsoDate): string {
   return bits.join(" · ");
 }
 
-/** Принято / Готово / Нужна помощь / Перенести срок under a task message. */
-export function staffTaskButtons(taskId: string, withAccept = true): MessageAction[] {
-  const actions: StaffAction[] = withAccept
-    ? ["staff_accept", "staff_done", "staff_help", "staff_move"]
-    : ["staff_done", "staff_help", "staff_move"];
-  return actions.map((action) => ({ action, taskId, label: STAFF_ACTION_LABELS[action] }));
+/** «✅ Готово / 👍 Принято / 💬 Комментарий / 🆘 Нужна помощь / 📅 Перенести срок» under a task message. */
+export function staffTaskButtons(taskId: string, withAccept = true, payload?: Record<string, unknown>): MessageAction[] {
+  const rows: [StaffAction, number][] = [
+    ["staff_done", 0],
+    ...(withAccept ? ([["staff_accept", 0]] as [StaffAction, number][]) : []),
+    ["staff_comment", 1],
+    ["staff_help", 1],
+    ["staff_move", 2],
+  ];
+  return rows.map(([action, row]) => ({ action, taskId, label: STAFF_ACTION_LABELS[action], row, ...(payload ? { payload } : {}) }));
 }
 
-export function buildStaffNewTask(t: StaffTaskLite, today: IsoDate): NeutralMessage {
-  return {
-    title: `Новая задача: ${t.title}`,
-    lines: [
-      { text: metaLine(t, today), style: "text" },
-      { text: "Нажмите «Принято», когда увидели, и «Готово», когда сделали. Можно ответить текстом на это сообщение.", style: "muted" },
-    ],
-    actions: staffTaskButtons(t.id),
-  };
+/**
+ * Everything a task card shows the person (0032). Still nothing private: the notes only when a
+ * founder ticked "Send notes", never the owner or other people.
+ */
+export interface StaffTaskCard extends StaffTaskLite {
+  details?: string | null;
+  checklist: readonly { id: string; title: string; details: string | null; done: boolean }[];
+  status: "open" | "done" | "cancelled";
+  /** "12.11 10:05" when the person pressed «Принято». */
+  acceptedAt?: string | null;
+  helpRequested?: boolean;
+  deadlineRequested?: IsoDate | null;
 }
 
-export function buildStaffChase(t: StaffTaskLite, today: IsoDate): NeutralMessage {
-  const late = t.dueDate ? daysBetween(t.dueDate, today) : 0;
-  return {
-    title: late > 0 ? `Задача просрочена: ${t.title}` : `Напоминание: ${t.title}`,
-    lines: [
-      { text: metaLine(t, today), style: "text" },
-      { text: "Если уже сделано — нажмите «Готово». Нужна помощь или другой срок — кнопки ниже.", style: "muted" },
-    ],
-    actions: staffTaskButtons(t.id, false),
-  };
+/** Which message a card is: it decides the header (kept when the card is re-drawn after a button). */
+export type StaffCardKind = "new" | "chase" | "update";
+export const STAFF_CARD_KINDS: readonly StaffCardKind[] = ["new", "chase", "update"];
+
+/** At most this many «⬜ item» buttons under a card (the rest is ticked in the app or by «Готово»). */
+export const MAX_CARD_CHECK_BUTTONS = 8;
+
+const shortLabel = (s: string, n = 30) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+/**
+ * One task as a well-laid-out message: emoji header with the title, company, deadline, details,
+ * the checklist (✅ / ⬜ with progress), what the person already answered, and the buttons.
+ * `note` (italic, last) is the result of the button just pressed when the card is re-drawn.
+ */
+export function buildStaffTaskCard(c: StaffTaskCard, today: IsoDate, kind: StaffCardKind, note?: string): NeutralMessage {
+  const late = c.dueDate ? daysBetween(c.dueDate, today) : 0;
+  const header =
+    c.status === "done"
+      ? "✅ Выполнено"
+      : c.status === "cancelled"
+        ? "🚫 Задача отменена"
+        : kind === "new"
+          ? "🆕 Новая задача"
+          : kind === "update"
+            ? "✏️ Задача обновлена"
+            : late > 0
+              ? "⏰ Задача просрочена"
+              : "🔔 Напоминание";
+  const lines: MessageLine[] = [];
+  if (c.companyName) lines.push({ text: `🏢 ${c.companyName}`, style: "text" });
+  const prio = c.priority === "urgent" ? " · ‼️ Срочно" : c.priority === "high" ? " · ❗ Важно" : "";
+  lines.push({ text: `📅 ${ruDue(c.dueDate, today)}${prio}`, style: "text" });
+  if (c.details?.trim()) lines.push({ text: `📝 ${c.details.trim()}`, style: "text" });
+  if (c.checklist.length) {
+    const done = c.checklist.filter((i) => i.done).length;
+    const bar = "▰".repeat(Math.round((done / c.checklist.length) * 5)) + "▱".repeat(5 - Math.round((done / c.checklist.length) * 5));
+    lines.push({ text: `Чек-лист · ${done} из ${c.checklist.length} ${bar}`, style: "heading" });
+    for (const i of c.checklist) {
+      lines.push({ text: `${i.done ? "✅" : "⬜"} ${i.title}`, style: "text" });
+      if (i.details?.trim()) lines.push({ text: `      ${i.details.trim()}`, style: "muted" });
+    }
+  }
+  const state: string[] = [];
+  if (c.acceptedAt) state.push(`👍 Принято ${c.acceptedAt}`);
+  if (c.helpRequested) state.push("🆘 Помощь запрошена");
+  if (c.deadlineRequested) state.push(`📅 Запрошен перенос на ${ruDate(c.deadlineRequested)}`);
+  if (state.length) lines.push({ text: state.join(" · "), style: "heading" });
+  if (note) lines.push({ text: note, style: "muted" });
+  else if (c.status === "open") {
+    lines.push({
+      text:
+        kind === "chase"
+          ? "Если уже сделано — нажмите «✅ Готово». Нужна помощь или другой срок — кнопки ниже."
+          : "Нажмите «👍 Принято», когда увидели, и «✅ Готово», когда сделали. Ответ текстом на это сообщение — комментарий.",
+      style: "muted",
+    });
+  }
+  if (c.status !== "open") return { title: `${header}: ${c.title}`, lines, actions: [] };
+  const payload = { card: kind };
+  const actions: MessageAction[] = staffTaskButtons(c.id, kind !== "chase" && !c.acceptedAt, payload);
+  c.checklist
+    .map((i, n) => ({ i, n }))
+    .filter(({ i }) => !i.done)
+    .slice(0, MAX_CARD_CHECK_BUTTONS)
+    .forEach(({ i, n }) =>
+      actions.push({
+        action: "staff_check",
+        taskId: c.id,
+        item: i.id,
+        label: `⬜ ${n + 1}. ${shortLabel(i.title)}`,
+        row: 10 + n,
+        payload: { ...payload, item: i.id },
+      }),
+    );
+  return { title: `${header}: ${c.title}`, lines, actions };
+}
+
+const liteCard = (t: StaffTaskLite): StaffTaskCard => ({ ...t, checklist: [], status: "open" });
+
+export function buildStaffNewTask(t: StaffTaskLite | StaffTaskCard, today: IsoDate): NeutralMessage {
+  return buildStaffTaskCard("checklist" in t ? t : liteCard(t), today, "new");
+}
+
+export function buildStaffChase(t: StaffTaskLite | StaffTaskCard, today: IsoDate): NeutralMessage {
+  return buildStaffTaskCard("checklist" in t ? t : liteCard(t), today, "chase");
 }
 
 /** At most this many tasks (with buttons) in one grouped staff chase; the rest: «…и ещё N — /tasks». */
@@ -204,7 +288,7 @@ export function buildStaffHelp(): NeutralMessage {
       { text: "/routines — рутины на сегодня (что ещё не отмечено)", style: "text" },
       { text: "/done 2 — отметить задачу №2 из списка выполненной", style: "text" },
       { text: "/stop — больше не присылать сообщения", style: "text" },
-      { text: "Кнопки под задачами: Принято, Готово, Нужна помощь, Перенести срок.", style: "muted" },
+      { text: "Кнопки под задачами: ✅ Готово, 👍 Принято, 💬 Комментарий, 🆘 Нужна помощь, 📅 Перенести срок, ⬜ пункты чек-листа.", style: "muted" },
       { text: "Ответ текстом на сообщение о задаче — комментарий для основателей.", style: "muted" },
     ],
   };
@@ -234,6 +318,9 @@ export const RU = {
   moveRequested: (date: string) => `Запрос на перенос срока до ${date} отправлен. Основатель подтвердит.`,
   doneNotFound: "Нет задачи с таким номером. Отправьте /tasks, чтобы увидеть список.",
   noDeadlineMove: "Перенести можно только открытую задачу.",
+  commentPrompt: "Напишите комментарий одним сообщением — я добавлю его к задаче и передам основателям.",
+  checked: (label: string, left: number) => (left ? `✅ ${label}. Осталось пунктов: ${left}` : `✅ ${label}. Все пункты отмечены!`),
+  alreadyChecked: "Этот пункт уже отмечен.",
 } as const;
 
 // ---------------------------------------------------------------------------

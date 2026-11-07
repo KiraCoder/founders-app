@@ -44,12 +44,36 @@ export const DEFAULT_STAFF_SETTINGS: StaffSettings = {
   morningListTime: "09:00",
 };
 
+/** How a task is chased (0032, the task's segmented control). Absent = the person's settings. */
+export const TASK_CHASE_MODES = ["off", "once", "every"] as const;
+export type TaskChaseMode = (typeof TASK_CHASE_MODES)[number];
+/** Whether the founder who would be nudged about the task (assignee founder, else its creator) is. */
+export const FOUNDER_NUDGE_MODES = ["usual", "due_day", "off"] as const;
+export type FounderNudgeMode = (typeof FOUNDER_NUDGE_MODES)[number];
+
 /** Per-task overrides (task page): chasing off, another cadence or escalation. */
 export interface StaffTaskOverride {
+  /** Legacy (0028) switch; `chaseMode: "off"` is the same. */
   chaseEnabled?: boolean;
   chaseEveryMinutes?: number;
   escalateAfterChases?: number;
   escalateAt?: string | null;
+  /** 0032: "off" (never), "once" (one reminder on the due date), "every" (every N minutes / days until done). */
+  chaseMode?: TaskChaseMode;
+  /** With chaseMode "every": every N days (one reminder on those days) instead of every N minutes. */
+  chaseEveryDays?: number;
+  /**
+   * Escalation: absent = the person's settings (after N unanswered reminders / at a time);
+   * null = never tell the founders (reminders never stop by count); N = tell the founders when the
+   * task is still open N days after its due date (once per deadline; reminders go on).
+   */
+  escalateAfterDays?: number | null;
+  /** "Pause chasing" (task list / page): no reminders until resumed; the mode is kept. */
+  chasePaused?: boolean;
+  /** The task's notes are shown to the person in Telegram (off unless a founder ticked it). */
+  shareNotes?: boolean;
+  /** Founder reminders about this task (the founders' anti-spam rules always apply). Absent = usual. */
+  founderNudge?: FounderNudgeMode;
 }
 
 const blank = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
@@ -108,6 +132,15 @@ export const staffTaskOverrideSchema = z
     chaseEveryMinutes: z.preprocess(blank, minutes.optional()),
     escalateAfterChases: z.preprocess(blank, escalateCount.optional()),
     escalateAt: z.preprocess((v) => (v === "" ? undefined : v === "off" ? null : v), hm.nullable().optional()),
+    chaseMode: z.preprocess(blank, z.enum(TASK_CHASE_MODES).optional()),
+    chaseEveryDays: z.preprocess(blank, z.coerce.number().int().min(1, "At least 1 day").max(30, "At most 30 days").optional()),
+    escalateAfterDays: z.preprocess(
+      (v) => (v === "" ? undefined : v === "off" ? null : v),
+      z.coerce.number().int().min(0, "0 (the due day) or more").max(60, "At most 60 days").nullable().optional(),
+    ),
+    chasePaused: z.preprocess((v) => (v === "" || v === undefined ? undefined : v), formBool.optional()),
+    shareNotes: z.preprocess((v) => (v === "" || v === undefined ? undefined : v), formBool.optional()),
+    founderNudge: z.preprocess(blank, z.enum(FOUNDER_NUDGE_MODES).optional()),
   })
   .strict();
 
@@ -142,15 +175,31 @@ export function effectiveStaffSettings(defaults: StaffSettings, person: Partial<
 }
 
 /** The chase rules for one task: the person's settings ← the task's override. */
-export function taskChaseSettings(
-  s: StaffSettings,
-  task: StaffTaskOverride,
-): Pick<StaffSettings, "chaseEveryMinutes" | "escalateAfterChases" | "escalateAt"> & { chaseEnabled: boolean } {
+export interface TaskChaseRules extends Pick<StaffSettings, "chaseEveryMinutes" | "escalateAfterChases" | "escalateAt"> {
+  /** Reminders go out at all (mode not "off" and not paused). */
+  chaseEnabled: boolean;
+  mode: TaskChaseMode;
+  paused: boolean;
+  /** Mode "every" by days: one reminder on every N-th day from the due date. */
+  chaseEveryDays: number | null;
+  /** Tell the founders N days after the due date (null: by count / time, see escalateAfterChases / escalateAt). */
+  escalateAfterDays: number | null;
+}
+
+export function taskChaseSettings(s: StaffSettings, task: StaffTaskOverride): TaskChaseRules {
+  const mode: TaskChaseMode = task.chaseMode ?? (task.chaseEnabled === false ? "off" : "every");
+  const paused = task.chasePaused === true;
+  // An explicit escalation choice replaces the count / time rules of the person's settings.
+  const explicitEscalation = task.escalateAfterDays !== undefined;
   return {
-    chaseEnabled: task.chaseEnabled ?? true,
+    chaseEnabled: mode !== "off" && !paused,
+    mode,
+    paused,
     chaseEveryMinutes: task.chaseEveryMinutes ?? s.chaseEveryMinutes,
-    escalateAfterChases: task.escalateAfterChases ?? s.escalateAfterChases,
-    escalateAt: task.escalateAt === undefined ? s.escalateAt : task.escalateAt,
+    chaseEveryDays: mode === "every" && task.chaseEveryDays ? task.chaseEveryDays : null,
+    escalateAfterChases: explicitEscalation ? 0 : (task.escalateAfterChases ?? s.escalateAfterChases),
+    escalateAt: explicitEscalation ? null : task.escalateAt === undefined ? s.escalateAt : task.escalateAt,
+    escalateAfterDays: explicitEscalation ? (task.escalateAfterDays ?? null) : null,
   };
 }
 

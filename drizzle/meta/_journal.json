@@ -218,6 +218,13 @@
       "when": 1794021245122,
       "tag": "0030_oauth_connector",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1794036610243,
+      "tag": "0032_task_checklist",
+      "breakpoints": true
     }
   ]
 }

@@ -175,6 +175,8 @@ export interface PersonPlanInput {
   unanswered: ReadonlyMap<string, number>;
   /** Per task: when the person last answered on it (any button or reply), if ever. */
   answeredAt?: ReadonlyMap<string, Date>;
+  /** Per task: when a chase listing it was last sent (any deadline). "Once" / "every N days" use it. */
+  chasedAt?: ReadonlyMap<string, Date>;
 }
 
 export interface StaffEscalation {
@@ -182,7 +184,8 @@ export interface StaffEscalation {
   ownerUserId: string;
   title: string;
   dueDate: IsoDate;
-  reason: "count" | "time";
+  /** "days": still open N days after the due date (the task's explicit escalation, 0032; both founders). */
+  reason: "count" | "time" | "days";
   chases: number;
   /** The person's last answer on the task (part of the dedupe key: going quiet again escalates again). */
   answeredAt: Date | null;
@@ -254,13 +257,24 @@ export function planForPerson(input: PersonPlanInput): PersonPlan {
     const sent = input.unanswered.get(t.id) ?? 0;
     const answeredAt = input.answeredAt?.get(t.id) ?? null;
     const byCount = c.escalateAfterChases > 0 && sent >= c.escalateAfterChases;
+    const late = daysBetween(t.dueDate, today);
     const base = { taskId: t.id, ownerUserId: t.ownerUserId, title: t.title, dueDate: t.dueDate, chases: sent, answeredAt };
     if (byCount) escalations.push({ ...base, reason: "count" });
     if (c.escalateAt && minutes >= hmToMinutes(c.escalateAt)) escalations.push({ ...base, reason: "time" });
+    if (c.escalateAfterDays !== null && late >= c.escalateAfterDays && minutes >= workStart) escalations.push({ ...base, reason: "days" });
     if (!c.chaseEnabled || byCount || minutes < workStart || minutes >= workEnd) continue;
-    const slot = Math.floor((minutes - workStart) / c.chaseEveryMinutes);
-    const slotStart = workStart + slot * c.chaseEveryMinutes;
-    const slotEnd = Math.min(slotStart + c.chaseEveryMinutes, workEnd);
+    // "Remind once on the due date" / "every N days": one reminder on those days, in the slot of
+    // the person's own cadence that is current (it joins that slot's grouped message).
+    const daily = c.mode === "once" || c.chaseEveryDays !== null;
+    if (daily) {
+      if (c.mode === "once" ? late !== 0 : late % c.chaseEveryDays! !== 0) continue;
+      const last = input.chasedAt?.get(t.id);
+      if (last && last.getTime() >= zonedTimeToUtc(today, "00:00", tz).getTime()) continue;
+    }
+    const every = daily ? s.chaseEveryMinutes : c.chaseEveryMinutes;
+    const slot = Math.floor((minutes - workStart) / every);
+    const slotStart = workStart + slot * every;
+    const slotEnd = Math.min(slotStart + every, workEnd);
     const slotStartAt = zonedTimeToUtc(today, hmOf(slotStart), tz);
     // Switched on during this slot: the first chase waits for the next slot.
     if (input.enabledAt && input.enabledAt.getTime() >= slotStartAt.getTime()) continue;
@@ -308,6 +322,7 @@ export function listedInChase(row: { taskId: string | null; payload: unknown }):
 /** Escalation dedupe key. "count" includes the last answer: after an answer, N more silent chases escalate again. */
 export function escalationKey(e: StaffEscalation): string {
   if (e.reason === "time") return `esc:${e.taskId}:${e.dueDate}:time`;
+  if (e.reason === "days") return `esc:${e.taskId}:${e.dueDate}:days`;
   return `esc:${e.taskId}:${e.dueDate}:count:${e.answeredAt ? e.answeredAt.toISOString() : "never"}`;
 }
 
@@ -316,7 +331,9 @@ function escalationNote(e: StaffEscalation, personName: string) {
   const line =
     e.reason === "count"
       ? `${personName} hasn't confirmed "${e.title}" (${e.chases} reminders without an answer; due ${e.dueDate})`
-      : `${personName} still hasn't closed "${e.title}" (due ${e.dueDate})`;
+      : e.reason === "days"
+        ? `${personName} still hasn't closed "${e.title}" — it was due ${e.dueDate}`
+        : `${personName} still hasn't closed "${e.title}" (due ${e.dueDate})`;
   return { line, message: { title: "Team: no answer", lines: [{ text: line }, { text: "Open the task to comment or reassign.", style: "muted" as const }] } };
 }
 
@@ -386,8 +403,11 @@ export async function planStaffTick(db: Db, now: Date, timeZone: string): Promis
     const lastReply = new Map(replies.map((r) => [r.taskId!, r.at]));
     const dueOf = new Map(open.map((t) => [t.id, t.dueDate]));
     const unanswered = new Map<string, number>();
+    const chasedAt = new Map<string, Date>();
     for (const c of chases) {
       for (const entry of listedInChase(c)) {
+        const prev = chasedAt.get(entry.id);
+        if (!prev || prev.getTime() < c.sentAt!.getTime()) chasedAt.set(entry.id, c.sentAt!);
         if (!dueOf.has(entry.id) || entry.dueDate !== dueOf.get(entry.id)) continue;
         const reply = lastReply.get(entry.id);
         if (reply && c.sentAt!.getTime() <= reply.getTime()) continue;
@@ -412,6 +432,7 @@ export async function planStaffTick(db: Db, now: Date, timeZone: string): Promis
       })),
       unanswered,
       answeredAt: lastReply,
+      chasedAt,
     });
     for (const m of plan.messages) {
       out.planned++;
@@ -433,7 +454,8 @@ export async function planStaffTick(db: Db, now: Date, timeZone: string): Promis
     for (const e of plan.escalations) {
       const note = escalationNote(e, name);
       out.escalated += await notifyFounders(db, {
-        userIds: [e.ownerUserId],
+        // "Tell founders N days after the due date" goes to both founders; the rest to the task's founder.
+        userIds: e.reason === "days" ? null : [e.ownerUserId],
         line: note.line,
         taskId: e.taskId,
         dedupeKey: escalationKey(e),
@@ -464,6 +486,18 @@ export interface PlanOptions {
   staff?: boolean;
 }
 
+/** The tasks' explicit "Founder reminders" choice (absent = usual). */
+async function founderNudgeModes(db: Db, taskIds: string[]): Promise<Map<string, string>> {
+  if (!taskIds.length) return new Map();
+  const rows = await db.select({ id: tasks.id, c: tasks.staffChase }).from(tasks).where(inArray(tasks.id, taskIds));
+  const out = new Map<string, string>();
+  for (const r of rows) {
+    const mode = parseTaskOverride(r.c).founderNudge;
+    if (mode) out.set(r.id, mode);
+  }
+  return out;
+}
+
 /** Plans and enqueues for every founder (or the given ones). */
 export async function planTick(db: Db, now: Date, opts: PlanOptions = {}): Promise<PlanReport> {
   const timeZone = opts.timeZone ?? (process.env.APP_TIMEZONE || "Asia/Bishkek");
@@ -479,13 +513,16 @@ export async function planTick(db: Db, now: Date, opts: PlanOptions = {}): Promi
         .from(reminderSnoozes)
         .where(and(eq(reminderSnoozes.userId, user.id), gt(reminderSnoozes.snoozedUntil, now))),
     ]);
+    const nudge = await founderNudgeModes(db, [...summary.overdue, ...summary.dueToday].map((t) => t.id));
     const items = planForUser({
       userId: user.id,
       now,
       timeZone,
       prefs,
-      overdue: summary.overdue,
-      dueToday: summary.dueToday,
+      // A task's "Founder reminders" choice (0032): off = no pushes, due_day = the due-day nudge only.
+      // Everything else (budget, quiet hours, one push per task per day) is unchanged.
+      overdue: summary.overdue.filter((t) => (nudge.get(t.id) ?? "usual") === "usual"),
+      dueToday: summary.dueToday.filter((t) => nudge.get(t.id) !== "off"),
       snoozedTaskIds: new Set(snoozes.map((s) => s.taskId)),
     });
     for (const item of items) {

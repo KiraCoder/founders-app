@@ -167,7 +167,7 @@ describe("A. grouped staff chase", () => {
     const task = await edilTask("Один акт", D, local("2026-11-01", "10:00"));
     await tick(local("2026-11-01", "10:05"));
     const r = toEdil(await tick(local(D, "09:00")));
-    expect(r.map((s) => s.message.title)).toEqual(["Напоминание: Один акт"]);
+    expect(r.map((s) => s.message.title)).toEqual(["🔔 Напоминание: Один акт"]);
     const [row] = await t.handle.db
       .select()
       .from(notificationsOutbox)

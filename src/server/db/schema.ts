@@ -516,6 +516,12 @@ export const telegramLinks = pgTable(
     firstName: text("first_name"),
     /** A person sent /stop: the bot sends them nothing until they link again. */
     stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    /**
+     * «💬 Комментарий» was pressed (0032): the person's next text becomes a comment on this task
+     * while it is fresh (services/staff-tasks.ts).
+     */
+    pendingCommentTaskId: uuid("pending_comment_task_id").references((): AnyPgColumn => tasks.id, { onDelete: "set null" }),
+    pendingCommentAt: timestamp("pending_comment_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
@@ -617,6 +623,37 @@ export const taskComments = pgTable(
     check("task_comments_text_ck", sql`length(${t.text}) between 1 and 4000`),
   ],
 );
+
+/**
+ * A task's checklist (subtasks, 0032): items added one by one (title + optional details), ticked
+ * by a founder in the app or by the assigned person through the bot (time + who are kept).
+ * Read and written only through services/task-checklist.ts (it follows the task's visibility).
+ */
+export const taskChecklistItems = pgTable(
+  "task_checklist_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    taskId: uuid("task_id")
+      .notNull()
+      .references(() => tasks.id, { onDelete: "cascade" }),
+    position: integer("position").notNull().default(0),
+    title: text("title").notNull(),
+    details: text("details"),
+    doneAt: timestamp("done_at", { withTimezone: true }),
+    doneByUserId: uuid("done_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    doneByPersonId: uuid("done_by_person_id").references(() => people.id, { onDelete: "set null" }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("task_checklist_items_task_idx").on(t.taskId, t.position),
+    check("task_checklist_items_title_ck", sql`length(${t.title}) between 1 and 300`),
+    check("task_checklist_items_details_ck", sql`${t.details} is null or length(${t.details}) <= 2000`),
+    check("task_checklist_items_one_ticker", sql`${t.doneByUserId} is null or ${t.doneByPersonId} is null`),
+  ],
+);
+export type TaskChecklistItem = typeof taskChecklistItems.$inferSelect;
 
 /**
  * "Перенести срок": a person asks for a new deadline; a founder approves (the deadline moves,

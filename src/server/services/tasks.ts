@@ -45,6 +45,8 @@ import { today, type ServiceContext } from "./context";
 import { ServiceError } from "./errors";
 import { CLOSED_STATUSES, isOverdue, nextCompletedAt, thisWeekRange } from "./tasks-rules";
 import { assertTaskDepartment } from "./org";
+import { parseTaskOverride } from "@/lib/staff-schemas";
+import { queueStaffTaskUpdate } from "./task-staff-updates";
 
 /** A task row enriched for display / API output. */
 export interface TaskView {
@@ -273,6 +275,30 @@ interface Relations {
   /** Department of the org chart; checked only when it is new or the company changed. */
   orgDepartmentId?: string | null;
   checkDepartment?: boolean;
+  /**
+   * The person assignment is new (or its company changed): the person must work for the company
+   * NOW (active link, not left) — the same list the task form offers. An unchanged assignment
+   * of someone who left since is kept (only new assignments are checked strictly).
+   */
+  checkPerson?: boolean;
+}
+
+/** Companies a person works for right now (active link, not left), by name. */
+export async function personActiveCompanies(ctx: ServiceContext, personId: string): Promise<{ id: string; name: string }[]> {
+  return ctx.db
+    .select({ id: companies.id, name: companies.name })
+    .from(personCompanies)
+    .innerJoin(people, eq(people.id, personCompanies.personId))
+    .innerJoin(companies, eq(companies.id, personCompanies.companyId))
+    .where(
+      and(
+        eq(personCompanies.personId, personId),
+        eq(personCompanies.isActive, true),
+        isNull(people.leftAt),
+        isNull(companies.archivedAt),
+      ),
+    )
+    .orderBy(asc(companies.name));
 }
 
 /** Validates cross-row rules and returns the (possibly inherited) companyId. */
@@ -293,11 +319,19 @@ async function validateRelations(ctx: ServiceContext, r: Relations): Promise<str
     companyId = project.companyId;
   }
 
-  if (companyId) await assertCompanyAccess(ctx, companyId);
-
   if (r.assigneeUserId && r.assigneePersonId) {
     throw new ServiceError("validation", "Assign to a founder or a person, not both");
   }
+
+  // A shared task for a person who works for exactly one company: that company (the form does
+  // the same when the person is picked first).
+  let personCompanyList: { id: string; name: string }[] | null = null;
+  if (r.assigneePersonId && r.visibility === "shared" && r.checkPerson !== false) {
+    personCompanyList = await personActiveCompanies(ctx, r.assigneePersonId);
+    if (!companyId && personCompanyList.length === 1) companyId = personCompanyList[0]!.id;
+  }
+
+  if (companyId) await assertCompanyAccess(ctx, companyId);
 
   if (r.visibility === "shared" && !companyId) {
     throw new ServiceError("validation", "Shared tasks need a company", { companyId: ["Required"] });
@@ -318,8 +352,17 @@ async function validateRelations(ctx: ServiceContext, r: Relations): Promise<str
     if (!u) throw new ServiceError("validation", "Assignee not found", { assigneeUserId: ["Not found"] });
   }
 
+  if (r.assigneePersonId && personCompanyList && companyId && !personCompanyList.some((c) => c.id === companyId)) {
+    const [person] = await ctx.db.select({ name: people.fullName, short: people.shortName }).from(people).where(eq(people.id, r.assigneePersonId));
+    const name = person?.short || person?.name || "This person";
+    const msg = personCompanyList.length
+      ? `${name} works for ${personCompanyList.map((c) => c.name).join(", ")} — pick one of those companies`
+      : `${name} does not work for any company right now`;
+    throw new ServiceError("validation", msg, { companyId: [msg], assigneePersonId: ["Not linked to this company"] });
+  }
+
   if (r.assigneePersonId) {
-    if (!companyId) throw new ServiceError("validation", "Pick a company before assigning a person");
+    if (!companyId) throw new ServiceError("validation", "Pick a company before assigning a person", { companyId: ["Pick a company"] });
     const [link] = await ctx.db
       .select({ id: personCompanies.id })
       .from(personCompanies)
@@ -401,6 +444,23 @@ const TRACKED_FIELDS = [
 ] as const;
 
 export async function updateTask(ctx: ServiceContext, id: string, input: TaskUpdateInput): Promise<TaskView> {
+  return (await updateTaskDetailed(ctx, id, input)).task;
+}
+
+/** Fields the assigned person sees on their card: a change to them sends one updated card. */
+const CARD_FIELDS = ["title", "dueDate", "priority"] as const;
+
+/**
+ * updateTask + whether the task's person gets an updated Telegram card ("Elmurat will get an
+ * updated message"): only when the person already got the task and keeps it (a reassignment
+ * gets its own new-task message) and the title, deadline, priority or shared notes changed.
+ */
+export async function updateTaskDetailed(
+  ctx: ServiceContext,
+  id: string,
+  input: TaskUpdateInput,
+  opts: { notifyStaff?: boolean } = {},
+): Promise<{ task: TaskView; staffNotice: { notified: boolean; personName: string | null } }> {
   const patch = taskUpdateSchema.parse(input);
   const current = await loadRawVisibleTask(ctx, id);
 
@@ -435,12 +495,13 @@ export async function updateTask(ctx: ServiceContext, id: string, input: TaskUpd
     orgDepartmentId: next.orgDepartmentId,
     // An unchanged link to a department archived since stays (only new links are checked).
     checkDepartment: next.orgDepartmentId !== current.orgDepartmentId || next.companyId !== current.companyId,
+    checkPerson: next.assigneePersonId !== current.assigneePersonId || next.companyId !== current.companyId,
   });
   next.companyId = companyId;
   next.completedAt = nextCompletedAt(current, next.status, ctx.now);
 
   const changed = TRACKED_FIELDS.filter((f) => (current[f] ?? null) !== (next[f] ?? null));
-  if (changed.length === 0) return getTask(ctx, id);
+  if (changed.length === 0) return { task: await getTask(ctx, id), staffNotice: { notified: false, personName: null } };
 
   await ctx.db.transaction(async (tx) => {
     await tx
@@ -488,15 +549,23 @@ export async function updateTask(ctx: ServiceContext, id: string, input: TaskUpd
     }
     await tx.insert(taskEvents).values(events);
   });
-  return getTask(ctx, id);
+  const cardChanged =
+    CARD_FIELDS.some((f) => (changed as readonly string[]).includes(f)) || (changed.includes("notes") && parseTaskOverride(current.staffChase).shareNotes === true);
+  const samePerson = !!next.assigneePersonId && next.assigneePersonId === current.assigneePersonId;
+  const staffNotice =
+    opts.notifyStaff !== false && cardChanged && samePerson && !CLOSED_STATUSES.includes(next.status as never)
+      ? await queueStaffTaskUpdate(ctx.db, id, ctx.now).then((n) => ({ notified: n.queued, personName: n.personName }))
+      : { notified: false, personName: null };
+  return { task: await getTask(ctx, id), staffNotice };
 }
 
 export async function changeTaskStatus(ctx: ServiceContext, id: string, status: TaskStatus) {
   return updateTask(ctx, id, { status });
 }
 
+/** A deadline approved from a person's request: they already get a line about it, no extra card. */
 export async function changeTaskDeadline(ctx: ServiceContext, id: string, dueDate: IsoDate | null) {
-  return updateTask(ctx, id, { dueDate });
+  return (await updateTaskDetailed(ctx, id, { dueDate }, { notifyStaff: false })).task;
 }
 
 export async function deleteTask(ctx: ServiceContext, id: string): Promise<void> {
