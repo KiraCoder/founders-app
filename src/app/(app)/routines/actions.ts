@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import type { RoutineStatus } from "@/lib/routines";
 import { getPageContext } from "@/server/context";
+import { dispatch } from "@/server/notifications/dispatcher";
 import { toServiceError } from "@/server/services/errors";
 import {
   createExampleRoutine,
@@ -83,7 +84,14 @@ export async function setRoutineStatusAction(_p: RoutineFormState, fd: FormData)
 
 export async function runRoutineNowAction(_p: RoutineFormState, fd: FormData): Promise<RoutineFormState> {
   const ctx = await getPageContext();
-  return run(() => runRoutineNow(ctx, str(fd, "id")), "Asked now: the message goes out with the next tick");
+  return run(async () => {
+    await runRoutineNow(ctx, str(fd, "id"));
+    // Send it right away instead of waiting for the next reminder-clock tick. Failures stay
+    // queued and the next tick retries them, so the action itself still succeeds.
+    await dispatch(ctx.db, new Date(), { limit: 25 }).catch((err: unknown) =>
+      console.error("[routines] run now: immediate send failed", err),
+    );
+  }, "Asked now: sent to Telegram. Nothing arrived? Check Settings → Telegram and Reminder clock.");
 }
 
 export async function deleteRoutineAction(_p: RoutineFormState, fd: FormData): Promise<RoutineFormState> {
