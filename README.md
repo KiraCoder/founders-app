@@ -193,6 +193,7 @@ feature stays off without it.
 | `TELEGRAM_BOT_TOKEN` | For Telegram | Bot token from @BotFather. Empty: messages go to the dev inbox only |
 | `TELEGRAM_WEBHOOK_SECRET` | For Telegram | Random text; Telegram sends it back with every update |
 | `TELEGRAM_BOT_USERNAME` | For Telegram | Bot username without `@` (shown on Settings; used in staff invite links). Empty: `founders_app_bot` |
+| `OAUTH_EXTRA_REDIRECT_HOSTS` | No | Claude connector: extra host names (comma-separated, exact, https only) a registered OAuth client may redirect to. Always allowed: `claude.ai`, `claude.com`, `localhost` / `127.0.0.1` (http or https). See *Connect to Claude* |
 | `CRON_SECRET` | For reminders | Protects `/api/cron/tick`; without it the scheduler endpoint always answers 401 |
 | `DEV_TOOLS` | No | `1` shows the dev inbox in a production build (previews only, never the real site) |
 | `FILE_STORAGE` | No | Where document scans go. Empty: local disk in development, **uploads off in production** ("File uploads arrive with Supabase storage"); `local`: local disk on a server with a lasting disk (ignored on Vercel); `supabase`: placeholder, off until written |
@@ -1240,6 +1241,16 @@ remove the connector in Claude.
   (migration `0030_oauth_connector.sql`, RLS + revoke).
 - Issuer / resource URL: `APP_URL` when set, else the address the request came to. Set
   `APP_URL=https://founders-app-one.vercel.app` on Vercel so preview URLs never become the issuer.
+  An access token issued for a resource (RFC 8707 `resource`) only works at that resource: a token
+  minted for another deployment's `/api/mcp` is refused (trailing slash ignored).
+- **Redirect allowlist.** Registration accepts only `redirect_uris` on **`claude.ai`** or
+  **`claude.com`** (https, exact host), a loopback address (`localhost` / `127.0.0.1` / `[::1]`,
+  http allowed only there — MCP Inspector, local tools) or a host listed in
+  **`OAUTH_EXTRA_REDIRECT_HOSTS`** (comma-separated, e.g. `OAUTH_EXTRA_REDIRECT_HOSTS=tools.example.com`;
+  https only). Anything else is `invalid_redirect_uri`, so anyone registering a client cannot make
+  `/oauth/authorize` an open redirect. The authorize step re-checks: a client whose redirect is
+  unknown, does not match, or is not (or no longer) allowed gets an error page and is never
+  redirected; only after that do request errors go back to the client as `error=` redirects.
 - Middleware: only `/api/mcp`, `/api/oauth/register`, `/api/oauth/token`, `/api/oauth/revoke`
   (exact paths) and `/.well-known/*` skip the session check; `/oauth/authorize` and
   `/api/oauth/authorize` need the founder's session.

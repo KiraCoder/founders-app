@@ -57,7 +57,7 @@ export function handleMcpPreflight(): Response {
 
 export async function handleMcpRequest(req: Request, deps: McpDeps): Promise<Response> {
   const now = deps.now?.() ?? new Date();
-  const auth = await authenticateAccessToken(deps.db, req.headers.get("authorization"), now);
+  const auth = await authenticateAccessToken(deps.db, req.headers.get("authorization"), now, oauthBaseUrl(req, deps.env));
   if (!auth.ok) return unauthorized(req, deps.env, auth.reason === "invalid");
 
   if (req.method !== "POST") {

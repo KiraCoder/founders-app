@@ -3,10 +3,19 @@ import { NextRequest } from "next/server";
 import { eq } from "drizzle-orm";
 import { middleware } from "@/middleware";
 import { oauthAuthCodes, oauthClients, oauthTokens, users } from "@/server/db/schema";
-import { authorizationServerMetadataResponse, handleRevoke, protectedResourceMetadataResponse } from "@/server/http/oauth";
+import { authorizationServerMetadataResponse, handleRegister, handleRevoke, protectedResourceMetadataResponse } from "@/server/http/oauth";
 import { handleMcpRequest } from "@/server/http/mcp";
 import type { SessionUser } from "@/server/auth/types";
-import { consentToken, issueAuthorizationCode, listConnectedApps, revokeConnectedApp, sha256 } from "@/server/services/oauth";
+import {
+  allowedRedirectHosts,
+  authenticateAccessToken,
+  checkAuthorizeRequest,
+  consentToken,
+  issueAuthorizationCode,
+  listConnectedApps,
+  revokeConnectedApp,
+  sha256,
+} from "@/server/services/oauth";
 import { createTestDb, FIXED_NOW, type TestDb } from "../helpers/db";
 import { authorize, BASE, codeFrom, connect, ENV, formPost, jsonPost, pkcePair, REDIRECT, register, token } from "../helpers/oauth";
 
@@ -365,5 +374,90 @@ describe("middleware exemptions are exact", () => {
     expect(res.status).toBe(401);
     const bad = await handleToken(new Request(`${BASE}/api/oauth/token`, { method: "POST", headers: { "content-type": "text/plain" }, body: "x" }), { db: t.handle.db, env: ENV });
     expect(bad.status).toBe(400);
+  });
+});
+
+describe("review fixes: redirect allowlist and token audience", () => {
+  it("registration accepts only claude.ai / claude.com / loopback / OAUTH_EXTRA_REDIRECT_HOSTS redirect_uris", async () => {
+    let ip = 0;
+    const reg = (uris: string[], env: Record<string, string | undefined> = ENV) =>
+      handleRegister(
+        jsonPost("/api/oauth/register", { client_name: "X", redirect_uris: uris, token_endpoint_auth_method: "none" }, { "x-forwarded-for": `10.7.${++ip}.1` }),
+        { db: t.handle.db, now: () => now, env },
+      );
+    for (const ok of [
+      "https://claude.ai/api/mcp/auth_callback",
+      "https://claude.com/api/mcp/auth_callback",
+      "http://localhost:6274/cb",
+      "http://127.0.0.1:33418/cb",
+      "https://localhost/cb",
+    ]) {
+      expect((await reg([ok])).status, ok).toBe(201);
+    }
+    for (const bad of [
+      "https://evil.example/cb",
+      "https://claude.ai.evil.example/cb",
+      "https://evil.claude.ai/cb",
+      "http://claude.ai/cb",
+      "https://user:pw@claude.ai/cb",
+      "javascript:alert(1)",
+    ]) {
+      const res = await reg([bad]);
+      expect(res.status, bad).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("invalid_redirect_uri");
+    }
+    // One bad URI spoils the registration.
+    expect((await reg([REDIRECT, "https://evil.example/cb"])).status).toBe(400);
+    // Extra hosts from the environment (comma list, case and spaces ignored); still https only.
+    const env = { OAUTH_EXTRA_REDIRECT_HOSTS: " Tools.Example.com , other.example " };
+    expect((await reg(["https://tools.example.com/cb"], env)).status).toBe(201);
+    expect((await reg(["https://other.example/cb"], env)).status).toBe(201);
+    expect((await reg(["http://tools.example.com/cb"], env)).status).toBe(400);
+    expect(allowedRedirectHosts({}).has("claude.ai")).toBe(true);
+  });
+
+  it("a client registered with a now-disallowed redirect_uri gets an error page, never a redirect", async () => {
+    const evil = "https://evil.example/cb";
+    await t.handle.db.insert(oauthClients).values({
+      clientId: "fcl_legacy_evil_client",
+      clientSecretHash: null,
+      clientName: "Legacy",
+      redirectUris: [evil],
+      tokenEndpointAuthMethod: "none",
+      clientUri: null,
+      createdAt: now,
+    });
+    // An invalid PKCE method would normally be an error= redirect back to the client.
+    const check = await checkAuthorizeRequest(
+      t.handle.db,
+      { client_id: "fcl_legacy_evil_client", redirect_uri: evil, response_type: "code", code_challenge_method: "plain" },
+      BASE,
+      ENV,
+    );
+    expect(check).toMatchObject({ ok: false, kind: "page" });
+    const { handleAuthorizePost } = await import("@/server/http/oauth");
+    const res = await handleAuthorizePost(
+      formPost("/api/oauth/authorize", { response_type: "token", client_id: "fcl_legacy_evil_client", redirect_uri: evil }, { origin: BASE }),
+      { db: t.handle.db, user: t.founders.nuraaly, now: () => now, env: ENV },
+    );
+    expect(res.status).toBe(400);
+    expect(res.headers.get("location")).toBeNull();
+    // Once the host is on the allowlist the redirect is trusted: errors go back as redirects.
+    const allowed = await checkAuthorizeRequest(t.handle.db, { client_id: "fcl_legacy_evil_client", redirect_uri: evil, response_type: "token" }, BASE, {
+      OAUTH_EXTRA_REDIRECT_HOSTS: "evil.example",
+    });
+    expect(allowed).toMatchObject({ ok: false, kind: "redirect", error: "unsupported_response_type" });
+  });
+
+  it("an access token issued for another resource is refused at /api/mcp (trailing slash normalised)", async () => {
+    const { access } = await connect(t.handle.db, t.founders.nuraaly, now);
+    expect((await mcpPing(access)).status).toBe(200);
+    const hash = sha256(access);
+    await t.handle.db.update(oauthTokens).set({ resource: `${BASE}/api/mcp/` }).where(eq(oauthTokens.accessTokenHash, hash));
+    expect((await mcpPing(access)).status).toBe(200);
+    await t.handle.db.update(oauthTokens).set({ resource: "https://other-cockpit.test/api/mcp" }).where(eq(oauthTokens.accessTokenHash, hash));
+    expect((await mcpPing(access)).status).toBe(401);
+    expect((await authenticateAccessToken(t.handle.db, `Bearer ${access}`, now, BASE)).ok).toBe(false);
+    expect((await authenticateAccessToken(t.handle.db, `Bearer ${access}`, now, "https://other-cockpit.test/")).ok).toBe(true);
   });
 });

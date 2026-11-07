@@ -123,34 +123,62 @@ export class OAuthError extends Error {
 // Dynamic client registration (RFC 7591)
 // ---------------------------------------------------------------------------
 
-function isAllowedRedirectUri(value: string): boolean {
+/** Claude's own callback hosts (claude.ai custom connectors). Others via OAUTH_EXTRA_REDIRECT_HOSTS. */
+export const DEFAULT_REDIRECT_HOSTS = ["claude.ai", "claude.com"] as const;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/** Allowed redirect hosts: claude.ai, claude.com and OAUTH_EXTRA_REDIRECT_HOSTS (comma-separated host names). */
+export function allowedRedirectHosts(env: Record<string, string | undefined> = process.env): Set<string> {
+  const extra = (env.OAUTH_EXTRA_REDIRECT_HOSTS ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set([...DEFAULT_REDIRECT_HOSTS, ...extra]);
+}
+
+/**
+ * A redirect_uri this server will ever send a browser to: https on an allowed host (exact host
+ * name), or a loopback address (http or https, RFC 8252 §7.3); never a fragment or credentials.
+ * Registration refuses anything else, so a self-registered client cannot turn /oauth/authorize
+ * into an open redirect; the authorize step re-checks (clients registered before the allowlist).
+ */
+export function isAllowedRedirectUri(value: string, env: Record<string, string | undefined> = process.env): boolean {
   let u: URL;
   try {
     u = new URL(value);
   } catch {
     return false;
   }
-  if (u.hash) return false;
-  if (u.protocol === "https:") return true;
-  // Loopback redirects for native / local tools (RFC 8252 §7.3).
-  return u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]");
+  if (u.hash || u.username || u.password) return false;
+  const host = u.hostname.toLowerCase();
+  if (LOOPBACK_HOSTS.has(host)) return u.protocol === "http:" || u.protocol === "https:";
+  return u.protocol === "https:" && allowedRedirectHosts(env).has(host);
 }
 
 const AUTH_METHODS = ["none", "client_secret_post", "client_secret_basic"] as const;
 type AuthMethod = (typeof AUTH_METHODS)[number];
 
-const registrationSchema = z.object({
-  redirect_uris: z
-    .array(z.string().max(2000).refine(isAllowedRedirectUri, "redirect_uris must be https (or http on localhost) without a fragment"))
-    .min(1, "redirect_uris is required")
-    .max(10),
-  client_name: z.string().trim().max(100).optional(),
-  client_uri: z.url().max(2000).optional(),
-  token_endpoint_auth_method: z.enum(AUTH_METHODS).optional(),
-  grant_types: z.array(z.string()).optional(),
-  response_types: z.array(z.string()).optional(),
-  scope: z.string().max(200).optional(),
-});
+const registrationSchema = (env: Record<string, string | undefined>) =>
+  z.object({
+    redirect_uris: z
+      .array(
+        z
+          .string()
+          .max(2000)
+          .refine(
+            (v) => isAllowedRedirectUri(v, env),
+            "redirect_uris must be https on an allowed host (claude.ai, claude.com, OAUTH_EXTRA_REDIRECT_HOSTS) or a loopback address, without a fragment",
+          ),
+      )
+      .min(1, "redirect_uris is required")
+      .max(10),
+    client_name: z.string().trim().max(100).optional(),
+    client_uri: z.url().max(2000).optional(),
+    token_endpoint_auth_method: z.enum(AUTH_METHODS).optional(),
+    grant_types: z.array(z.string()).optional(),
+    response_types: z.array(z.string()).optional(),
+    scope: z.string().max(200).optional(),
+  });
 
 export interface RegisteredClient {
   client_id: string;
@@ -165,8 +193,13 @@ export interface RegisteredClient {
   scope: string;
 }
 
-export async function registerClient(db: Db, body: unknown, now: Date): Promise<RegisteredClient> {
-  const parsed = registrationSchema.safeParse(body);
+export async function registerClient(
+  db: Db,
+  body: unknown,
+  now: Date,
+  env: Record<string, string | undefined> = process.env,
+): Promise<RegisteredClient> {
+  const parsed = registrationSchema(env).safeParse(body);
   if (!parsed.success) {
     const first = parsed.error.issues[0];
     const field = first?.path.join(".");
@@ -253,12 +286,21 @@ export type AuthorizeCheck =
 
 const CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 
-export async function checkAuthorizeRequest(db: Db, p: AuthorizeParams, base: string): Promise<AuthorizeCheck> {
+export async function checkAuthorizeRequest(
+  db: Db,
+  p: AuthorizeParams,
+  base: string,
+  env: Record<string, string | undefined> = process.env,
+): Promise<AuthorizeCheck> {
   const client = await findClient(db, p.client_id);
   if (!client) return { ok: false, kind: "page", message: "This app is not registered with Founder Cockpit (unknown client_id). Add the connector again in Claude." };
   const redirectUri = p.redirect_uri ?? (client.redirectUris.length === 1 ? client.redirectUris[0]! : null);
   if (!redirectUri || !client.redirectUris.includes(redirectUri)) {
     return { ok: false, kind: "page", message: "The redirect address does not match the one this app registered." };
+  }
+  // Registered before the host allowlist (or the allowlist shrank): never redirect there.
+  if (!isAllowedRedirectUri(redirectUri, env)) {
+    return { ok: false, kind: "page", message: "This app's redirect address is not allowed. Add the connector again in Claude." };
   }
   const state = p.state ?? null;
   const fail = (error: string, description: string): AuthorizeCheck => ({ ok: false, kind: "redirect", redirectUri, error, description, state });
@@ -491,7 +533,11 @@ const BEARER = /^Bearer\s+(fca_[A-Za-z0-9_-]{43})\s*$/i;
 
 export type AccessCheck = { ok: true; user: SessionUser; grantId: string; clientName: string } | { ok: false; reason: "missing" | "invalid" };
 
-export async function authenticateAccessToken(db: Db, authorization: string | null, now: Date): Promise<AccessCheck> {
+/**
+ * A bearer token for /api/mcp: live, not rotated / revoked, of a user who is still a founder, and
+ * — when it was issued for a resource (RFC 8707) — for THIS server's MCP resource (`base`).
+ */
+export async function authenticateAccessToken(db: Db, authorization: string | null, now: Date, base: string): Promise<AccessCheck> {
   if (!authorization) return { ok: false, reason: "missing" };
   const m = BEARER.exec(authorization);
   if (!m) return { ok: false, reason: "invalid" };
@@ -508,6 +554,9 @@ export async function authenticateAccessToken(db: Db, authorization: string | nu
       ),
     );
   if (!row) return { ok: false, reason: "invalid" };
+  if (row.token.resource && row.token.resource.replace(/\/+$/, "") !== mcpResourceUrl(base.replace(/\/+$/, ""))) {
+    return { ok: false, reason: "invalid" };
+  }
   const user = await founderUser(db, row.token.userId);
   if (!user) return { ok: false, reason: "invalid" };
   if (!row.token.lastUsedAt || now.getTime() - row.token.lastUsedAt.getTime() > 60_000) {

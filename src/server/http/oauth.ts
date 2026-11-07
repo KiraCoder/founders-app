@@ -124,7 +124,7 @@ export function handleRegister(req: Request, deps: OAuthDeps): Promise<Response>
     } catch {
       throw new OAuthError("invalid_client_metadata", "Body must be JSON client metadata");
     }
-    return json(await registerClient(deps.db, body, now), 201);
+    return json(await registerClient(deps.db, body, now, deps.env), 201);
   });
 }
 
@@ -198,6 +198,7 @@ export async function handleAuthorizePost(req: Request, deps: OAuthDeps & { user
       resource: form.get("resource"),
     },
     oauthBaseUrl(req, deps.env),
+    deps.env,
   );
   if (!check.ok) {
     if (check.kind === "page") return plainError(400, check.message);
