@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { Suspense } from "react";
 import { OrgWorkspace } from "@/components/org/OrgWorkspace";
 import { CompanyDot, PageHeader } from "@/components/ui";
 import { getPageContext } from "@/server/context";
@@ -55,10 +54,9 @@ export default async function OrgStructurePage({ searchParams }: Props) {
           </Link>
         ))}
       </nav>
-      {/* Header and company switcher first; the board (chart, people, numbers, expert findings) streams in. */}
-      <Suspense key={`${slug}:${unit?.id ?? ""}:${showArchived ? 1 : 0}`} fallback={<div className="card h-64 bg-sunk" aria-busy="true" data-testid="org-loading" />}>
-        <OrgWorkspace ctx={ctx} company={company} unit={unit} showArchived={showArchived} hrefFor={hrefFor} />
-      </Suspense>
+      {/* Not streamed (no Suspense): board edits are server actions + router.refresh(), and a streamed
+          board sometimes kept the pre-edit chart after the refresh (see holding/page.tsx). */}
+      <OrgWorkspace ctx={ctx} company={company} unit={unit} showArchived={showArchived} hrefFor={hrefFor} />
     </>
   );
 }

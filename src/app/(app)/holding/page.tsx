@@ -1,4 +1,4 @@
-import { cache, Suspense } from "react";
+import { cache } from "react";
 import { ActsGrid } from "@/components/holding/ActsGrid";
 import { AskCard } from "@/components/holding/AskCard";
 import { ContractsSection } from "@/components/holding/ContractsSection";
@@ -28,28 +28,18 @@ function Stat({ label, value, tone, hint, testId }: { label: string; value: stri
   );
 }
 
-// Per request (React `cache`): several streamed sections need the same reads; the services
-// below them also share one read of companies, flows and people per request.
+// Per request (React `cache`): several sections need the same reads; the services below them
+// also share one read of companies, flows and people per request.
 const grid = cache((ctx: ServiceContext) => getActsGrid(ctx));
 const contracts = cache((ctx: ServiceContext) => listContracts(ctx));
 const debts = cache((ctx: ServiceContext) => getDebts(ctx));
 const companyOptions = cache(async (ctx: ServiceContext) => (await listCompanies(ctx)).map((c) => ({ id: c.id, name: c.name })));
 
-/** A section's placeholder while it streams in (no route-level loading.tsx, by design). */
-function SectionSkeleton({ rows = 2 }: { rows?: number }) {
-  return (
-    <div className="mb-6 flex flex-col gap-2" aria-busy="true">
-      <div className="h-4 w-40 rounded bg-sunk" />
-      {Array.from({ length: rows }, (_, i) => (
-        <div key={i} className="card h-12 bg-sunk" />
-      ))}
-    </div>
-  );
-}
-
 /**
- * The page head (title, three stats) renders first; every section below streams in on its own
- * (Suspense), so the founders see the page while the grids are still being read.
+ * One async component per section; they share every read through the per-request caches above.
+ * Deliberately NOT wrapped in <Suspense>: every section is driven by server actions followed by
+ * router.refresh(), and with streamed boundaries the refreshed grid sometimes kept showing the old
+ * cells (e2e holding / org specs, 2 of 3 runs). The page renders in one pass.
  */
 export default async function HoldingPage() {
   const ctx = await getPageContext();
@@ -60,22 +50,11 @@ export default async function HoldingPage() {
       <PageHeader eyebrow="Group" title="Holding">
         <p className="mt-1 text-[13px] text-muted">Intercompany договоры, monthly акты приёма-передачи and debts between group companies.</p>
       </PageHeader>
-
-      <Suspense fallback={<div className="mb-6 grid h-[84px] grid-cols-1 gap-3 sm:grid-cols-3" aria-busy="true" />}>
-        <HoldingStats ctx={ctx} />
-      </Suspense>
-      <Suspense fallback={<SectionSkeleton rows={3} />}>
-        <ActsSections ctx={ctx} />
-      </Suspense>
-      <Suspense fallback={<SectionSkeleton />}>
-        <DebtsBlock ctx={ctx} />
-      </Suspense>
-      <Suspense fallback={<SectionSkeleton />}>
-        <ContractsBlock ctx={ctx} />
-      </Suspense>
-      <Suspense fallback={<SectionSkeleton />}>
-        <FlowsBlock ctx={ctx} />
-      </Suspense>
+      <HoldingStats ctx={ctx} />
+      <ActsSections ctx={ctx} />
+      <DebtsBlock ctx={ctx} />
+      <ContractsBlock ctx={ctx} />
+      <FlowsBlock ctx={ctx} />
     </UploadsProvider>
   );
 }

@@ -97,17 +97,21 @@ export default async function CompanyPage({ params, searchParams }: Props) {
         tabs={TABS.map((t) => ({ key: t.key, label: t.label, href: `/companies/${slug}${t.key === "overview" ? "" : `?tab=${t.key}`}` }))}
       />
 
-      {/* The header and tabs render first; the tab's panels stream in (no route-level loading.tsx). */}
-      <Suspense key={tab} fallback={<TabSkeleton />}>
-        {tab === "overview" && <Overview ctx={ctx} company={company} showArchived={archivedParam === "1"} />}
-        {tab === "numbers" && <NumbersTab ctx={ctx} company={company} granularity={g} />}
-        {tab === "projects" && <ProjectsTab ctx={ctx} companyId={company.id} />}
-        {tab === "tasks" && <TasksTab ctx={ctx} companyId={company.id} />}
-        {tab === "people" && <PeopleTab ctx={ctx} companyId={company.id} slug={company.slug} />}
-        {tab === "org" && <OrgTab ctx={ctx} company={company} unitSlug={unitParam} archived={archivedParam === "1"} />}
-        {tab === "documents" && <ComingSoon title="Documents">Contracts, акты and uploaded files for this company.</ComingSoon>}
-        {tab === "ai" && <AiRolesTab ctx={ctx} company={company} />}
-      </Suspense>
+      {/* The header and tabs render first; the tab's panels stream in (no route-level loading.tsx).
+          The org board is not streamed: its edits are actions + router.refresh() (see org/page.tsx). */}
+      {tab === "org" ? (
+        <OrgTab ctx={ctx} company={company} unitSlug={unitParam} archived={archivedParam === "1"} />
+      ) : (
+        <Suspense key={tab} fallback={<TabSkeleton />}>
+          {tab === "overview" && <Overview ctx={ctx} company={company} showArchived={archivedParam === "1"} />}
+          {tab === "numbers" && <NumbersTab ctx={ctx} company={company} granularity={g} />}
+          {tab === "projects" && <ProjectsTab ctx={ctx} companyId={company.id} />}
+          {tab === "tasks" && <TasksTab ctx={ctx} companyId={company.id} />}
+          {tab === "people" && <PeopleTab ctx={ctx} companyId={company.id} slug={company.slug} />}
+          {tab === "documents" && <ComingSoon title="Documents">Contracts, акты and uploaded files for this company.</ComingSoon>}
+          {tab === "ai" && <AiRolesTab ctx={ctx} company={company} />}
+        </Suspense>
+      )}
     </>
   );
 }
