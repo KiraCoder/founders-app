@@ -268,12 +268,14 @@ export function AssistantPanel() {
       </button>
 
       {open && <div className="fixed inset-0 z-40 hidden bg-black/20 md:block" onClick={close} aria-hidden="true" />}
+      {/* Clip box: the closed drawer sits off-screen to the right; without this it widened the page on phones. */}
+      <div className="pointer-events-none fixed inset-0 z-50 overflow-hidden">
       <aside
         id="assistant-panel"
         aria-label="AI assistant"
         aria-hidden={!open}
-        className={`fixed inset-0 z-50 flex flex-col bg-surface transition-transform duration-200 md:inset-y-0 md:left-auto md:right-0 md:w-[420px] md:border-l md:border-line md:shadow-card ${
-          open ? "translate-x-0" : "pointer-events-none translate-x-full"
+        className={`absolute inset-0 flex flex-col bg-surface transition-transform duration-200 md:inset-y-0 md:left-auto md:right-0 md:w-[420px] md:border-l md:border-line md:shadow-card ${
+          open ? "pointer-events-auto translate-x-0" : "invisible translate-x-full"
         }`}
       >
         <div className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-4">
@@ -363,6 +365,7 @@ export function AssistantPanel() {
           </button>
         </form>
       </aside>
+      </div>
     </>
   );
 }
