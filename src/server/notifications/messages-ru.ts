@@ -13,7 +13,7 @@ export interface StaffTaskLite {
   id: string;
   title: string;
   dueDate: IsoDate | null;
-  priority: "urgent" | "high" | "normal" | "low";
+  priority: "none" | "urgent" | "high" | "medium" | "low";
   companyName: string | null;
 }
 
@@ -78,7 +78,8 @@ export function staffTaskButtons(taskId: string, withAccept = true, payload?: Re
 export interface StaffTaskCard extends StaffTaskLite {
   details?: string | null;
   checklist: readonly { id: string; title: string; details: string | null; done: boolean }[];
-  status: "open" | "done" | "cancelled";
+  /** "review": the person pressed «Готово» and a founder checks it (In Review). */
+  status: "open" | "review" | "done" | "cancelled";
   /** "12.11 10:05" when the person pressed «Принято». */
   acceptedAt?: string | null;
   helpRequested?: boolean;
@@ -104,7 +105,9 @@ export function buildStaffTaskCard(c: StaffTaskCard, today: IsoDate, kind: Staff
   const header =
     c.status === "done"
       ? "✅ Выполнено"
-      : c.status === "cancelled"
+      : c.status === "review"
+        ? "👀 На проверке у основателя"
+        : c.status === "cancelled"
         ? "🚫 Задача отменена"
         : kind === "new"
           ? "🆕 Новая задача"
@@ -312,6 +315,10 @@ export const RU = {
   buttonExpired: "Кнопка устарела или уже нажата.",
   accepted: "Принято ✓ Основатели увидят.",
   done: "Отмечено как выполненное ✓ Спасибо!",
+  review: "Отправлено на проверку ✓ Основатель посмотрит и закроет задачу. Спасибо!",
+  alreadyInReview: "Задача уже на проверке у основателя.",
+  overEstimate: (title: string, hours: number) =>
+    `⏱ Задача «${title}» в работе дольше оценки (${hours} ч). Если уже сделано — нажмите «✅ Готово». Нужна помощь или другой срок — кнопки ниже.`,
   alreadyDone: "Эта задача уже закрыта.",
   help: "Передал основателям, что нужна помощь. Напишите текстом, что именно нужно.",
   commentSaved: "Передал основателям ✓",

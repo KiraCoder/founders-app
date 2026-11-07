@@ -356,6 +356,8 @@ async function loadTaskForPush(ctx: ServiceContext, item: OutboxItem): Promise<{
   const task: TaskView | null = await getTask(ctx, item.taskId).catch(() => null);
   if (!task) return { skip: "task_gone" };
   if (task.status === "done" || task.status === "cancelled") return { skip: "task_closed" };
+  // Only Todo / In Progress are chased (0034): Backlog is not planned, In Review waits for a founder.
+  if ((kind === "overdue_chase" || kind === "task_due_today") && task.status !== "todo" && task.status !== "in_progress") return { skip: "task_not_active" };
   const today = todayInTimeZone(ctx.now, ctx.timeZone);
   if (kind === "overdue_chase" && !task.isOverdue) return { skip: "no_longer_overdue" };
   if (kind === "task_due_today" && task.dueDate !== today) return { skip: "deadline_moved" };
@@ -775,7 +777,7 @@ async function sendGroupedChase(
   }
 
   // Highest priority first, then the longest overdue.
-  const rank: Record<string, number> = { urgent: 0, high: 1, normal: 2, low: 3 };
+  const rank: Record<string, number> = { urgent: 0, high: 1, medium: 2, none: 2, low: 3 };
   valid.sort(
     (x, y) =>
       (rank[x.task.priority] ?? 9) - (rank[y.task.priority] ?? 9) || (x.task.dueDate ?? "").localeCompare(y.task.dueDate ?? ""),

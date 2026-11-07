@@ -6,6 +6,7 @@ import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, people, type OutboxItem } from "@/server/db/schema";
 import { getPersonTask, listPersonOpenTasks, loadStaffCard, personContext, toLite } from "@/server/services/staff-tasks";
 import { loadStaffDefaults } from "@/server/services/staff";
+import { isChased } from "@/server/services/tasks-rules";
 import { routineMessageInput } from "@/server/services/routines";
 import { mintActionTokens } from "./action-tokens";
 import type { ChannelRegistry } from "./channels";
@@ -17,6 +18,7 @@ import {
   buildStaffInfo,
   buildStaffMorningList,
   buildStaffTaskCard,
+  staffTaskButtons,
   type StaffTaskLite,
 } from "./messages-ru";
 import { fitTelegram } from "./render-telegram";
@@ -107,6 +109,15 @@ export async function processPersonItem(
     const text = (item.payload as { text?: string }).text;
     if (!text) return cancel("nothing_to_send");
     message = buildStaffInfo(text);
+    // About one of their tasks (the "over estimate" nudge, 0034): only while it is still open,
+    // with the task's buttons.
+    if (item.taskId) {
+      const card = await loadStaffCard(pctx, item.taskId).catch(() => null);
+      if (!card) return cancel("task_gone_or_reassigned");
+      if (card.status !== "open") return cancel("task_closed");
+      const overEstimate = (item.payload as { reason?: string }).reason === "over_estimate";
+      message = { ...message, title: overEstimate ? `⏱ Дольше оценки: ${card.title}` : message.title, actions: staffTaskButtons(card.id, false) };
+    }
   } else if (item.kind === "staff_routine") {
     const loaded = await loadRoutineForMessage(db, item, { personId: person.id });
     if ("skip" in loaded) return cancel(loaded.skip);
@@ -222,6 +233,11 @@ async function buildChase(
     }
     if (own.task.status === "done" || own.task.status === "cancelled") {
       reasons.push("task_closed");
+      continue;
+    }
+    // Only Todo / In Progress are chased (Backlog is not planned yet; In Review waits for a founder).
+    if (!isChased(own.task.status)) {
+      reasons.push("task_not_active");
       continue;
     }
     if (own.task.dueDate !== e.dueDate) {

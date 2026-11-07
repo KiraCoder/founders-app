@@ -12,7 +12,7 @@ function task(i: number, dueDate: string): TaskView {
     id: `t${i}`,
     title: title80(i),
     dueDate,
-    priority: "normal",
+    priority: "medium",
     visibility: "shared",
     company: { name: "Alura Style" },
     status: "todo",

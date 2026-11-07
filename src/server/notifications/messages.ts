@@ -255,7 +255,7 @@ export function buildTaskMessage(kind: NotificationKind, task: TaskView, today: 
   if (task.visibility === "private") meta.push("personal todo");
   if (meta.length) lines.push({ text: meta.join(" · "), style: "muted" });
   if (task.dueDate) lines.push({ text: `Deadline: ${formatDueDate(task.dueDate, today)} (${task.dueDate})`, style: "text" });
-  if (task.priority !== "normal") lines.push({ text: `Priority: ${task.priority}`, style: "text" });
+  if (task.priority !== "none" && task.priority !== "medium") lines.push({ text: `Priority: ${task.priority}`, style: "text" });
   return {
     title,
     lines,

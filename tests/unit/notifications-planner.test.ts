@@ -51,7 +51,7 @@ describe("overdue chase cadence", () => {
   });
 });
 
-const task = (id: string, dueDate: string | null, priority: PlanTask["priority"] = "normal"): PlanTask => ({
+const task = (id: string, dueDate: string | null, priority: PlanTask["priority"] = "medium"): PlanTask => ({
   id,
   title: `Task ${id}`,
   dueDate,

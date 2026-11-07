@@ -102,7 +102,7 @@ const edilTask = (title: string, dueDate: string | null, at: Date) =>
     companyId: t.companyIds.jobutify,
     assigneePersonId: edil,
     status: "todo",
-    priority: "normal",
+    priority: "medium",
     dueDate,
   });
 async function tick(at: Date, reg = recorder()) {
@@ -144,7 +144,7 @@ describe("A. grouped staff chase", () => {
     const last = toEdil(await tick(local("2026-11-03", "09:00")))[0]!;
     const third = last.message.actions!.find((a) => a.label === "3 · Готово")!;
     await handleTelegramUpdate(t.handle.db, press(EDIL_CHAT, last.callbacks[actionKey(third)]!), local("2026-11-03", "09:05"));
-    expect((await getTask(t.ctx("nuraaly"), third.taskId!)).status).toBe("done");
+    expect((await getTask(t.ctx("nuraaly"), third.taskId!)).status).toBe("in_review");
     const next = toEdil(await tick(local("2026-11-03", "11:00")))[0]!;
     expect(next.message.title).toContain("7 задач");
   });

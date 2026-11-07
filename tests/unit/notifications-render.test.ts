@@ -67,7 +67,7 @@ describe("grouped overdue push", () => {
     title,
     dueDate: "2026-11-01" as const,
     company: { id: "c1", slug: "kiwi-go", name: "Kiwi Go", color: "#000" },
-    priority: "normal" as const,
+    priority: "medium" as const,
     visibility: "shared" as const,
   });
 

@@ -4,7 +4,7 @@
  * service layer, as each founder) and enqueues it. Dedupe keys make re-running harmless:
  * a tick every 5 minutes queues each item exactly once.
  */
-import { and, eq, gt, inArray, isNotNull, isNull, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import {
   addDays,
   daysBetween,
@@ -35,13 +35,14 @@ import {
   type TaskPriority,
 } from "@/server/db/schema";
 import { loadStaffDefaults } from "@/server/services/staff";
-import { CLOSED_STATUSES } from "@/server/services/tasks-rules";
+import { CHASED_STATUSES, isChased } from "@/server/services/tasks-rules";
 import { notifyFounders } from "./staff-notify";
 import { makeContext } from "@/server/services/context";
 import { planHoldingAsks } from "@/server/services/holding-asks";
 import { getTodaySummary } from "@/server/services/tasks";
 import { listFounders } from "./founders";
 import { planRoutinesTick, type RoutinePlanReport } from "./routine-planner";
+import { planOverEstimates } from "./estimate-planner";
 import { taskTouchKey } from "./types";
 import { enqueue, enqueueForPerson, type EnqueueInput, type PersonEnqueueInput } from "./outbox";
 import { loadPreferences, type Preferences } from "./preferences";
@@ -363,7 +364,8 @@ export async function planStaffTick(db: Db, now: Date, timeZone: string): Promis
         and(
           eq(tasks.assigneePersonId, person.id),
           eq(tasks.visibility, "shared"),
-          notInArray(tasks.status, [...CLOSED_STATUSES]),
+          // Todo / In Progress only: Backlog is not given out yet, In Review waits for a founder.
+          inArray(tasks.status, [...CHASED_STATUSES]),
           inArray(tasks.companyId, db.select({ id: companies.id }).from(companies).where(isNull(companies.archivedAt))),
         ),
       );
@@ -474,6 +476,8 @@ export interface PlanReport {
   staff?: { planned: number; created: number; escalated: number };
   /** Routines: runs opened, messages queued, escalations, runs closed. */
   routines?: RoutinePlanReport;
+  /** Tasks found over their estimate (flagged) and persons nudged (0034). */
+  overEstimate?: { flagged: number; nudged: number };
   /** "Ask Elmurat" items created (one per founder per round). */
   holdingCreated?: number;
 }
@@ -521,8 +525,8 @@ export async function planTick(db: Db, now: Date, opts: PlanOptions = {}): Promi
       prefs,
       // A task's "Founder reminders" choice (0032): off = no pushes, due_day = the due-day nudge only.
       // Everything else (budget, quiet hours, one push per task per day) is unchanged.
-      overdue: summary.overdue.filter((t) => (nudge.get(t.id) ?? "usual") === "usual"),
-      dueToday: summary.dueToday.filter((t) => nudge.get(t.id) !== "off"),
+      overdue: summary.overdue.filter((t) => isChased(t.status) && (nudge.get(t.id) ?? "usual") === "usual"),
+      dueToday: summary.dueToday.filter((t) => isChased(t.status) && nudge.get(t.id) !== "off"),
       snoozedTaskIds: new Set(snoozes.map((s) => s.taskId)),
     });
     for (const item of items) {
@@ -536,6 +540,14 @@ export async function planTick(db: Db, now: Date, opts: PlanOptions = {}): Promi
       report.staff = await planStaffTick(db, now, timeZone);
     } catch (err) {
       console.error("[planner] staff planning failed", err);
+    }
+  }
+  // Tasks in progress longer than their estimate: one nudge each (0034).
+  if (opts.staff !== false) {
+    try {
+      report.overEstimate = await planOverEstimates(db, now, timeZone);
+    } catch (err) {
+      console.error("[planner] over-estimate check failed", err);
     }
   }
   // Routines (staff and founders). A failure here must not stop the reminders.

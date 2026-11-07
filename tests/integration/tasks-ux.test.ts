@@ -293,8 +293,18 @@ describe("checklist + the task card in Telegram", () => {
     expect((await getTaskTimeline(t.ctx("nuraaly"), task.id)).map((x) => x.what)).toContain("Ticked “Акт” (Telegram)");
   });
 
-  it("✅ Готово re-draws the card as done with no buttons", async () => {
+  it("✅ Готово (needs review, the default) re-draws the card as «На проверке» with no buttons; the task is In Review", async () => {
     const { task, card } = await sentTask();
+    const res = await handleTelegramUpdate(t.handle.db, press(EDIL_CHAT, card.callbacks[actionKey({ action: "staff_done", taskId: task.id })]!), local(D, "10:00"));
+    const e = edit(res);
+    expect(String(e.params.text).startsWith("<b>👀 На проверке у основателя: Сдать документы</b>")).toBe(true);
+    expect(e.params.reply_markup).toBeUndefined();
+    expect((await getTask(t.ctx("nuraaly"), task.id)).status).toBe("in_review");
+  });
+
+  it("✅ Готово without «needs review» re-draws the card as done with no buttons", async () => {
+    const { task, card } = await sentTask();
+    await updateTask(t.ctx("nuraaly", local(D, "09:00")), task.id, { needsReview: false });
     const res = await handleTelegramUpdate(t.handle.db, press(EDIL_CHAT, card.callbacks[actionKey({ action: "staff_done", taskId: task.id })]!), local(D, "10:00"));
     const e = edit(res);
     expect(String(e.params.text).startsWith("<b>✅ Выполнено: Сдать документы</b>")).toBe(true);

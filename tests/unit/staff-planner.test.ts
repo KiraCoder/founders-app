@@ -142,7 +142,7 @@ describe("Russian messages", () => {
   });
 
   it("a long task list stays under Telegram's limit", () => {
-    const many = Array.from({ length: 40 }, (_, i) => ({ id: `t${i}`, title: "x".repeat(280), dueDate: D, priority: "normal" as const, companyName: "C" }));
+    const many = Array.from({ length: 40 }, (_, i) => ({ id: `t${i}`, title: "x".repeat(280), dueDate: D, priority: "medium" as const, companyName: "C" }));
     const r = renderTelegram(buildStaffTaskList(many, D));
     expect(r.text.length).toBeLessThanOrEqual(4096);
     expect(r.text).toContain("…и ещё");

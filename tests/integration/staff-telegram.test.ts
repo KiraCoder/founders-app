@@ -128,7 +128,7 @@ async function onTelegram(personId: string, chatId: number, at = local(D, "08:30
   await linkPerson(personId, chatId, at);
   await setPersonBotEnabled(t.ctx("nuraaly", at), personId, true);
 }
-async function edilTask(title: string, dueDate: string | null, at = local(D, "08:40"), priority: "normal" | "urgent" = "normal") {
+async function edilTask(title: string, dueDate: string | null, at = local(D, "08:40"), priority: "medium" | "urgent" = "medium") {
   return createTask(t.ctx("nuraaly", at), {
     title,
     visibility: "shared",
@@ -245,7 +245,7 @@ describe("who gets messages", () => {
       companyId: t.companyIds.jobutify,
       assigneePersonId: elmurat,
       status: "todo",
-      priority: "normal",
+      priority: "medium",
       dueDate: D,
     });
     const reg = await tick(local(D, "09:00"));
@@ -296,6 +296,8 @@ describe("task messages to staff", () => {
     await onTelegram(edil, EDIL_CHAT, local("2026-11-01", "10:00"));
     // Assigned yesterday (new-task message yesterday), due today.
     const task = await edilTask("Сдать акт", D, local("2026-11-01", "10:00"));
+    // Without «needs review» (the review path has its own test): Готово closes the task.
+    await updateTask(t.ctx("nuraaly", local("2026-11-01", "10:00")), task.id, { needsReview: false });
     await tick(local("2026-11-01", "10:05"));
     await tick(local(D, "08:30")); // before working hours: nothing
     const at9 = await tick(local(D, "09:00"));
@@ -470,7 +472,9 @@ describe("what a person can do (own tasks only)", () => {
     const pushes = (await founderStaffRows(t.userIds.nuraaly)).filter((r) => r.status === "pending");
     expect(pushes).toHaveLength(1);
     const trail = await getTaskStaffTrail(t.ctx("nuraaly"), task.id);
-    expect(trail.map((e) => e.what)).toEqual(["New task sent", "Accepted", "Asked for help"]);
+    expect(trail.map((e) => e.what)).toEqual(["New task sent", "Accepted", "Started (In Progress)", "Asked for help"]);
+    // «Принято» moved the task to In Progress.
+    expect((await getTask(t.ctx("nuraaly"), task.id)).status).toBe("in_progress");
   });
 
   it("Перенести срок → a request the founder approves with one tap (the person cannot change deadlines)", async () => {
@@ -542,8 +546,8 @@ describe("what a person can do (own tasks only)", () => {
     expect(textOf(list)).toContain("1. First");
     expect(textOf(list)).toContain("2. Second");
     const done = await handleTelegramUpdate(t.handle.db, msgUpdate(EDIL_CHAT, "/done 2"), local(D, "09:01"));
-    expect(textOf(done)).toContain("Отмечено как выполненное");
-    expect((await getTask(t.ctx("nuraaly"), second.id)).status).toBe("done");
+    expect(textOf(done)).toContain("Отправлено на проверку");
+    expect((await getTask(t.ctx("nuraaly"), second.id)).status).toBe("in_review");
     expect(textOf(await handleTelegramUpdate(t.handle.db, msgUpdate(EDIL_CHAT, "/done 9"), local(D, "09:02")))).toContain("Нет задачи");
     expect(textOf(await handleTelegramUpdate(t.handle.db, msgUpdate(EDIL_CHAT, "/help"), local(D, "09:03")))).toContain("/tasks");
     // Events are logged as the person.
@@ -565,7 +569,7 @@ describe("task comments (founders)", () => {
     await deleteTaskComment(t.ctx("nuraaly"), c.id);
     expect(await listTaskComments(t.ctx("nuraaly"), shared.id)).toHaveLength(0);
 
-    const todo = await createTask(t.ctx("nuraaly"), { title: "Mine", visibility: "private", status: "todo", priority: "normal" });
+    const todo = await createTask(t.ctx("nuraaly"), { title: "Mine", visibility: "private", status: "todo", priority: "medium" });
     await addTaskComment(t.ctx("nuraaly"), todo.id, "secret");
     await expect(listTaskComments(t.ctx("talant"), todo.id)).rejects.toThrow(/not found/);
     await expect(addTaskComment(t.ctx("talant"), todo.id, "x")).rejects.toThrow(/not found/);

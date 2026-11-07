@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import { addDays, todayInTimeZone, type IsoDate } from "@/lib/dates";
 import { commentTextSchema, parseTaskOverride } from "@/lib/staff-schemas";
 import {
@@ -19,7 +19,7 @@ import { notifyFounders } from "@/server/notifications/staff-notify";
 import type { NeutralMessage } from "@/server/notifications/types";
 import { assertValidId, staffTasksWhere, type PersonContext } from "./access";
 import { ServiceError } from "./errors";
-import { CLOSED_STATUSES } from "./tasks-rules";
+import { CHASED_STATUSES } from "./tasks-rules";
 
 /**
  * What a linked person (staff) can do through the Telegram bot, as a PersonContext. Every
@@ -62,13 +62,16 @@ export function toLite(t: Task, companyName: string | null): StaffTaskLite {
   return { id: t.id, title: t.title, dueDate: t.dueDate, priority: t.priority, companyName };
 }
 
-/** Open tasks assigned to this person, earliest deadline first (the numbering of /tasks and /done N). */
+/**
+ * Open tasks assigned to this person, earliest deadline first (the numbering of /tasks and /done N):
+ * Todo and In Progress (Backlog is not given out yet; In Review waits for a founder).
+ */
 export async function listPersonOpenTasks(pctx: PersonContext): Promise<StaffTaskLite[]> {
   const rows = await pctx.db
     .select({ task: tasks, companyName: companies.name })
     .from(tasks)
     .leftJoin(companies, eq(companies.id, tasks.companyId))
-    .where(and(staffTasksWhere(pctx), notInArray(tasks.status, [...CLOSED_STATUSES])))
+    .where(and(staffTasksWhere(pctx), inArray(tasks.status, [...CHASED_STATUSES])))
     .orderBy(sql`${tasks.dueDate} asc nulls last`, asc(tasks.createdAt), asc(tasks.id));
   return rows.map((r) => toLite(r.task, r.companyName));
 }
@@ -103,14 +106,17 @@ async function cancelPersonPending(pctx: PersonContext, taskId: string, reason: 
     );
 }
 
-/** "Готово": closes the task (logged as a status change by this person). */
-export async function personMarkDone(pctx: PersonContext, taskId: string): Promise<{ alreadyClosed: boolean; title: string }> {
-  const { task } = await getPersonTask(pctx, taskId);
-  if (task.status === "done" || task.status === "cancelled") return { alreadyClosed: true, title: task.title };
+/** A status change made by this person through the bot (logged on the task like a founder's). */
+async function personSetStatus(pctx: PersonContext, task: Task, status: Task["status"], at = pctx.now) {
   await pctx.db.transaction(async (tx) => {
     await tx
       .update(tasks)
-      .set({ status: "done", completedAt: pctx.now, updatedAt: pctx.now })
+      .set({
+        status,
+        completedAt: status === "done" ? pctx.now : null,
+        ...(status === "in_progress" ? { startedAt: task.startedAt ?? pctx.now, overEstimateNotifiedAt: null } : {}),
+        updatedAt: pctx.now,
+      })
       .where(and(eq(tasks.id, task.id), eq(tasks.assigneePersonId, pctx.person.id)));
     await tx.insert(taskEvents).values({
       taskId: task.id,
@@ -122,30 +128,64 @@ export async function personMarkDone(pctx: PersonContext, taskId: string): Promi
       kind: "status_changed",
       field: "status",
       oldValue: task.status,
-      newValue: "done",
-      createdAt: pctx.now,
+      newValue: status,
+      createdAt: at,
     });
   });
-  await cancelPersonPending(pctx, task.id, "task_closed");
-  const line = `${personName(pctx)} marked done (Telegram): ${task.title}`;
+}
+
+/**
+ * «Готово»: with "Needs review" (the default for staff tasks) the task goes to In Review and the
+ * task's founder approves it (one tap → Done); without it, the task is Done. Logged as a status
+ * change by this person.
+ */
+export async function personMarkDone(
+  pctx: PersonContext,
+  taskId: string,
+): Promise<{ alreadyClosed: boolean; review: boolean; title: string }> {
+  const { task } = await getPersonTask(pctx, taskId);
+  if (task.status === "done" || task.status === "cancelled") return { alreadyClosed: true, review: false, title: task.title };
+  if (task.status === "in_review") return { alreadyClosed: true, review: true, title: task.title };
+  const review = task.needsReview;
+  await personSetStatus(pctx, task, review ? "in_review" : "done");
+  await cancelPersonPending(pctx, task.id, review ? "task_in_review" : "task_closed");
+  const line = review
+    ? `${personName(pctx)} finished (Telegram) — waiting for your review: ${task.title}`
+    : `${personName(pctx)} marked done (Telegram): ${task.title}`;
   await notifyFounders(pctx.db, {
     userIds: [task.ownerUserId],
     line,
     taskId: task.id,
     dedupeKey: `staff:done:${task.id}:${pctx.now.toISOString()}`,
     now: pctx.now,
-    // Urgent tasks get a push; everything else is one line in the next summary.
-    ...(task.priority === "urgent"
-      ? { push: { priority: "urgent" as const, message: { title: "Done by the team", lines: [{ text: line }] } } }
-      : {}),
+    // A review needs a tap (Approve = Done); an urgent task gets a push either way. Everything
+    // else is one line in the next summary.
+    ...(review
+      ? {
+          push: {
+            priority: task.priority === "urgent" ? ("urgent" as const) : ("normal" as const),
+            message: {
+              title: "Review a finished task",
+              lines: [{ text: line }, { text: "Approve marks it Done; to send it back, change its status in the app.", style: "muted" as const }],
+              actions: [{ action: "done" as const, taskId: task.id, label: "✓ Approve (Done)" }],
+            },
+          },
+        }
+      : task.priority === "urgent"
+        ? { push: { priority: "urgent" as const, message: { title: "Done by the team", lines: [{ text: line }] } } }
+        : {}),
   });
-  return { alreadyClosed: false, title: task.title };
+  return { alreadyClosed: false, review, title: task.title };
 }
 
-/** "Принято": logged on the task (the founder sees it in the delivery trail). */
-export async function personAccept(pctx: PersonContext, taskId: string): Promise<void> {
+/** «Принято»: logged on the task; a Backlog / Todo task moves to In Progress. */
+export async function personAccept(pctx: PersonContext, taskId: string): Promise<{ started: boolean }> {
   const { task } = await getPersonTask(pctx, taskId);
   await logReply(pctx, task, { reply: "accepted" });
+  if (task.status !== "backlog" && task.status !== "todo") return { started: false };
+  // Logged just after the «Принято» answer (the trail reads "Accepted", then "Started").
+  await personSetStatus(pctx, task, "in_progress", new Date(pctx.now.getTime() + 1));
+  return { started: true };
 }
 
 async function addComment(pctx: PersonContext, task: Task, text: string, kind: "comment" | "help") {
@@ -325,7 +365,7 @@ export async function loadStaffCard(pctx: PersonContext, taskId: string): Promis
     ...toLite(task, companyName),
     details: override.shareNotes ? task.notes : null,
     checklist: items.map((i) => ({ id: i.id, title: i.title, details: i.details, done: !!i.doneAt })),
-    status: task.status === "done" ? "done" : task.status === "cancelled" ? "cancelled" : "open",
+    status: task.status === "done" ? "done" : task.status === "cancelled" ? "cancelled" : task.status === "in_review" ? "review" : "open",
     acceptedAt: accepted[0] ? ruStamp(accepted[0].at, pctx.timeZone) : null,
     helpRequested: help.length > 0,
     deadlineRequested: pending[0]?.d ?? null,

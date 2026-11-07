@@ -252,8 +252,8 @@ async function handlePersonMessage(
       const open = await listPersonOpenTasks(pctx);
       const task = Number.isInteger(n) && n >= 1 ? open[n - 1] : undefined;
       if (!task) return [plain(chatId, "Не найдено", RU.doneNotFound)];
-      await personMarkDone(pctx, task.id);
-      return [plain(chatId, task.title, RU.done)];
+      const r = await personMarkDone(pctx, task.id);
+      return [plain(chatId, task.title, r.review ? RU.review : RU.done)];
     }
     default:
       if (command) return [reply(chatId, buildStaffHelp())];
@@ -373,7 +373,7 @@ async function handlePersonCallback(
         break;
       case "staff_done": {
         const r = await personMarkDone(pctx, token.taskId);
-        result = r.alreadyClosed ? RU.alreadyDone : RU.done;
+        result = r.alreadyClosed ? (r.review ? RU.alreadyInReview : RU.alreadyDone) : r.review ? RU.review : RU.done;
         drop = "task";
         break;
       }
