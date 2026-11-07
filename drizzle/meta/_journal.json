@@ -211,6 +211,13 @@
       "when": 1794020270642,
       "tag": "0029_routines",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1794021245122,
+      "tag": "0030_oauth_connector",
+      "breakpoints": true
     }
   ]
 }

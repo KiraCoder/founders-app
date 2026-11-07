@@ -26,6 +26,7 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@electric-sql/pglite": "^0.5.14",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "bcryptjs": "^3.0.3",
     "drizzle-orm": "^0.45.4",
     "exceljs": "^4.4.0",
