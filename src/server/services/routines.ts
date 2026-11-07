@@ -1,6 +1,6 @@
 import "server-only";
 import { cache } from "react";
-import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, like, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, inArray, isNotNull, isNull, like, lte, or, sql } from "drizzle-orm";
 import { addDays, hmToMinutes, todayInTimeZone, zonedTimeToUtc, type IsoDate } from "@/lib/dates";
 import {
   askTimesOf,
