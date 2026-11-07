@@ -1,5 +1,6 @@
 import "server-only";
-import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, lte, or, sql } from "drizzle-orm";
+import { cache } from "react";
+import { and, asc, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, like, lte, or, sql } from "drizzle-orm";
 import { addDays, hmToMinutes, todayInTimeZone, zonedTimeToUtc, type IsoDate } from "@/lib/dates";
 import {
   askTimesOf,
@@ -52,7 +53,9 @@ import { enqueue, enqueueForPerson } from "@/server/notifications/outbox";
 import { assertRoutineAccess, assertValidId } from "./access";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
-import { loadStaffDefaults } from "./staff";
+import { CACHE_TAGS, sharedCache } from "@/server/cache";
+import { listFounders } from "./people";
+import { loadStaffDefaults, readStaffDefaults } from "./staff";
 
 /**
  * Routines: recurring jobs assigned to a person (staff, through the Telegram bot, in Russian) or a
@@ -180,6 +183,8 @@ export interface RoutineView {
 }
 
 export interface RoutineFilter {
+  /** One routine (the routine page). */
+  id?: string | null;
   companyId?: string | null;
   personId?: string | null;
   userId?: string | null;
@@ -219,51 +224,54 @@ export async function listRoutines(ctx: ServiceContext, filter: RoutineFilter = 
   assertRoutineAccess(ctx);
   const status = filter.status ?? "all";
   const where = and(
+    filter.id ? eq(routines.id, filter.id) : undefined,
     filter.companyId ? eq(routines.companyId, filter.companyId) : undefined,
     filter.personId ? eq(routines.assigneePersonId, filter.personId) : undefined,
     filter.userId ? eq(routines.assigneeUserId, filter.userId) : undefined,
     status === "all" ? undefined : eq(routines.status, status),
   );
-  const rows = await ctx.db
-    .select({
-      r: routines,
-      pFull: people.fullName,
-      pShort: people.shortName,
-      uShort: users.shortName,
-      companyName: companies.name,
-      companySlug: companies.slug,
-    })
-    .from(routines)
-    .leftJoin(people, eq(people.id, routines.assigneePersonId))
-    .leftJoin(users, eq(users.id, routines.assigneeUserId))
-    .leftJoin(companies, eq(companies.id, routines.companyId))
-    .where(where)
-    .orderBy(sql`case ${routines.status} when 'active' then 0 when 'paused' then 1 when 'ended' then 2 else 3 end`, asc(routines.title));
-  if (!rows.length) return [];
-  const ids = rows.map((r) => r.r.id);
-  const defaults = await loadStaffDefaults(ctx.db);
-  const personIds = [...new Set(rows.map((r) => r.r.assigneePersonId).filter((x): x is string => !!x))];
-  const [reachable, overrides, latest, comments, founders] = await Promise.all([
-    reachablePersonIds(ctx.db, ctx.now, personIds),
-    personIds.length ? ctx.db.select({ id: people.id, c: people.staffChase }).from(people).where(inArray(people.id, personIds)) : [],
-    ctx.db.selectDistinctOn([routineRuns.routineId]).from(routineRuns).where(inArray(routineRuns.routineId, ids)).orderBy(routineRuns.routineId, desc(routineRuns.runDate)),
+  // ONE query (queries are serial on one connection): the routine with its assignee (and their
+  // chase override and whether the bot may message them), company, latest run (lateral) and
+  // comment count. The defaults and the founders come from the shared cache.
+  const latest = ctx.db.select().from(routineRuns).where(eq(routineRuns.routineId, routines.id)).orderBy(desc(routineRuns.runDate)).limit(1).as("latest_run");
+  // Every run column, read through the lateral subquery's alias.
+  const lastRun = Object.fromEntries(Object.keys(getTableColumns(routineRuns)).map((k) => [k, latest[k as keyof typeof latest]])) as unknown as typeof latest._.selectedFields;
+  const [rows, defaults, founderRows] = await Promise.all([
     ctx.db
-      .select({ id: routineComments.routineId, n: count() })
-      .from(routineComments)
-      .where(inArray(routineComments.routineId, ids))
-      .groupBy(routineComments.routineId),
-    ctx.db.select({ id: users.id, name: users.shortName }).from(users).where(eq(users.role, "founder")).orderBy(asc(users.shortName)),
+      .select({
+        r: routines,
+        pFull: people.fullName,
+        pShort: people.shortName,
+        pChase: people.staffChase,
+        uShort: users.shortName,
+        companyName: companies.name,
+        companySlug: companies.slug,
+        last: lastRun,
+        comments: sql<number>`(select count(*) from ${routineComments} where ${routineComments.routineId} = ${routines.id})`.mapWith(Number),
+        // Same rule as `reachablePersonIds` (linked, switched on, not stopped / paused / left).
+        reachable: sql<boolean>`(${people.botEnabled} and ${people.leftAt} is null and ${people.userId} is null and (${isNull(people.botPausedUntil)} or ${lte(people.botPausedUntil, ctx.now)}) and exists (select 1 from ${telegramLinks} where ${telegramLinks.personId} = ${people.id} and ${telegramLinks.stoppedAt} is null))`.mapWith(
+          (v: unknown) => v === true || v === "t" || v === "true",
+        ),
+      })
+      .from(routines)
+      .leftJoin(people, eq(people.id, routines.assigneePersonId))
+      .leftJoin(users, eq(users.id, routines.assigneeUserId))
+      .leftJoin(companies, eq(companies.id, routines.companyId))
+      .leftJoinLateral(latest, sql`true`)
+      .where(where)
+      .orderBy(sql`case ${routines.status} when 'active' then 0 when 'paused' then 1 when 'ended' then 2 else 3 end`, asc(routines.title)),
+    readStaffDefaults(ctx),
+    listFounders(ctx),
   ]);
-  const personOverride = new Map(overrides.map((o) => [o.id, parsePersonOverride(o.c)]));
-  const latestBy = new Map(latest.map((t) => [t.routineId, t]));
-  const commentsBy = new Map(comments.map((c) => [c.id, Number(c.n)]));
+  if (!rows.length) return [];
+  const founders = founderRows.map((f) => ({ id: f.id, name: f.shortName }));
   return rows.map((row) => {
     const r = row.r;
-    const s = r.assigneePersonId ? effectiveStaffSettings(defaults, personOverride.get(r.assigneePersonId) ?? {}) : defaults;
+    const s = r.assigneePersonId ? effectiveStaffSettings(defaults, parsePersonOverride(row.pChase)) : defaults;
     const override = parseRoutineOverride(r.chase);
     const schedule = scheduleOf(r);
     const chase = routineChase(r, s, override);
-    const last = latestBy.get(r.id) ?? null;
+    const last: RoutineRun | null = row.last?.id ? row.last : null;
     const today = last && last.runDate === todayInTimeZone(ctx.now, r.timezone) ? last : null;
     const shownStatus: RoutineStatus = r.status === "active" && routineHasEnded(r, ctx.now) ? "ended" : (r.status as RoutineStatus);
     const name = assigneeName(row);
@@ -299,24 +307,30 @@ export async function listRoutines(ctx: ServiceContext, filter: RoutineFilter = 
               todayClosed: !!today && !OPEN_RUN_STATUSES.includes(today.status as RunStatus),
             })
           : null,
-      commentsCount: commentsBy.get(r.id) ?? 0,
-      reachable: r.assigneePersonId ? reachable.has(r.assigneePersonId) : true,
+      commentsCount: row.comments,
+      reachable: r.assigneePersonId ? row.reachable : true,
     };
   });
 }
 
-async function loadRoutine(ctx: ServiceContext, id: string): Promise<Routine> {
+/**
+ * Deduped per render (React `cache`): the routine page's runs and messages both start here.
+ * Writes run outside a render (server actions, API, planner), so they always read the row.
+ */
+const loadRoutine = cache(async (ctx: ServiceContext, id: string): Promise<Routine> => {
   assertRoutineAccess(ctx);
   assertValidId(id, "Routine");
   const [r] = await ctx.db.select().from(routines).where(eq(routines.id, id));
   if (!r) throw new ServiceError("not_found", "Routine not found");
   return r;
-}
+});
 
 export async function getRoutine(ctx: ServiceContext, id: string): Promise<RoutineView> {
-  const r = await loadRoutine(ctx, id);
-  const [view] = (await listRoutines(ctx, { status: "all" })).filter((v) => v.routine.id === r.id);
-  return view!;
+  assertRoutineAccess(ctx);
+  assertValidId(id, "Routine");
+  const [view] = await listRoutines(ctx, { id, status: "all" });
+  if (!view) throw new ServiceError("not_found", "Routine not found");
+  return view;
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +546,7 @@ export async function listRoutineRuns(ctx: ServiceContext, id: string, limit = 6
     .orderBy(desc(routineRuns.runDate))
     .limit(Math.min(Math.max(limit, 1), 366));
   if (!rows.length) return [];
-  const s = await settingsForAssignee(ctx.db, r.assigneePersonId);
+  const s = await settingsForAssignee(ctx.db, r.assigneePersonId, await readStaffDefaults(ctx));
   const chase = routineChase(r, s, parseRoutineOverride(r.chase));
   const runIds = rows.map((x) => x.id);
   const [comments, sent] = await Promise.all([
@@ -609,7 +623,6 @@ export interface RoutineMessageView {
 /** Every message about the routine (to the assignee and to the founders), newest first. */
 export async function listRoutineMessages(ctx: ServiceContext, id: string, limit = 100): Promise<RoutineMessageView[]> {
   const r = await loadRoutine(ctx, id);
-  const runIds = (await ctx.db.select({ id: routineRuns.id }).from(routineRuns).where(eq(routineRuns.routineId, r.id))).map((x) => x.id);
   const o = notificationsOutbox;
   const rows = await ctx.db
     .select({ row: o, pFull: people.fullName, pShort: people.shortName, uShort: users.shortName })
@@ -619,7 +632,11 @@ export async function listRoutineMessages(ctx: ServiceContext, id: string, limit
     .where(
       or(
         sql`(${o.payload} ->> 'routineId') = ${r.id}`,
-        runIds.length ? and(like(o.dedupeKey, "routine-%"), inArray(sql`split_part(${o.dedupeKey}, ':', 2)`, runIds)) : undefined,
+        // Keys "routine-…:<runId>…" of this routine's runs (a subquery: one round trip).
+        and(
+          like(o.dedupeKey, "routine-%"),
+          sql`split_part(${o.dedupeKey}, ':', 2) in (select ${routineRuns.id}::text from ${routineRuns} where ${routineRuns.routineId} = ${r.id})`,
+        ),
       ),
     )
     .orderBy(desc(o.scheduledFor))
@@ -1085,8 +1102,10 @@ export async function createExampleRoutine(ctx: ServiceContext): Promise<Routine
 }
 
 /** Can the example be offered (Elmurat exists and the routine is absent)? */
-export async function exampleRoutineAvailable(ctx: ServiceContext): Promise<boolean> {
+export async function exampleRoutineAvailable(ctx: ServiceContext, listed?: readonly RoutineView[]): Promise<boolean> {
   assertRoutineAccess(ctx);
+  // The caller's unfiltered list already shows whether it exists.
+  if (listed?.some((v) => v.routine.seedKey === EXAMPLE_ROUTINE_KEY)) return false;
   const [existing] = await ctx.db.select({ id: routines.id }).from(routines).where(eq(routines.seedKey, EXAMPLE_ROUTINE_KEY));
   return !existing && !!(await exampleRoutineInput(ctx.db));
 }
@@ -1097,6 +1116,12 @@ export async function exampleRoutineAvailable(ctx: ServiceContext): Promise<bool
  */
 export async function routineFormOptions(ctx: ServiceContext) {
   assertRoutineAccess(ctx);
+  // Shared founder data (routines are founders-only): one cached entry, dropped by any write to
+  // people / their links, companies, org posts or the bot's defaults.
+  return sharedCache(["routines:form-options"], [CACHE_TAGS.people, CACHE_TAGS.companies, CACHE_TAGS.org, CACHE_TAGS.staffSettings], () => queryRoutineFormOptions(ctx));
+}
+
+async function queryRoutineFormOptions(ctx: ServiceContext) {
   const [founders, persons, comps, defaults] = await Promise.all([
     ctx.db.select({ id: users.id, name: users.shortName }).from(users).where(eq(users.role, "founder")).orderBy(asc(users.shortName)),
     ctx.db

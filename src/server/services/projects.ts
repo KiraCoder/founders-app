@@ -1,6 +1,7 @@
 import "server-only";
-import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, notInArray, sql } from "drizzle-orm";
 import { projectCreateSchema, type ProjectCreateInput } from "@/lib/schemas";
+import { CACHE_TAGS, invalidate, sharedCache } from "@/server/cache";
 import { companies, projects, tasks, users, type Project } from "@/server/db/schema";
 import { accessibleCompaniesWhere, assertCompanyAccess, assertValidId, visibleTasksWhere } from "./access";
 import type { ServiceContext } from "./context";
@@ -63,6 +64,28 @@ export async function listProjects(ctx: ServiceContext, opts: { companyId?: stri
   return rows.map(toView);
 }
 
+/** A project as the task form's picker needs it. */
+export interface ProjectOption {
+  id: string;
+  name: string;
+  companyId: string;
+}
+
+/**
+ * Open projects (not done / cancelled) of live companies, for pickers. No task counts, so it is
+ * the same for both founders: read through the shared cache (tags `projects`, `companies`).
+ */
+export async function listProjectOptions(ctx: ServiceContext): Promise<ProjectOption[]> {
+  const load = () =>
+    ctx.db
+      .select({ id: projects.id, name: projects.name, companyId: projects.companyId })
+      .from(projects)
+      .innerJoin(companies, eq(companies.id, projects.companyId))
+      .where(and(accessibleCompaniesWhere(ctx), isNull(companies.archivedAt), notInArray(projects.status, ["done", "cancelled"])))
+      .orderBy(asc(companies.sort), asc(projects.name));
+  return ctx.user.role === "founder" ? sharedCache(["projects:options"], [CACHE_TAGS.projects, CACHE_TAGS.companies], load) : load();
+}
+
 export async function getProject(ctx: ServiceContext, id: string): Promise<ProjectView> {
   assertValidId(id, "Project");
   const [row] = await projectQuery(ctx).where(and(eq(projects.id, id), accessibleCompaniesWhere(ctx)));
@@ -80,5 +103,6 @@ export async function createProject(ctx: ServiceContext, input: ProjectCreateInp
     .insert(projects)
     .values({ ...data, description: data.description ?? null, ownerUserId: ctx.user.id })
     .returning({ id: projects.id });
+  invalidate(CACHE_TAGS.projects);
   return getProject(ctx, row!.id);
 }

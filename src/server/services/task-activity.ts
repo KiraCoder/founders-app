@@ -2,14 +2,13 @@ import "server-only";
 import { and, asc, eq, gte, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { effectiveStaffSettings, parsePersonOverride, parseTaskOverride, type StaffTaskOverride } from "@/lib/staff-schemas";
 import { chaseFormFromFields, chaseFormValue, ChaseFormError, overrideFromForm, type ChaseFormValue, type PersonChaseSettings } from "@/lib/task-chase";
-import { notificationsOutbox, people, taskComments, taskEvents, tasks, telegramLinks, users } from "@/server/db/schema";
+import { notificationsOutbox, people, taskChecklistItems, taskComments, taskEvents, tasks, telegramLinks, users } from "@/server/db/schema";
 import { enqueueForPerson } from "@/server/notifications/outbox";
 import { listedInChase } from "@/server/notifications/planner";
 import { assertStaffBotAccess, canManageStaffBot } from "./access";
 import type { ServiceContext } from "./context";
 import { ServiceError } from "./errors";
-import { loadStaffDefaults } from "./staff";
-import { checklistProgress } from "./task-checklist";
+import { readStaffDefaults } from "./staff";
 import { getTask } from "./tasks";
 import { CLOSED_STATUSES } from "./tasks-rules";
 
@@ -61,7 +60,9 @@ export function replyText(v: unknown, kind: string): string {
   }
 }
 
-/** Activity per task for a list (one query per kind, whatever the number of tasks). */
+const OUTER_TASK_ID = sql.raw(`"tasks"."id"`);
+
+/** Activity per task for a list (three queries, whatever the number of tasks). */
 export async function taskActivityFor(
   ctx: ServiceContext,
   list: readonly { id: string; assignee: { kind: "user" | "person"; id: string } | null }[],
@@ -71,14 +72,19 @@ export async function taskActivityFor(
   const personIds = [...new Set(list.flatMap((t) => (t.assignee?.kind === "person" ? [t.assignee.id] : [])))];
   const since = new Date(ctx.now.getTime() - 60 * 86_400_000);
   const o = notificationsOutbox;
-  const [comments, progress, chaseRows, sent, replies] = await Promise.all([
+  const [counts, sent, replies] = await Promise.all([
+    // Comment count, checklist progress and the chase choice in one row per task. (A one-table
+    // select prints its columns unqualified, so the outer task id is spelled out.)
     ctx.db
-      .select({ taskId: taskComments.taskId, n: sql<number>`count(*)`.mapWith(Number) })
-      .from(taskComments)
-      .where(inArray(taskComments.taskId, ids))
-      .groupBy(taskComments.taskId),
-    checklistProgress(ctx, ids),
-    ctx.db.select({ id: tasks.id, c: tasks.staffChase }).from(tasks).where(inArray(tasks.id, ids)),
+      .select({
+        id: tasks.id,
+        c: tasks.staffChase,
+        comments: sql<number>`(select count(*) from ${taskComments} where ${taskComments.taskId} = ${OUTER_TASK_ID})`.mapWith(Number),
+        total: sql<number>`(select count(*) from ${taskChecklistItems} where ${taskChecklistItems.taskId} = ${OUTER_TASK_ID})`.mapWith(Number),
+        done: sql<number>`(select count(${taskChecklistItems.doneAt}) from ${taskChecklistItems} where ${taskChecklistItems.taskId} = ${OUTER_TASK_ID})`.mapWith(Number),
+      })
+      .from(tasks)
+      .where(inArray(tasks.id, ids)),
     personIds.length
       ? ctx.db
           .select({ taskId: o.taskId, kind: o.kind, status: o.status, sentAt: o.sentAt, createdAt: o.createdAt, payload: o.payload })
@@ -100,20 +106,19 @@ export async function taskActivityFor(
       .orderBy(asc(taskEvents.createdAt)),
   ]);
   const out: Record<string, TaskActivity> = {};
-  const chase = new Map(chaseRows.map((r) => [r.id, chaseFormValue(parseTaskOverride(r.c))]));
+  const byId = new Map(counts.map((r) => [r.id, r]));
   for (const t of list) {
-    const c = chase.get(t.id);
+    const r = byId.get(t.id);
     out[t.id] = {
-      comments: 0,
-      checklist: progress.get(t.id) ?? null,
+      comments: r?.comments ?? 0,
+      checklist: r && r.total > 0 ? { done: r.done, total: r.total } : null,
       lastSent: null,
       lastReply: null,
       reminders: 0,
       sentToPerson: false,
-      chase: c ?? chaseFormValue({}),
+      chase: chaseFormValue(r ? parseTaskOverride(r.c) : {}),
     };
   }
-  for (const c of comments) if (out[c.taskId]) out[c.taskId]!.comments = c.n;
   const idSet = new Set(ids);
   for (const s of sent) {
     // A grouped chase is about every task it listed (payload.listed once sent; payload.tasks while waiting).
@@ -343,7 +348,7 @@ export async function personChaseSettings(
   opts: { reachability?: boolean } = {},
 ): Promise<Record<string, PersonChaseSettings & { unreachable: string | null }>> {
   if (!canManageStaffBot(ctx) || !personIds.length) return {};
-  const defaults = await loadStaffDefaults(ctx.db);
+  const defaults = await readStaffDefaults(ctx);
   const rows = await ctx.db.select({ id: people.id, c: people.staffChase }).from(people).where(inArray(people.id, personIds));
   const out: Record<string, PersonChaseSettings & { unreachable: string | null }> = {};
   for (const r of rows) {

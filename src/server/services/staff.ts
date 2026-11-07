@@ -16,6 +16,7 @@ import {
   type StaffSettings,
   type StaffTaskOverride,
 } from "@/lib/staff-schemas";
+import { CACHE_TAGS, invalidate, sharedCache } from "@/server/cache";
 import type { Db } from "@/server/db/connect";
 import {
   appSettings,
@@ -49,6 +50,15 @@ export async function loadStaffDefaults(db: Db): Promise<StaffSettings> {
   return row ? parseStaffDefaults(row.value) : { ...DEFAULT_STAFF_SETTINGS };
 }
 
+/**
+ * The defaults for PAGES (routines list and form, task form): founders read them through the
+ * shared cache (tag `staff-settings`, dropped by `updateStaffDefaults`). Planner, dispatcher and
+ * write paths keep reading the row (`loadStaffDefaults`).
+ */
+export async function readStaffDefaults(ctx: ServiceContext): Promise<StaffSettings> {
+  return ctx.user.role === "founder" ? sharedCache(["staff:defaults"], [CACHE_TAGS.staffSettings], () => loadStaffDefaults(ctx.db)) : loadStaffDefaults(ctx.db);
+}
+
 export async function getStaffDefaults(ctx: ServiceContext): Promise<StaffSettings> {
   assertStaffBotAccess(ctx);
   return loadStaffDefaults(ctx.db);
@@ -61,6 +71,7 @@ export async function updateStaffDefaults(ctx: ServiceContext, input: unknown): 
     .insert(appSettings)
     .values({ key: STAFF_DEFAULTS_KEY, value: { ...value }, updatedByUserId: ctx.user.id, updatedAt: ctx.now })
     .onConflictDoUpdate({ target: appSettings.key, set: { value: { ...value }, updatedByUserId: ctx.user.id, updatedAt: ctx.now } });
+  invalidate(CACHE_TAGS.staffSettings);
   return value;
 }
 
@@ -191,6 +202,8 @@ export async function setPersonChase(ctx: ServiceContext, personId: string, inpu
   const p = await loadStaffPerson(ctx, personId);
   const parsed = compactOverride(staffPersonOverrideSchema.parse(input));
   await ctx.db.update(people).set({ staffChase: parsed, updatedAt: ctx.now }).where(eq(people.id, p.id));
+  // The person's chase defaults are part of the cached routine / task form options.
+  invalidate(CACHE_TAGS.people);
   return parsed ?? {};
 }
 

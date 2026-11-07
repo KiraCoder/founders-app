@@ -4,7 +4,6 @@ import {
   asc,
   desc,
   eq,
-  gte,
   ilike,
   inArray,
   isNull,
@@ -16,6 +15,7 @@ import {
   type SQL,
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
+import { cache } from "react";
 import {
   taskCreateSchema,
   taskFiltersSchema,
@@ -197,12 +197,17 @@ export async function listTasks(ctx: ServiceContext, rawFilters: TaskFilters = {
 }
 
 /** Returns the task or throws not_found (also for private tasks of the other founder). */
-export async function getTask(ctx: ServiceContext, id: string): Promise<TaskView> {
+/**
+ * One visible task. Deduped per render (React `cache`): the task page and the services it calls
+ * (comments, deadline requests, timeline, checklist) all check access through it. Server actions
+ * and API routes run outside a render, so a write followed by a read always sees the new row.
+ */
+export const getTask = cache(async (ctx: ServiceContext, id: string): Promise<TaskView> => {
   assertValidId(id, "Task");
   const [row] = await baseSelect(ctx).where(and(eq(tasks.id, id), visibleTasksWhere(ctx)));
   if (!row) throw new ServiceError("not_found", "Task not found");
   return toView(row, today(ctx));
-}
+});
 
 /**
  * Visible tasks (access rule + archived companies hidden, like listTasks) matching extra
@@ -234,22 +239,32 @@ export interface TodaySummary {
 export async function getTodaySummary(ctx: ServiceContext): Promise<TodaySummary> {
   const todayIso = today(ctx);
   const week = thisWeekRange(todayIso);
-  const mine = and(visibleTasksWhere(ctx), relevantToMe(ctx), openWhere());
-  const order = [sql`${tasks.dueDate} asc nulls last`, asc(priorityRank), desc(tasks.createdAt)];
+  const personalWhere = and(eq(tasks.ownerUserId, ctx.user.id), eq(tasks.visibility, "private"))!;
 
-  const [overdue, dueToday, thisWeek, personal] = await Promise.all([
-    baseSelect(ctx).where(and(mine, lt(tasks.dueDate, todayIso))).orderBy(...order),
-    baseSelect(ctx).where(and(mine, eq(tasks.dueDate, todayIso))).orderBy(...order),
-    baseSelect(ctx)
-      .where(and(mine, gte(tasks.dueDate, week.from), lte(tasks.dueDate, week.to)))
-      .orderBy(...order),
-    baseSelect(ctx)
-      .where(and(eq(tasks.ownerUserId, ctx.user.id), eq(tasks.visibility, "private"), openWhere()))
-      .orderBy(...order)
-      .limit(50),
-  ]);
-  const v = (rows: Row[]) => rows.map((r) => toView(r, todayIso));
-  return { today: todayIso, overdue: v(overdue), dueToday: v(dueToday), thisWeek: v(thisWeek), personal: v(personal) };
+  // ONE query for the four lists (queries are serial on one connection): every open task that
+  // is relevant to me and due up to the end of the week, plus my open personal todos (always
+  // visible: they are my own). Split below in JS; the shared ORDER BY keeps each list's order.
+  const rows = await baseSelect(ctx)
+    .where(and(visibleTasksWhere(ctx), openWhere(), or(and(relevantToMe(ctx), lte(tasks.dueDate, week.to)), personalWhere)))
+    .orderBy(sql`${tasks.dueDate} asc nulls last`, asc(priorityRank), desc(tasks.createdAt));
+
+  const overdue: TaskView[] = [];
+  const dueToday: TaskView[] = [];
+  const thisWeek: TaskView[] = [];
+  const personal: TaskView[] = [];
+  for (const r of rows) {
+    const t = r.task;
+    const view = toView(r, todayIso);
+    const relevant = t.assigneeUserId === ctx.user.id || (t.assigneeUserId === null && t.ownerUserId === ctx.user.id);
+    const due = t.dueDate;
+    if (relevant && due !== null) {
+      if (due < todayIso) overdue.push(view);
+      else if (due === todayIso) dueToday.push(view);
+      else if (due >= week.from && due <= week.to) thisWeek.push(view);
+    }
+    if (t.ownerUserId === ctx.user.id && t.visibility === "private" && personal.length < 50) personal.push(view);
+  }
+  return { today: todayIso, overdue, dueToday, thisWeek, personal };
 }
 
 export async function listTaskEvents(ctx: ServiceContext, taskId: string): Promise<TaskEvent[]> {

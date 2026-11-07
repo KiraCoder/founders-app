@@ -24,17 +24,18 @@ export default async function RoutinesPage({ searchParams }: { searchParams: Pro
   const status = (ROUTINE_STATUSES as readonly string[]).includes(sp.status ?? "") ? (sp.status as RoutineStatus) : sp.status === "all" ? "all" : null;
   const [person, user] = sp.who?.startsWith("person:") ? [sp.who.slice(7), null] : sp.who?.startsWith("user:") ? [null, sp.who.slice(5)] : [null, null];
   const uuid = /^[0-9a-f-]{36}$/i;
-  const [items, options, example] = await Promise.all([
-    listRoutines(ctx, {
-      companyId: sp.company && uuid.test(sp.company) ? sp.company : null,
-      personId: person && uuid.test(person) ? person : null,
-      userId: user && uuid.test(user) ? user : null,
-      // Archived ones only when asked for.
-      status: "all", // filtered below by the shown status ("ended" is computed)
-    }),
+  const filter = {
+    companyId: sp.company && uuid.test(sp.company) ? sp.company : null,
+    personId: person && uuid.test(person) ? person : null,
+    userId: user && uuid.test(user) ? user : null,
+  };
+  const [items, options] = await Promise.all([
+    // Archived ones only when asked for: filtered below by the shown status ("ended" is computed).
+    listRoutines(ctx, { ...filter, status: "all" }),
     routineFormOptions(ctx),
-    exampleRoutineAvailable(ctx),
   ]);
+  // An unfiltered list already shows whether the example exists (no extra query then).
+  const example = await exampleRoutineAvailable(ctx, filter.companyId || filter.personId || filter.userId ? undefined : items);
   const shown = status ? items.filter((v) => status === "all" || v.status === status) : items.filter((v) => v.routine.status !== "archived");
   const prefillWho = sp.who && /^(person|user):[0-9a-f-]{36}$/i.test(sp.who) ? sp.who : "";
   const prefillCompany = sp.company && uuid.test(sp.company) ? sp.company : "";

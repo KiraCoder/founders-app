@@ -40,6 +40,10 @@ const { listMetricDefinitions } = await import("@/server/services/metrics");
 const { listRoles } = await import("@/server/services/ai-roles");
 const { createCustomRole, updateRoleConfig } = await import("@/server/services/ai-role-editor");
 const { createTask } = await import("@/server/services/tasks");
+const { createProject } = await import("@/server/services/projects");
+const { getTaskFormOptions } = await import("@/server/services/options");
+const { routineFormOptions } = await import("@/server/services/routines");
+const { setPersonChase, updateStaffDefaults, getStaffDefaults } = await import("@/server/services/staff");
 
 let t: Awaited<ReturnType<typeof createTestDb>>;
 beforeAll(async () => {
@@ -117,6 +121,35 @@ describe("shared cache: write → tag invalidated → fresh read", () => {
     await updateRoleConfig(t.ctx("talant"), role.key, { profile: { name: "Cache watcher 2" }, watchedMetricKeys: ["revenue"] });
     expect(next.revalidated).toContain("ai-roles");
     expect((await listRoles(t.ctx("nuraaly"))).find((r) => r.key === role.key)!.name).toBe("Cache watcher 2");
+  });
+
+  it("task form projects: createProject drops `projects`", async () => {
+    const before = await getTaskFormOptions(t.ctx("nuraaly"));
+    const project = await createProject(t.ctx("nuraaly"), { companyId: kiwi(), name: "Cached project" });
+    expect(next.revalidated).toContain("projects");
+    expect(before.projects.some((p) => p.id === project.id)).toBe(false);
+    expect((await getTaskFormOptions(t.ctx("talant"))).projects.find((p) => p.id === project.id)).toEqual({ id: project.id, name: "Cached project", companyId: kiwi() });
+  });
+
+  it("routine form options + people's chase settings: the bot's defaults drop `staff-settings`, a person's override drops `people`", async () => {
+    const ctx = t.ctx("nuraaly");
+    const elmurat = t.personIds.elmurat!;
+    const defaults = await getStaffDefaults(ctx);
+    const before = await routineFormOptions(ctx);
+    await updateStaffDefaults(ctx, { ...defaults, chaseEveryMinutes: 95 });
+    expect(next.revalidated).toContain("staff-settings");
+    const after = await routineFormOptions(t.ctx("talant"));
+    expect(after.defaults.chaseEveryMinutes).toBe(95);
+    expect(after.defaults.chaseEveryMinutes).not.toBe(before.defaults.chaseEveryMinutes);
+    expect((await getTaskFormOptions(ctx)).personChase?.[elmurat]?.chaseEveryMinutes).toBe(95);
+
+    next.revalidated.length = 0;
+    await setPersonChase(ctx, elmurat, { chaseEveryMinutes: 45 });
+    expect(next.revalidated).toContain("people");
+    expect((await routineFormOptions(ctx)).people.find((p) => p.id === elmurat)!.defaults.chaseEveryMinutes).toBe(45);
+    expect((await getTaskFormOptions(ctx)).personChase?.[elmurat]?.chaseEveryMinutes).toBe(45);
+    await setPersonChase(ctx, elmurat, {});
+    await updateStaffDefaults(ctx, defaults);
   });
 
   it("staff never read or fill the shared cache", async () => {

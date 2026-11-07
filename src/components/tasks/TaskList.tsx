@@ -1,7 +1,7 @@
 import { getPageContext } from "@/server/context";
 import { canManageStaffBot } from "@/server/services/access";
 import type { TaskFormOptions } from "@/server/services/options";
-import { taskActivityFor } from "@/server/services/task-activity";
+import { taskActivityFor, type TaskActivity } from "@/server/services/task-activity";
 import { TaskListClient } from "./TaskListClient";
 import type { TaskItem } from "./types";
 
@@ -17,6 +17,11 @@ interface Props {
   options: TaskFormOptions;
   empty?: string;
   showCompany?: boolean;
+  /**
+   * The activity of these tasks when the page already read it (Today reads it once for its four
+   * lists: queries are serial, so one read beats four). Otherwise the list reads its own.
+   */
+  activity?: Record<string, TaskActivity>;
 }
 
 export function TaskList(props: Props) {
@@ -27,9 +32,10 @@ export function TaskList(props: Props) {
   return <TaskListWithActivity {...props} />;
 }
 
-async function TaskListWithActivity({ tasks, today, options, empty = "Nothing here.", showCompany = true }: Props) {
+async function TaskListWithActivity({ tasks, today, options, empty = "Nothing here.", showCompany = true, activity: given }: Props) {
   const ctx = await getPageContext();
-  const activity = tasks.length ? await taskActivityFor(ctx, tasks) : {};
+  const all = given ?? (tasks.length ? await taskActivityFor(ctx, tasks) : {});
+  const activity = given ? Object.fromEntries(tasks.flatMap((t) => (all[t.id] ? [[t.id, all[t.id]!]] : []))) : all;
   return (
     <TaskListClient
       tasks={tasks}

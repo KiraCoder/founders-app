@@ -9,6 +9,7 @@ import { getPageContext } from "@/server/context";
 import type { ServiceContext } from "@/server/services/context";
 import { companyFreshness } from "@/server/services/metrics";
 import { getTaskFormOptions } from "@/server/services/options";
+import { taskActivityFor } from "@/server/services/task-activity";
 import { getTodaySummary } from "@/server/services/tasks";
 
 export const metadata = { title: "Today" };
@@ -25,8 +26,11 @@ function longDate(iso: string) {
 export default async function TodayPage() {
   const ctx = await getPageContext();
   const [summary, options] = await Promise.all([getTodaySummary(ctx), getTaskFormOptions(ctx)]);
+  // The four lists' activity in one read (a task can be in two lists: due today and personal).
+  const shown = [...new Map([...summary.overdue, ...summary.dueToday, ...summary.thisWeek, ...summary.personal].map((t) => [t.id, t])).values()];
+  const activity = shown.length ? await taskActivityFor(ctx, shown) : {};
   const list = (items: typeof summary.overdue, empty: string) => (
-    <TaskList tasks={items.map(toTaskItem)} today={summary.today} options={options} empty={empty} />
+    <TaskList tasks={items.map(toTaskItem)} today={summary.today} options={options} empty={empty} activity={activity} />
   );
 
   return (

@@ -6,7 +6,7 @@ import { revalidateTag, unstable_cache } from "next/cache";
  *
  * Rules (see docs in the PR "perf/caching"):
  * - Only data that is identical for both founders goes in: company list, people pickers, org
- *   chart structure, metric definitions, AI role configs. Never salaries, never personal todos
+ *   chart structure, metric definitions, AI role configs, project pickers, the bot's defaults. Never salaries, never personal todos
  *   or anything else filtered by the signed-in user (callers only use it for founders, whose
  *   access rules are identical; staff read the database directly).
  * - Every service write to one of these entities calls `invalidate(tag)`; Next drops the
@@ -23,6 +23,10 @@ export const CACHE_TAGS = {
   people: "people",
   metrics: "metrics",
   aiRoles: "ai-roles",
+  /** Project pickers (task form). */
+  projects: "projects",
+  /** The bot's global chase defaults (Settings → Team on Telegram). */
+  staffSettings: "staff-settings",
   /** Every org chart (department pickers across charts). */
   org: "org",
   /** One chart's structure. */

@@ -26,6 +26,7 @@ import type { TelegramUpdate } from "@/server/notifications/telegram-api";
 import { actionKey, type ActionCallbacks, type NeutralMessage, type NotificationChannel } from "@/server/notifications/types";
 import {
   createRoutine,
+  getRoutine,
   listRoutineMessages,
   listRoutineRuns,
   listRoutines,
@@ -276,6 +277,25 @@ describe("the bot: edit in place, comments, partly / can't", () => {
     expect(sendText(after).join("")).not.toContain("Комментарий сохранён");
     const [view] = await listRoutines(t.ctx("nuraaly", local(MON, "15:10")), { personId: elmurat });
     expect(view!.commentsCount).toBe(1);
+    // The list's one query also carries the latest run (lateral join) and reachability.
+    expect(view!.reachable).toBe(true);
+    expect(view!.lastRun).toMatchObject({ routineId: r.id, runDate: MON });
+    expect(view!.lastRun!.startedAt).toBeInstanceOf(Date);
+    expect(view!.today?.id).toBe(view!.lastRun!.id);
+    expect((await getRoutine(t.ctx("nuraaly", local(MON, "15:10")), r.id)).commentsCount).toBe(1);
+  });
+
+  it("the list without runs or a chat: no last run, not reachable, no comments; an unknown routine is not found", async () => {
+    const r = await routine();
+    const [view] = await listRoutines(t.ctx("nuraaly", local(MON, "09:00")), { personId: elmurat });
+    expect(view).toMatchObject({ lastRun: null, today: null, reachable: false, commentsCount: 0 });
+    expect((await getRoutine(t.ctx("nuraaly", local(MON, "09:00")), r.id)).routine.id).toBe(r.id);
+    await expect(getRoutine(t.ctx("nuraaly"), "00000000-0000-4000-8000-000000000000")).rejects.toThrow(/not found/i);
+    // Linked and switched on, but paused until later: still not reachable.
+    await onTelegram(elmurat, CHAT);
+    expect((await listRoutines(t.ctx("nuraaly", local(MON, "09:00")), { personId: elmurat }))[0]!.reachable).toBe(true);
+    await t.handle.db.update(people).set({ botPausedUntil: local(TUE, "00:00") }).where(eq(people.id, elmurat));
+    expect((await listRoutines(t.ctx("nuraaly", local(MON, "09:00")), { personId: elmurat }))[0]!.reachable).toBe(false);
   });
 
   it("«🟡 Частично» and «❌ Не могу» require a comment; can't tells the founders; nothing open → the run closes (can't outcome)", async () => {
