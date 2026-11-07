@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { DataSources } from "@/components/metrics/DataSources";
+import { ConnectedAppsCard } from "@/components/settings/ConnectedAppsCard";
 import { ExtensionKeysCard } from "@/components/settings/ExtensionKeysCard";
 import { PreferencesForm } from "@/components/settings/PreferencesForm";
 import { SalaryAccessCard } from "@/components/settings/SalaryAccessCard";
@@ -14,6 +15,7 @@ import { canSetUpApp, getReminderClockConfig, getTelegramSetupConfig } from "@/s
 import { resolveAppBaseUrl } from "@/server/app-url";
 import { canUseExtension } from "@/server/services/access";
 import { listExtensionKeys, listIngestLog } from "@/server/services/extension";
+import { listConnectedApps } from "@/server/services/oauth";
 import { listConnectorStatuses } from "@/server/services/connectors";
 import { getMyPreferences, getMyTelegramLink } from "@/server/services/notifications";
 import { canViewSalaries, listSalaryAccessLog, listSalaryViewers } from "@/server/services/salaries";
@@ -32,6 +34,7 @@ export default async function SettingsPage() {
   const log = isViewer ? await listSalaryAccessLog(ctx, 15) : [];
   const founder = canSetUpApp(ctx);
   const [extKeys, ingestLog] = canUseExtension(ctx) ? await Promise.all([listExtensionKeys(ctx), listIngestLog(ctx, 15)]) : [[], []];
+  const connectedApps = founder ? await listConnectedApps(ctx) : [];
   const fmt = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: ctx.timeZone });
   const linkedAt = link
     ? new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: ctx.timeZone }).format(link.createdAt)
@@ -158,6 +161,23 @@ export default async function SettingsPage() {
               revoked: k.revokedAt ? fmt.format(new Date(k.revokedAt)) : null,
             }))}
             log={ingestLog.map((l) => ({ ...l, at: fmt.format(new Date(l.at)) }))}
+          />
+        </section>
+      )}
+
+      {founder && (
+        <section className="card mb-5 p-4 md:p-5" aria-labelledby="connected-apps-heading">
+          <h2 id="connected-apps-heading" className="eyebrow mb-3">
+            Connected apps · Claude
+          </h2>
+          <ConnectedAppsCard
+            mcpUrl={`${resolveAppBaseUrl()?.url ?? ""}/api/mcp`}
+            apps={connectedApps.map((a) => ({
+              grantId: a.grantId,
+              clientName: a.clientName,
+              connectedAt: fmt.format(a.connectedAt),
+              lastUsed: a.lastUsedAt ? fmt.format(a.lastUsedAt) : null,
+            }))}
           />
         </section>
       )}
