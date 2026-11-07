@@ -33,21 +33,38 @@ import {
   type ConsumedStaffAction,
 } from "./action-tokens";
 import { consumeLinkCode, findLinkByChat, findPersonLinkByChat, setPersonLinkStopped } from "./linking";
-import { buildHelp, buildMorningSummary, buildNotLinked, buildTasksList } from "./messages";
+import { buildHelp, buildMorningSummary, buildNotLinked, buildRoutineMessage, buildTasksList } from "./messages";
 import {
   buildMoveOptions,
+  buildRoutineMessageRu,
+  buildRoutinePickRu,
   buildStaffHelp,
   buildStaffTaskList,
   buildStaffWelcome,
-  buildRoutineMessageRu,
   buildWhichTask,
   MOVE_DAYS,
+  remainingItems,
+  routineCommentPrompt,
   RU,
   RU_ROUTINE,
   ruDate,
+  type RoutineCommentKind,
+  type RoutineMessageMode,
 } from "./messages-ru";
-import { listOpenRunsForPerson, tickRoutineRun, type TickActor } from "@/server/services/routines";
-import { escapeHtml, renderTelegram } from "./render-telegram";
+import { OPEN_RUN_STATUSES, type AwaitingComment, type RunStatus } from "@/lib/routines";
+import type { Routine, RoutineRun } from "@/server/db/schema";
+import {
+  addRoutineComment,
+  findAwaitingComment,
+  listOpenRunsForPerson,
+  loadRunForActor,
+  markRoutineItems,
+  routineMessageInput,
+  setAwaitingComment,
+  tickRoutineRun,
+  type TickActor,
+} from "@/server/services/routines";
+import { escapeHtml, fitTelegram, renderTelegram } from "./render-telegram";
 import { TelegramApi, type TelegramMessage, type TelegramUpdate } from "./telegram-api";
 import type { NeutralMessage } from "./types";
 
@@ -205,16 +222,7 @@ async function handlePersonMessage(
       if (!runs.length) return [plain(chatId, "Рутины", RU_ROUTINE.none)];
       const out: BotAction[] = [];
       for (const { routine, run } of runs) {
-        out.push(
-          await withButtons(
-            pctx,
-            chatId,
-            buildRoutineMessageRu(
-              { runId: run.id, title: routine.title, description: routine.description, confirmation: routine.confirmation as "checklist", items: run.items, itemsDone: run.itemsDone },
-              run.itemsDone.length > 0,
-            ),
-          ),
-        );
+        out.push(await withButtons(pctx, chatId, buildRoutineMessageRu(await routineMessageInput(pctx.db, routine, run), "ask")));
       }
       return out;
     }
@@ -243,6 +251,9 @@ async function handlePersonMessage(
     default:
       if (command) return [reply(chatId, buildStaffHelp())];
   }
+  // Free text right after «Комментарий» / «Частично» / «Не могу»: the comment on that routine run.
+  const pending = await findAwaitingComment(pctx.db, { personId: pctx.person.id }, pctx.now);
+  if (pending) return routineCommentReply(pctx, chatId, pending, text.slice(0, 2000));
   // Free text: a reply to a task message becomes that task's comment; otherwise "К какой задаче?".
   if (msg.reply_to_message) {
     const [row] = await pctx.db
@@ -423,10 +434,28 @@ function editAction(chatId: number, message: TelegramMessage, result: string, ke
 type Button = { text: string; callback_data: string };
 type Live = { taskId: string | null; holdingAskId: string | null; deadlineRequestId: string | null; routineRunId: string | null };
 
+const ownerOf = (actor: TickActor) => ("personId" in actor ? { personId: actor.personId } : { userId: actor.userId });
+
+/** The routine message of a run as it stands now (Russian for a person, English for a founder). */
+async function routineMessageFor(db: Db, routine: Routine, run: RoutineRun, russian: boolean, mode: RoutineMessageMode = "ask"): Promise<NeutralMessage> {
+  const input = await routineMessageInput(db, routine, run);
+  return russian ? buildRoutineMessageRu(input, mode) : buildRoutineMessage(input, mode === "reminder");
+}
+
+/** Edits a message in place to `message`, with fresh one-time tokens for its buttons (none = no keyboard). */
+async function editInPlace(db: Db, chatId: number | string, messageId: number, message: NeutralMessage, actor: TickActor, now: Date): Promise<BotAction> {
+  const fitted = fitTelegram(message).message;
+  const callbacks = fitted.actions?.length ? await mintActionTokens(db, { ...ownerOf(actor), outboxId: null, actions: fitted.actions, now }) : undefined;
+  return { method: "editMessageText", params: { chat_id: chatId, message_id: messageId, ...renderTelegram(fitted, callbacks) } };
+}
+
 /**
- * A routine button (founder or person): ticks one item or the whole run, as the routine's assignee
- * only (another person's or a forged token never gets here: tokens are bound to their owner, and
- * tickRoutineRun re-checks the assignee). The message keeps the buttons of items still open.
+ * A routine button (founder or person), as the routine's assignee only (another person's or a
+ * forged token never gets here: tokens are bound to their owner, and the services re-check the
+ * assignee). A tick EDITS the message in place: the checklist with its new state, «Прогресс 3/5»,
+ * buttons for what is still open, and at the end «Готово, спасибо! 5/5 ✅». «💬 Комментарий» /
+ * «🟡 Частично» / «❌ Не могу» (staff) first offer a pick of the item on a checklist, then the bot
+ * asks for the comment: the person's next text message is saved (see handlePersonMessage).
  */
 async function routineCallback(
   db: Db,
@@ -437,42 +466,120 @@ async function routineCallback(
   answer: (text: string) => BotAction,
   russian: boolean,
 ): Promise<BotAction[]> {
-  let result: string;
-  let done = false;
+  const chatId = cq.message?.chat.id;
+  const messageId = cq.message?.message_id;
+  const notFound = () => [answer(russian ? RU_ROUTINE.notYours : "Not found.")];
   try {
-    const r = await tickRoutineRun(db, token.runId, actor, token.action === "routine_tick" ? token.item : null, now);
-    done = r.status === "done" || r.status === "closed" || (r.status === "already" && r.run.status === "done");
-    if (russian) {
-      result =
-        r.status === "done"
-          ? RU_ROUTINE.done
-          : r.status === "closed"
-            ? RU_ROUTINE.closed
-            : r.status === "already"
-              ? RU_ROUTINE.already
-              : RU_ROUTINE.ticked(r.label ?? "", r.remaining.length);
-    } else {
-      result =
-        r.status === "done"
-          ? "Routine done ✓"
-          : r.status === "closed"
-            ? "Today's run is already closed"
-            : r.status === "already"
-              ? "Already ticked"
-              : `✓ ${r.label}. ${r.remaining.length} left`;
+    if (token.action === "routine_tick" || token.action === "routine_done") {
+      const r = await tickRoutineRun(db, token.runId, actor, token.action === "routine_tick" ? token.item : null, now);
+      let result: string;
+      if (russian) {
+        result =
+          r.status === "done"
+            ? RU_ROUTINE.done
+            : r.status === "closed"
+              ? RU_ROUTINE.closed
+              : r.status === "already"
+                ? RU_ROUTINE.already
+                : RU_ROUTINE.ticked(r.label ?? "", r.remaining.length);
+      } else {
+        result =
+          r.status === "done"
+            ? "Routine done ✓"
+            : r.status === "closed"
+              ? "Today's run is already closed"
+              : r.status === "already"
+                ? "Already ticked"
+                : `✓ ${r.label}. ${r.remaining.length} left`;
+      }
+      const actions: BotAction[] = [answer(result)];
+      if (chatId !== undefined && messageId !== undefined) {
+        actions.push(await editInPlace(db, chatId, messageId, await routineMessageFor(db, r.routine, r.run, russian), actor, now));
+        // An item flagged "needs a comment": the next text message is its comment.
+        if (russian && r.needsComment && r.status !== "already" && token.item) {
+          await setAwaitingComment(db, r.run.id, actor, { item: token.item, kind: "done", since: now.toISOString(), chatId, messageId });
+          actions.push(reply(chatId, routineCommentPrompt("done", r.label)));
+        }
+      }
+      return actions;
     }
+
+    // Comment / partly / can't / pick / back: staff only.
+    if (!russian) return [answer("Use the app for comments.")];
+    const { routine, run } = await loadRunForActor(db, token.runId, actor);
+    const open = OPEN_RUN_STATUSES.includes(run.status as RunStatus);
+    const input = await routineMessageInput(db, routine, run);
+    if (token.action === "routine_back") {
+      await setAwaitingComment(db, run.id, actor, null);
+      const actions: BotAction[] = [answer("↩")];
+      if (chatId !== undefined && messageId !== undefined) actions.push(await editInPlace(db, chatId, messageId, buildRoutineMessageRu(input), actor, now));
+      return actions;
+    }
+    const kind: RoutineCommentKind =
+      token.action === "routine_pick" ? (token.pickKind ?? "comment") : token.action === "routine_partly" ? "partly" : token.action === "routine_cant" ? "cant" : "comment";
+    if (kind !== "comment" && !open) return [answer(RU_ROUTINE.closed)];
+    let item: string | null;
+    if (token.action === "routine_pick") {
+      item = token.item && token.item !== "_all" ? token.item : null;
+    } else {
+      const choices = kind === "comment" ? run.items : remainingItems(input);
+      // A checklist with a real choice: pick the item first.
+      if (run.items.length && (kind === "comment" ? choices.length >= 1 : choices.length > 1)) {
+        const actions: BotAction[] = [answer(RU_ROUTINE.pick)];
+        if (chatId !== undefined && messageId !== undefined) actions.push(await editInPlace(db, chatId, messageId, buildRoutinePickRu(input, kind), actor, now));
+        return actions;
+      }
+      item = choices.length === 1 ? choices[0]!.key : null;
+    }
+    await setAwaitingComment(db, run.id, actor, { item, kind, since: now.toISOString(), chatId: chatId ?? null, messageId: messageId ?? null });
+    const label = item ? (run.items.find((i) => i.key === item)?.label ?? null) : null;
+    const actions: BotAction[] = [answer(RU_ROUTINE.writeComment)];
+    if (chatId !== undefined && messageId !== undefined) {
+      if (token.action === "routine_pick") actions.push(await editInPlace(db, chatId, messageId, buildRoutineMessageRu(input), actor, now));
+      actions.push(reply(chatId, routineCommentPrompt(kind, label)));
+    }
+    return actions;
   } catch (err) {
     const se = toServiceError(err);
     if (!se) throw err;
-    return [answer(se.code === "not_found" ? (russian ? RU_ROUTINE.notYours : "Not found.") : se.message)];
+    if (se.code === "not_found") return notFound();
+    return [answer(se.code === "conflict" && russian ? RU_ROUTINE.closed : se.message)];
   }
-  const actions: BotAction[] = [answer(result)];
-  if (cq.message) {
-    const owner = "personId" in actor ? { personId: actor.personId } : actor.userId;
-    const keyboard = done ? [] : await remainingKeyboard(db, cq.message, cq.data!, () => false, owner, now);
-    actions.push(editAction(cq.message.chat.id, cq.message, result, keyboard));
+}
+
+/**
+ * The person's text after «Комментарий» / «Частично» / «Не могу» (or a "needs a comment" tick):
+ * saved on the run / item; «Частично» / «Не могу» mark the item(s) with it (founders are told about
+ * «Не могу»). The routine message is edited to its new state.
+ */
+async function routineCommentReply(
+  pctx: PersonContext,
+  chatId: number,
+  pending: { routine: Routine; run: RoutineRun; awaiting: AwaitingComment },
+  text: string,
+): Promise<BotAction[]> {
+  const actor = { personId: pctx.person.id };
+  const { awaiting } = pending;
+  let routine: Routine;
+  let run: RoutineRun;
+  let saved: string;
+  if (awaiting.kind === "partly" || awaiting.kind === "cant") {
+    const res = await markRoutineItems(pctx.db, pending.run.id, actor, { item: awaiting.item, state: awaiting.kind, comment: text }, pctx.now);
+    routine = res.routine;
+    run = res.run;
+    saved = awaiting.kind === "partly" ? RU_ROUTINE.partlySaved : RU_ROUTINE.cantSaved;
+  } else {
+    const res = await addRoutineComment(pctx.db, pending.run.id, actor, { item: awaiting.item, text, kind: awaiting.kind }, pctx.now);
+    routine = res.routine;
+    run = res.run;
+    saved = RU_ROUTINE.commentSaved;
   }
-  return actions;
+  const out: BotAction[] = [];
+  if (awaiting.messageId && awaiting.chatId !== undefined && awaiting.chatId !== null) {
+    out.push(await editInPlace(pctx.db, awaiting.chatId, awaiting.messageId, await routineMessageFor(pctx.db, routine, run, true), actor, pctx.now));
+  }
+  out.push(plain(chatId, routine.title, saved));
+  return out;
 }
 
 async function remainingKeyboard(

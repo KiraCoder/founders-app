@@ -5,7 +5,7 @@
  * 2 h until 19:00, tell the founders at 19:00; one checklist item per active company).
  */
 import { and, asc, eq, isNull } from "drizzle-orm";
-import { checklistItems, routineInputSchema, type ChecklistItem } from "@/lib/routines";
+import { askTimesOf, checklistItems, routineInputSchema, type ChecklistItem } from "@/lib/routines";
 import type { Db } from "./connect";
 import { appSettings, companies, people, routines } from "./schema";
 
@@ -14,6 +14,7 @@ const EXAMPLE_MARKER = "example_routines_seeded";
 
 export function routineColumns(p: ReturnType<typeof routineInputSchema.parse>, previous: ChecklistItem[] = []) {
   const chase = Object.fromEntries(Object.entries(p.chase).filter(([, v]) => v !== undefined));
+  const times = askTimesOf({ time: p.times[0]!, times: p.times });
   return {
     title: p.title,
     description: p.description,
@@ -23,7 +24,10 @@ export function routineColumns(p: ReturnType<typeof routineInputSchema.parse>, p
     scheduleKind: p.scheduleKind,
     days: p.scheduleKind === "weekly" ? [...new Set(p.days)].sort((a, b) => a - b) : null,
     monthDay: p.scheduleKind === "monthly" ? (p.monthDay ?? null) : null,
-    time: p.time,
+    time: times[0]!,
+    times,
+    startsOn: p.startsOn ?? null,
+    endsOn: p.endsOn ?? null,
     confirmation: p.confirmation,
     items: p.confirmation === "checklist" ? checklistItems(p.items, previous) : [],
     chase: Object.keys(chase).length ? chase : null,

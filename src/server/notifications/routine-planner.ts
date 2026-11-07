@@ -1,7 +1,7 @@
 import "server-only";
 import { and, count, eq, gt, gte, inArray, ne, sql } from "drizzle-orm";
 import { addDays, hmToMinutes, localMinutesOfDay, todayInTimeZone, zonedTimeToUtc } from "@/lib/dates";
-import { isScheduledOn, minutesToHm, OPEN_RUN_STATUSES, routineSlots, scheduleOf, type RunStatus } from "@/lib/routines";
+import { askTimesOf, isScheduledOn, isWithinDates, minutesToHm, OPEN_RUN_STATUSES, routineSlots, scheduleOf, type RunStatus } from "@/lib/routines";
 import type { StaffSettings } from "@/lib/staff-schemas";
 import type { Db } from "@/server/db/connect";
 import {
@@ -21,6 +21,7 @@ import {
   parseRoutineOverride,
   queueRunMessage,
   reachablePersonIds,
+  routineHasEnded,
   routineChase,
   routineTimes,
   settingsForAssignee,
@@ -35,6 +36,8 @@ export interface RoutinePlanReport {
   queued: number;
   escalated: number;
   closed: number;
+  /** Routines past their end date, marked "ended" in this pass. */
+  ended?: number;
 }
 
 export interface RoutinePlanOptions {
@@ -56,14 +59,17 @@ function inScope(r: Routine, opts: RoutinePlanOptions): boolean {
  * One planner pass over routines (idempotent; a tick every 5–15 minutes):
  * 1. **Close** runs of earlier days that were not finished: `partly` (some items ticked) or
  *    `missed`; waiting messages are cancelled. The next scheduled run still happens.
- * 2. **Open** today's run of every active routine scheduled today, from the ask time until the
- *    "chase until" time — for a person only while the bot may message them (a day they are not
- *    reachable at all has no run).
- * 3. **Ask / remind** (a person: only while reachable): one message per slot (slot 0 = the ask at the routine's time, then every
- *    `chaseEveryMinutes` until `chaseUntil`, at most `maxPerDay`), only for the current slot (missed
- *    slots never pile up); built at send time so a checklist re-asks ONLY the unticked items.
+ * 1b. **End** routines past their "Ends on" date (status "ended", waiting messages cancelled).
+ * 2. **Open** today's run of every active routine scheduled today (within its start / end dates),
+ *    from the first ask time until the later of "chase until" and the last ask — for a person only
+ *    while the bot may message them (a day they are not reachable at all has no run).
+ * 3. **Ask / remind** (a person: only while reachable): one message per slot (`routineSlots`: an ask
+ *    at each ask time, then the reminders of the routine's mode — once / every N until / N times —
+ *    at most `maxPerDay`), only for the current slot (missed slots never pile up); built at send time
+ *    so a later ask or a reminder shows what is still open.
  * 4. **Escalate** once per run to the founders (push, founders' rules): at `escalateAt`, or after
- *    `escalateAfterChases` reminders. A founder's routine escalates to the other founder(s). An open
+ *    `escalateAfterChases` reminders — to `escalateTo` when set, else both founders. A founder's
+ *    routine escalates to the other founder(s) by default. An open
  *    run still escalates when its person became unreachable after the ask (/stop, paused, bot
  *    switched off): the founders are told why nobody is reminding them.
  */
@@ -79,7 +85,8 @@ export async function planRoutinesTick(db: Db, now: Date, opts: RoutinePlanOptio
   for (const { run, routine } of stale) {
     if (!inScope(routine, opts)) continue;
     if (run.runDate >= todayInTimeZone(now, routine.timezone)) continue;
-    const status = run.itemsDone.length > 0 ? "partly" : "missed";
+    const someDone = run.itemsDone.length > 0 || Object.values(run.itemStates ?? {}).some((s) => s.state === "done" || s.state === "partly");
+    const status = someDone ? "partly" : "missed";
     const closed = await db
       .update(routineRuns)
       .set({ status, closedAt: now })
@@ -91,8 +98,26 @@ export async function planRoutinesTick(db: Db, now: Date, opts: RoutinePlanOptio
     }
   }
 
+  // 1b. End.
+  const all = (await db.select().from(routines).where(eq(routines.status, "active"))).filter((r) => inScope(r, opts));
+  const active: Routine[] = [];
+  for (const r of all) {
+    if (!routineHasEnded(r, now)) {
+      active.push(r);
+      continue;
+    }
+    const ended = await db
+      .update(routines)
+      .set({ status: "ended", updatedAt: now })
+      .where(and(eq(routines.id, r.id), eq(routines.status, "active")))
+      .returning({ id: routines.id });
+    if (ended.length) {
+      report.ended = (report.ended ?? 0) + 1;
+      await cancelRoutineMessages(db, r.id, "ended");
+    }
+  }
+
   // 2–4.
-  const active = (await db.select().from(routines).where(eq(routines.status, "active"))).filter((r) => inScope(r, opts));
   if (!active.length) return report;
   const defaults = await loadStaffDefaults(db);
   const reachable = await reachablePersonIds(db, now);
@@ -110,23 +135,23 @@ export async function planRoutinesTick(db: Db, now: Date, opts: RoutinePlanOptio
     const tz = r.timezone;
     const day = todayInTimeZone(now, tz);
     const minutes = localMinutesOfDay(now, tz);
-    const { askAt, untilAt } = routineTimes(r, chase, day);
+    const { askAt, openUntilAt } = routineTimes(r, chase, day);
     let [run] = await db.select().from(routineRuns).where(and(eq(routineRuns.routineId, r.id), eq(routineRuns.runDate, day)));
-    if (!run && !unreachable && isScheduledOn(scheduleOf(r), day) && now >= askAt && now < untilAt) {
+    if (!run && !unreachable && isScheduledOn(scheduleOf(r), day) && isWithinDates(r, day) && now >= askAt && now < openUntilAt) {
       const opened = await openRun(db, r, day, now);
       run = opened.run;
       if (opened.created) report.opened++;
     }
     if (!run || !OPEN_RUN_STATUSES.includes(run.status as RunStatus)) continue;
 
-    const slots = routineSlots(r.time, chase);
+    const slots = routineSlots(askTimesOf(r), chase);
     const current = [...slots].reverse().find((sl) => sl.start <= minutes);
-    if (current && !unreachable) {
+    if (current && current.end > minutes && !unreachable) {
       const res = await queueRunMessage(db, r, run, {
         slot: current.slot,
         scheduledFor: zonedTimeToUtc(day, minutesToHm(current.start), tz),
         expiresAt: current.end >= 24 * 60 ? zonedTimeToUtc(addDays(day, 1), "00:00", tz) : zonedTimeToUtc(day, minutesToHm(current.end), tz),
-        reminder: current.slot > 0,
+        reminder: current.reminder,
       });
       if (res.created) report.queued++;
     }
@@ -174,10 +199,13 @@ async function unreachableReason(db: Db, personId: string, now: Date): Promise<s
 async function escalate(db: Db, r: Routine, run: RoutineRun, now: Date, unreachable = false): Promise<number> {
   const name = await assigneeLabel(db, r);
   const missing = remainingItems(run).map((i) => i.label);
+  const chase = routineChase(r, await settingsForAssignee(db, r.assigneePersonId), parseRoutineOverride(r.chase));
   const why = unreachable && r.assigneePersonId ? ` — ${await unreachableReason(db, r.assigneePersonId, now)}` : "";
   const line = `${name} hasn't finished "${r.title}" today${missing.length ? ` — missing: ${missing.join(", ")}` : ""}${run.chaseCount ? ` (${run.chaseCount} reminder${run.chaseCount === 1 ? "" : "s"})` : ""}${why}`;
-  // A founder's own routine goes to the other founder(s); a person's to both founders.
-  const userIds = r.assigneeUserId ? (await listFounders(db)).map((f) => f.id).filter((id) => id !== r.assigneeUserId) : null;
+  // The founders picked on the routine; else: a founder's own routine goes to the other founder(s), a person's to both.
+  const founderIds = (await listFounders(db)).map((f) => f.id);
+  const picked = chase.escalateTo.filter((id) => founderIds.includes(id));
+  const userIds = picked.length ? picked : r.assigneeUserId ? founderIds.filter((id) => id !== r.assigneeUserId) : null;
   if (userIds && !userIds.length) return 0;
   return notifyFounders(db, {
     userIds,
@@ -197,8 +225,8 @@ export async function loadRoutineForMessage(
   item: OutboxItem,
   assignee: { personId: string } | { userId: string },
   opts: { checkSlot?: boolean } = {},
-): Promise<{ routine: Routine; run: RoutineRun; reminder: boolean } | { skip: string }> {
-  const p = (item.payload ?? {}) as { runId?: string; reminder?: boolean };
+): Promise<{ routine: Routine; run: RoutineRun; reminder: boolean; updated: boolean } | { skip: string }> {
+  const p = (item.payload ?? {}) as { runId?: string; reminder?: boolean; updated?: boolean };
   if (!p.runId) return { skip: "no_run" };
   const [row] = await db
     .select({ run: routineRuns, routine: routines })
@@ -211,7 +239,7 @@ export async function loadRoutineForMessage(
   if (row.routine.status !== "active") return { skip: `routine_${row.routine.status}` };
   if (!OPEN_RUN_STATUSES.includes(row.run.status as RunStatus)) return { skip: row.run.status === "done" ? "routine_done" : "run_closed" };
   // A parked line in a summary (checkSlot: false) only needs the run to be open.
-  if (opts.checkSlot === false) return { routine: row.routine, run: row.run, reminder: !!p.reminder };
+  if (opts.checkSlot === false) return { routine: row.routine, run: row.run, reminder: !!p.reminder, updated: !!p.updated };
   // One message per run per slot: a "Run now" ask in this slot already covers the scheduled one.
   const since = item.scheduledFor;
   const [dup] = await db
@@ -226,7 +254,7 @@ export async function loadRoutineForMessage(
       ),
     );
   if ((dup?.n ?? 0) > 0) return { skip: "already_asked_this_slot" };
-  return { routine: row.routine, run: row.run, reminder: !!p.reminder };
+  return { routine: row.routine, run: row.run, reminder: !!p.reminder, updated: !!p.updated };
 }
 
 /** After a routine message went out: a reminder counts towards "escalate after N reminders". */

@@ -6,6 +6,7 @@ import type { Db } from "@/server/db/connect";
 import { notificationsOutbox, people, type OutboxItem } from "@/server/db/schema";
 import { getPersonTask, listPersonOpenTasks, personContext, toLite } from "@/server/services/staff-tasks";
 import { loadStaffDefaults } from "@/server/services/staff";
+import { routineMessageInput } from "@/server/services/routines";
 import { mintActionTokens } from "./action-tokens";
 import type { ChannelRegistry } from "./channels";
 import { getLinkForPerson } from "./linking";
@@ -100,17 +101,7 @@ export async function processPersonItem(
     const loaded = await loadRoutineForMessage(db, item, { personId: person.id });
     if ("skip" in loaded) return cancel(loaded.skip);
     const { routine, run } = loaded;
-    message = buildRoutineMessageRu(
-      {
-        runId: run.id,
-        title: routine.title,
-        description: routine.description,
-        confirmation: routine.confirmation as "button" | "checklist",
-        items: run.items,
-        itemsDone: run.itemsDone,
-      },
-      loaded.reminder,
-    );
+    message = buildRoutineMessageRu(await routineMessageInput(db, routine, run), loaded.updated ? "updated" : loaded.reminder ? "reminder" : "ask");
   } else {
     return cancel("unknown_kind");
   }
