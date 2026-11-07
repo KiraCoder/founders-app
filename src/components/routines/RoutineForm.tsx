@@ -25,7 +25,10 @@ export function RoutineForm({
   const [state, formAction, pending] = useActionState<RoutineFormState, FormData>(action, {});
   const [kind, setKind] = useState(initial.scheduleKind);
   const [confirmation, setConfirmation] = useState(initial.confirmation);
-  const d = options.defaults;
+  const [assignee, setAssignee] = useState(initial.assignee);
+  // A founder's routine has its own defaults (the ask + one reminder), not the staff chase.
+  const forFounder = assignee.startsWith("user:");
+  const d = forFounder ? options.founderDefaults : options.defaults;
   const fe = state.fieldErrors;
   return (
     <form action={formAction} className={`card flex flex-col gap-4 p-4 ${pending ? "opacity-60" : ""}`} aria-label="Routine">
@@ -42,7 +45,7 @@ export function RoutineForm({
       <div className="grid gap-3 md:grid-cols-2">
         <label className="flex flex-col gap-1">
           <span className="label">Who does it</span>
-          <select className="input" name="assignee" defaultValue={initial.assignee} required>
+          <select className="input" name="assignee" defaultValue={initial.assignee} required onChange={(e) => setAssignee(e.target.value)}>
             <option value="">Pick a person or a founder…</option>
             <optgroup label="People (via Telegram)">
               {options.people.map((p) => (
@@ -160,8 +163,9 @@ export function RoutineForm({
         </label>
       </fieldset>
       <p className="text-[12px] text-muted">
-        Defaults come from the person&apos;s chase settings, else the global ones (Settings → Team on Telegram). Quiet hours always apply.
-        Founders get their routines through their own channel and rules.
+        {forFounder
+          ? "A founder's routine: by default the ask and at most one reminder, no escalation; set the fields to change that. It arrives through the founder's own channel and rules (quiet hours, folded into the summary when the day's pushes are used up)."
+          : "Defaults come from the person's chase settings, else the global ones (Settings → Team on Telegram). Quiet hours always apply."}
       </p>
 
       <div className="flex flex-wrap items-center gap-2">

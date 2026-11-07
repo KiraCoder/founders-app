@@ -286,6 +286,8 @@ How it works (all in `src/server/notifications/`):
    - **Urgent tasks**: pushes about tasks with priority *urgent* do not use that budget but
      have their own cap of **2 per day**; beyond that they are parked too. Only a notification
      of kind `urgent` (none is created automatically today) skips the budget entirely.
+   - **Founder routines** (see *Routines*): their messages go out only while the budget has
+     room but are **not counted** in it; with the budget full they are parked.
    - **Overdue tasks** (Settings → Notifications → *Overdue tasks*, per founder): how the
      chase-day pushes go out. **One push per task** (`separate`, the behaviour described
      above). **One grouped push** (`grouped`, **the default for both founders** — their
@@ -539,10 +541,21 @@ founder (their normal channel and rules) — e.g. *Kadyr: pick up Wildberries re
   daily cap applies. **Escalation** once per run: a push to both founders ("Elmurat hasn't finished
   "1C…" today — missing: Jobutify, Alura Brand"), following the founders' rules (quiet hours, budget,
   folded into the morning summary). A founder's own routine escalates to the other founder.
+  A run that is already open still escalates when the person becomes unreachable during the day
+  (`/stop`, paused, bot switched off): no more reminders go to them, and the founders' line says why
+  ("… — stopped the bot (/stop), so no more reminders").
 - **Missed runs are recorded**: the first tick of the next day closes yesterday's unfinished run as
   *partly* or *missed* and cancels what was still waiting; the next run happens as scheduled.
-- **Founder routines** arrive like any other founder push (Telegram or the dev inbox, budget, quiet
+  A day on which the person was **unreachable on Telegram the whole time** (from the ask time to
+  "remind until") gets **no run at all** — nothing is asked, so nothing is recorded as missed; the
+  Routines page shows "Not reachable on Telegram" for them.
+- **Founder routines** arrive like any other founder push (Telegram or the dev inbox, quiet
   hours; parked ones become "Routine still open: …" in the next summary), buttons *Done* / *✓ item*.
+  They have **their own defaults**, not the staff chase: the ask plus **at most one reminder**
+  (3 hours later, until the end of the staff working day), no escalation — each field can still be
+  set per routine. They **do not use the founder's "max other pushes per day"**: a routine message
+  goes out only while that budget still has room and is not counted in it, so task pushes are never
+  crowded out; with the budget used up it is parked and listed in the next summary instead.
 - **Security**: a button carries a one-time token bound to its owner; a run can be ticked only by the
   routine's assignee (another person's or a forged token does nothing; `tickRoutineRun` re-checks).
 - **The founder's first routine — Elmurat, daily 1C financial entries for all companies**: Mon–Sat,

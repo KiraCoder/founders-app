@@ -3,6 +3,7 @@ import { and, asc, desc, eq, inArray, isNull, like, lte, or, sql } from "drizzle
 import { addDays, todayInTimeZone, zonedTimeToUtc, type IsoDate } from "@/lib/dates";
 import {
   describeSchedule,
+  effectiveFounderRoutineChase,
   effectiveRoutineChase,
   OPEN_RUN_STATUSES,
   routineChaseOverrideSchema,
@@ -56,12 +57,24 @@ export function parseRoutineOverride(raw: unknown): RoutineChaseOverride {
   return Object.fromEntries(Object.entries(r.data).filter(([, v]) => v !== undefined)) as RoutineChaseOverride;
 }
 
-/** The staff settings that apply to the assignee: global defaults ← the person's override (founders: the global defaults). */
+/**
+ * The staff settings that apply to the assignee: global defaults ← the person's override (founders:
+ * the global defaults, used only for "remind until"; see `routineChase`).
+ */
 export async function settingsForAssignee(db: Db, personId: string | null, defaults?: StaffSettings): Promise<StaffSettings> {
   const d = defaults ?? (await loadStaffDefaults(db));
   if (!personId) return d;
   const [p] = await db.select({ staffChase: people.staffChase }).from(people).where(eq(people.id, personId));
   return effectiveStaffSettings(d, parsePersonOverride(p?.staffChase));
+}
+
+/**
+ * The chase in force for a routine: a person's routine uses their staff settings (`s`) ← the
+ * routine's override; a founder's routine its own defaults (FOUNDER_ROUTINE_CHASE: the ask + one
+ * reminder) ← the override. `s` is the assignee's settings (founders: the global staff defaults).
+ */
+export function routineChase(r: Pick<Routine, "assigneePersonId">, s: StaffSettings, override: RoutineChaseOverride): RoutineChase {
+  return r.assigneePersonId ? effectiveRoutineChase(s, override) : effectiveFounderRoutineChase(s, override);
 }
 
 export function routineTimes(r: Pick<Routine, "time" | "timezone">, chase: RoutineChase, day: IsoDate) {
@@ -177,8 +190,8 @@ export async function listRoutines(ctx: ServiceContext, filter: RoutineFilter = 
       schedule,
       scheduleText: describeSchedule(schedule),
       override,
-      chase: effectiveRoutineChase(s, override),
-      defaults: effectiveRoutineChase(s, {}),
+      chase: routineChase(r, s, override),
+      defaults: routineChase(r, s, {}),
       today: todayBy.get(r.id) ?? null,
       reachable: r.assigneePersonId ? reachable.has(r.assigneePersonId) : true,
     };
@@ -288,7 +301,7 @@ export async function listRoutineRuns(ctx: ServiceContext, id: string, limit = 6
     .orderBy(desc(routineRuns.runDate))
     .limit(Math.min(Math.max(limit, 1), 366));
   const s = await settingsForAssignee(ctx.db, r.assigneePersonId);
-  const chase = effectiveRoutineChase(s, parseRoutineOverride(r.chase));
+  const chase = routineChase(r, s, parseRoutineOverride(r.chase));
   return rows.map((run) => {
     const done = new Set(run.itemsDone);
     return {
@@ -488,5 +501,6 @@ export async function routineFormOptions(ctx: ServiceContext) {
     people: persons.map((p) => ({ id: p.id, name: p.short || p.name })),
     companies: comps,
     defaults: effectiveRoutineChase(defaults, {}),
+    founderDefaults: effectiveFounderRoutineChase(defaults, {}),
   };
 }

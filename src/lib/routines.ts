@@ -90,7 +90,10 @@ export interface RoutineChase {
 }
 
 /** The person's (or global) staff settings ← the routine's override. */
-export function effectiveRoutineChase(s: StaffSettings, o: RoutineChaseOverride): RoutineChase {
+export function effectiveRoutineChase(
+  s: Pick<StaffSettings, "chaseEveryMinutes" | "workEnd" | "escalateAt" | "escalateAfterChases" | "maxPerDay">,
+  o: RoutineChaseOverride,
+): RoutineChase {
   return {
     chaseEveryMinutes: o.chaseEveryMinutes ?? s.chaseEveryMinutes,
     chaseUntil: o.chaseUntil ?? s.workEnd,
@@ -98,6 +101,23 @@ export function effectiveRoutineChase(s: StaffSettings, o: RoutineChaseOverride)
     escalateAfterChases: o.escalateAfterChases ?? s.escalateAfterChases,
     maxPerDay: o.maxPerDay ?? s.maxPerDay,
   };
+}
+
+/**
+ * Founder routines do not use the staff chase (every 120 min, up to 12 a day): a founder gets the
+ * ask and at most ONE reminder (3 hours later, before the end of the staff working day), and no
+ * escalation unless the routine sets one. Every field can still be set per routine.
+ */
+export const FOUNDER_ROUTINE_CHASE: Omit<RoutineChase, "chaseUntil"> = {
+  chaseEveryMinutes: 180,
+  escalateAt: null,
+  escalateAfterChases: 0,
+  maxPerDay: 2,
+};
+
+/** The founder routine defaults ← the routine's override (`s`: global staff defaults, for "until"). */
+export function effectiveFounderRoutineChase(s: Pick<StaffSettings, "workEnd">, o: RoutineChaseOverride): RoutineChase {
+  return effectiveRoutineChase({ ...FOUNDER_ROUTINE_CHASE, workEnd: s.workEnd }, o);
 }
 
 /**

@@ -75,7 +75,8 @@ export interface DispatchOptions {
 }
 
 const PRIORITY_RANK = sql<number>`case ${notificationsOutbox.priority} when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end`;
-const NOT_TASK_PUSH_KINDS = [...SUMMARY_KINDS, "urgent"];
+/** Kinds that never count against the "max other pushes per day" budget. */
+const NOT_BUDGET_KINDS = [...SUMMARY_KINDS, "urgent", "routine_reminder"];
 
 /** An outbox row addressed to a founder (user_id set). Person rows go through staff-dispatcher.ts. */
 export type FounderItem = OutboxItem & { userId: string };
@@ -95,13 +96,18 @@ export function isUrgentItem(item: Pick<OutboxItem, "kind" | "priority">): boole
  * - "summary": morning summary / evening check, one each per day;
  * - "urgent": an explicit `urgent` notification, outside any budget;
  * - "urgent_task": a push about a task with priority urgent, URGENT_TASK_PUSHES_PER_DAY;
+ * - "routine": a founder routine's ask / reminder. It goes out only while the founder's normal
+ *   budget has room, but does NOT use it (a routine never starves task pushes); with the budget
+ *   full it is parked and listed in the next summary ("Routine still open: …"). The routine's own
+ *   "max messages per day" (default: the ask + one reminder) caps it;
  * - "normal": everything else, the founder's "max other pushes per day".
  */
-export type BudgetClass = "summary" | "urgent" | "urgent_task" | "normal";
+export type BudgetClass = "summary" | "urgent" | "urgent_task" | "routine" | "normal";
 
 export function budgetClass(item: Pick<OutboxItem, "kind" | "priority">): BudgetClass {
   if (isSummaryKind(item.kind)) return "summary";
   if (item.kind === "urgent") return "urgent";
+  if (item.kind === "routine_reminder") return "routine";
   return item.priority === "urgent" ? "urgent_task" : "normal";
 }
 
@@ -144,10 +150,11 @@ function taskTouchFilter(taskId: string): SQL {
   return and(eq(notificationsOutbox.taskId, taskId), ne(notificationsOutbox.kind, "staff_update"))!;
 }
 
+/** The rows that use the budget of class `cls` ("routine" is measured against the normal budget). */
 function budgetFilter(cls: Exclude<BudgetClass, "urgent">, item: FounderItem): SQL {
   if (cls === "summary") return eq(notificationsOutbox.kind, item.kind);
   return and(
-    notInArray(notificationsOutbox.kind, NOT_TASK_PUSH_KINDS),
+    notInArray(notificationsOutbox.kind, NOT_BUDGET_KINDS),
     // Tasks listed inside a grouped overdue push (sent rows bundled into it) do not count:
     // the grouped push itself is the one push.
     isNull(notificationsOutbox.bundledIntoId),
@@ -167,7 +174,8 @@ export const FOLD_BEFORE_SUMMARY_MINUTES = 60;
  * after its time.
  */
 async function shouldFoldIntoSummary(db: Db, item: FounderItem, now: Date, tz: string, prefs: Preferences): Promise<boolean> {
-  if (budgetClass(item) !== "normal") return false;
+  const cls = budgetClass(item);
+  if (cls !== "normal" && cls !== "routine") return false;
   const today = todayInTimeZone(now, tz);
   const summaryAt = zonedTimeToUtc(today, prefs.morningSummaryTime, tz).getTime();
   const window = FOLD_BEFORE_SUMMARY_MINUTES * 60_000;
@@ -236,7 +244,8 @@ async function collectParked(ctx: ServiceContext): Promise<{ drop: string[]; ite
     }
     if (r.kind === "routine_reminder") {
       // A parked routine ask / reminder: one line per run, while the run is still open.
-      const loaded = await loadRoutineForMessage(ctx.db, { ...r, scheduledFor: new Date(8.64e15) }, { userId: ctx.user.id });
+      // Only "is the run still open": the per-slot duplicate check makes no sense for a summary line.
+      const loaded = await loadRoutineForMessage(ctx.db, r, { userId: ctx.user.id }, { checkSlot: false });
       if ("skip" in loaded) {
         drop.push(r.id);
         continue;
@@ -576,6 +585,8 @@ async function processItem(
   if (cls === "summary") {
     if ((await usedToday(db, founderItem, now, tz, budgetFilter(cls, founderItem))) >= 1) return cancel("already_sent_today");
   } else if (cls !== "urgent") {
+    // A routine message is measured against the normal budget (sent only while it has room) but
+    // is not counted in it (budgetFilter leaves routine rows out).
     const cap = cls === "urgent_task" ? URGENT_TASK_PUSHES_PER_DAY : prefs.maxOtherPerDay;
     if ((await usedToday(db, founderItem, now, tz, budgetFilter(cls, founderItem))) >= cap) {
       await finish({

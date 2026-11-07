@@ -149,7 +149,7 @@ export default async function RoutinePage({ params }: { params: Promise<{ id: st
 
       {r.status !== "archived" && (
         <Section title="Edit">
-          <RoutineForm action={updateRoutineAction} initial={initial} options={{ ...options, defaults: view.defaults }} submitLabel="Save routine" />
+          <RoutineForm action={updateRoutineAction} initial={initial} options={{ ...options, defaults: view.assigneeKind === "person" ? view.defaults : options.defaults }} submitLabel="Save routine" />
         </Section>
       )}
     </>

@@ -22,6 +22,8 @@ export interface RoutineFormOptions {
   companies: { id: string; name: string }[];
   /** What a blank chase field means (the person's settings or the global staff defaults). */
   defaults: RoutineChase;
+  /** What a blank chase field means for a founder's routine (the ask + one reminder). */
+  founderDefaults: RoutineChase;
 }
 
 export const EMPTY_ROUTINE: RoutineFormValues = {
