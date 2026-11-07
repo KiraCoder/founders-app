@@ -65,6 +65,9 @@ describe("row level security after migrate", () => {
         "org_departments",
         "org_functions",
         "org_change_log",
+        "oauth_clients",
+        "oauth_auth_codes",
+        "oauth_tokens",
       ]),
     );
     expect(tables.filter((t) => !t.rls).map((t) => t.name)).toEqual([]);

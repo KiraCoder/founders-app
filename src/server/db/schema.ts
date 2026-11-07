@@ -1724,3 +1724,79 @@ export const orgJourneySteps = pgTable(
   },
   (t) => [index("org_journey_steps_company_idx").on(t.companyId)],
 );
+
+// ---------------------------------------------------------------------------
+// Claude connector: OAuth 2.1 for the remote MCP server (0030)
+// ---------------------------------------------------------------------------
+
+/**
+ * Clients registered through dynamic client registration (RFC 7591), e.g. claude.ai.
+ * Public clients (`token_endpoint_auth_method = none`, PKCE only) have no secret; confidential
+ * ones get a secret that is shown once and stored as SHA-256 only.
+ */
+export const oauthClients = pgTable("oauth_clients", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  /** The public `client_id` handed to the client (random, not the row id). */
+  clientId: text("client_id").notNull().unique(),
+  clientSecretHash: text("client_secret_hash"),
+  clientName: text("client_name").notNull(),
+  redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+  tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("none"),
+  clientUri: text("client_uri"),
+  createdAt: createdAt(),
+});
+
+/** One-time authorization codes (10 minutes, PKCE S256). Only the SHA-256 of the code is kept. */
+export const oauthAuthCodes = pgTable(
+  "oauth_auth_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    codeHash: text("code_hash").notNull().unique(),
+    clientId: uuid("client_id")
+      .notNull()
+      .references(() => oauthClients.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    scope: text("scope").notNull(),
+    resource: text("resource"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("oauth_auth_codes_expires_idx").on(t.expiresAt)],
+);
+
+/**
+ * Access + refresh token pairs (opaque, SHA-256 stored). Every refresh issues a new pair in the
+ * same `grant_id` and marks the old one rotated; presenting an already-rotated refresh token
+ * revokes the whole grant (reuse detection). A grant is one "connected app" in Settings.
+ */
+export const oauthTokens = pgTable(
+  "oauth_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    grantId: uuid("grant_id").notNull(),
+    clientId: uuid("client_id")
+      .notNull()
+      .references(() => oauthClients.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    accessTokenHash: text("access_token_hash").notNull().unique(),
+    refreshTokenHash: text("refresh_token_hash").notNull().unique(),
+    scope: text("scope").notNull(),
+    resource: text("resource"),
+    accessExpiresAt: timestamp("access_expires_at", { withTimezone: true }).notNull(),
+    refreshExpiresAt: timestamp("refresh_expires_at", { withTimezone: true }).notNull(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    /** Set when the pair was replaced by a refresh (rotation). */
+    rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+    /** Set when the grant was revoked (Settings → Connected apps, revocation endpoint, reuse). */
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("oauth_tokens_grant_idx").on(t.grantId), index("oauth_tokens_user_idx").on(t.userId)],
+);

@@ -1173,12 +1173,88 @@ Content-Type: application/json
   decided per number and period by the newest run that mentions it, so later calls about other
   numbers never hide it.
 
+## Connect to Claude
+
+The **Founder Cockpit connector** lets either founder say in any Claude chat “save this plan to
+the Founder Cockpit for Kiwi Go” — Claude then creates the project and its tasks here, assigned
+to founders or staff, and the Cockpit chases them like any other task (morning summary,
+Telegram reminders, staff pushes). It is a remote MCP server at `/api/mcp` with OAuth sign-in;
+nothing to install and no key to copy.
+
+### Connect it (once per founder, about a minute)
+
+1. Open **claude.ai** (web or desktop app) and sign in to your Claude account.
+2. Click your name (bottom left) → **Settings** → **Connectors**.
+3. Scroll down and click **Add custom connector**.
+4. Name: `Founder Cockpit`. Remote MCP server URL:
+   `https://founders-app-one.vercel.app/api/mcp` — leave *Advanced settings* (client ID /
+   secret) empty. Click **Add**.
+5. Click **Connect** next to *Founder Cockpit*. A Founder Cockpit tab opens: sign in if asked
+   (your normal Cockpit email and password), read the consent screen (“Allow Claude to read and
+   create projects and tasks in Founder Cockpit?”) and click **Allow**. The tab closes and the
+   connector shows as connected.
+6. In a chat, make sure the connector is switched on (the **tools / “Search and tools”** button
+   under the message box → *Founder Cockpit* on). Then ask, for example:
+   - “Save this plan to the Founder Cockpit for Kiwi Go, project *Osh launch*, due 15 December:
+     Aibek hires 5 couriers by 20 Nov, Talant does the price list, I call the bank.”
+   - “What's overdue at Kiwi Go?” · “Mark ‘Call the bank’ done” · “Add a comment to …”
+
+Claude asks before it changes anything (you can choose *Always allow* per tool). If a name
+fits several people or companies (“Aibek” at Kiwi Go), nothing is saved and Claude asks you
+which one. Claude for Team / Enterprise: an owner adds the custom connector once under
+*Organization settings → Connectors*, then each founder clicks **Connect** and signs in.
+
+**What it can do** (tools): `list_companies`, `list_people(company)`, `list_projects(company?)`,
+`get_project(project)`, `list_tasks(company?, project?, assignee?, status?, overdue?)`,
+`create_project(company, name, description?, start_date?, due_date?, tasks[])` (all or nothing),
+`add_tasks(project, tasks[])`, `update_task(id, …)`, `complete_task(id)`,
+`add_task_comment(id, text)`. Each task: `title`, `assignee` (a founder, `me`, or a person who
+works at that company), `due_date`, `priority`, `notes`, `private`.
+
+**Rules.** The connector acts as the founder who clicked Allow, through the same services and
+access rules as the app: shared tasks are company tasks both founders see, a `private` task is
+a personal todo only you see (and can only be yours), staff can only get tasks of a company they
+work for. It cannot see salaries, the holding or numbers, and cannot delete anything. Only
+founders can connect (a staff login gets “Only the founders can connect apps”).
+
+**Disconnect**: Settings → **Connected apps · Claude** → *Disconnect* (takes effect at once), or
+remove the connector in Claude.
+
+### How it works (for developers)
+
+- `POST /api/mcp` — MCP **Streamable HTTP** transport from `@modelcontextprotocol/sdk` (pinned
+  1.32.2, `WebStandardStreamableHTTPServerTransport`), stateless, JSON responses; GET → 405.
+  `src/server/http/mcp.ts`, tools in `src/server/mcp/tools.ts`, name resolution in
+  `src/server/mcp/resolve.ts`.
+- OAuth 2.1 (`src/server/services/oauth.ts`, `src/server/http/oauth.ts`): dynamic client
+  registration `POST /api/oauth/register` (RFC 7591; 10 per IP per minute), consent page
+  `GET /oauth/authorize` (signed-in founder) → `POST /api/oauth/authorize` (same-origin + HMAC
+  consent token), `POST /api/oauth/token` (authorization_code with **PKCE S256 only**,
+  refresh_token), `POST /api/oauth/revoke` (RFC 7009). Metadata:
+  `/.well-known/oauth-authorization-server` (RFC 8414) and
+  `/.well-known/oauth-protected-resource` (RFC 9728, also at `…/api/mcp`); a 401 from
+  `/api/mcp` carries `WWW-Authenticate: Bearer resource_metadata="…"`.
+- Tokens are opaque random strings, stored only as SHA-256: access 1 hour, refresh 30 days,
+  rotated on every refresh (re-using an old refresh token revokes the whole connection), codes
+  10 minutes and one-time. Tables `oauth_clients`, `oauth_auth_codes`, `oauth_tokens`
+  (migration `0030_oauth_connector.sql`, RLS + revoke).
+- Issuer / resource URL: `APP_URL` when set, else the address the request came to. Set
+  `APP_URL=https://founders-app-one.vercel.app` on Vercel so preview URLs never become the issuer.
+- Middleware: only `/api/mcp`, `/api/oauth/register`, `/api/oauth/token`, `/api/oauth/revoke`
+  (exact paths) and `/.well-known/*` skip the session check; `/oauth/authorize` and
+  `/api/oauth/authorize` need the founder's session.
+- Try it locally with the MCP Inspector: `npx @modelcontextprotocol/inspector`, transport
+  *Streamable HTTP*, URL `http://localhost:3000/api/mcp`, then *Open Auth Settings → Quick OAuth
+  Flow*.
+
 ## Folder map
 
 ```
 src/
   app/
     login/                 Sign-in page + server action
+    oauth/authorize/       Claude connector consent screen (OAuth)
+    .well-known/           OAuth metadata (authorization server, protected resource)
     (app)/                 Signed-in app (shell layout)
       page.tsx             Today
       tasks/               Tasks (views, filters, inline edit)
@@ -1194,6 +1270,8 @@ src/
       dev/notifications/   Dev inbox (dev tools only)
       actions.ts           Server actions (call the service layer)
     api/v1/                REST API (thin, calls the service layer); api/v1/ingest: the browser extension (Bearer key)
+    api/mcp/               Founder Cockpit MCP server for Claude (OAuth bearer token)
+    api/oauth/             OAuth: register, token, revoke (public), authorize (consent POST, session)
     api/telegram/webhook/  Telegram webhook (secret header)
     api/cron/tick/         Scheduler tick (CRON_SECRET)
   components/              UI: shell (sidebar, top bar, tabs), tasks, projects, people, settings
@@ -1208,7 +1286,8 @@ src/
     services/              Business logic + access rules (tasks, projects, companies, people, salaries,
                            people-import, metrics, metrics-import, connectors, search, notifications,
                            holding, holding-asks, holding-files, ai-roles, ai-role-defs, ai-role-editor, org, org-expert,
-                           extension, staff (Team on Telegram), staff-tasks (what a person may do), task-comments, routines)
+                           extension, staff (Team on Telegram), staff-tasks (what a person may do), task-comments, routines,
+                           oauth (Claude connector: clients, codes, tokens, connected apps))
     ai/                    AI roles: provider.ts (LlmProvider, NoneProvider), finance-rules.ts, month-values.ts,
                            narrative.ts (prompt builder, no salaries), orchestrator.ts (tick + morning-summary dedupe)
     storage/               FileStorage for documents: local .data/uploads, Supabase placeholder
@@ -1220,6 +1299,8 @@ src/
                            routine-planner.ts (routines: open runs, ask, remind, escalate, close)
     http/request-guard.ts  Same-origin + JSON check for mutating /api/v1 calls
     http/ingest.ts         POST /api/v1/ingest: key auth, CORS for chrome-extension://, limits, log
+    http/oauth.ts, mcp.ts  Claude connector: OAuth endpoints and the /api/mcp handler
+    mcp/                   MCP tools (tools.ts) and name → id resolution (resolve.ts)
   middleware.ts            Redirects signed-out users to /login (401 JSON for /api), CSRF guard
 drizzle/                   SQL migrations (generated by drizzle-kit)
 scripts/                   db:migrate(:deploy) / db:seed(:deploy) / db:reset / cron:tick / telegram:poll
